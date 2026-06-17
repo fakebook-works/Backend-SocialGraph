@@ -1,65 +1,62 @@
 CREATE SCHEMA IF NOT EXISTS fb;
 SET search_path TO fb;
 
--- Object type codes (int)
--- 1  user
--- 2  page
--- 3  group
+-- ** Social Graph object ** --
+-------------------------------
+-- 0  user {first_name, last_name, nickname, bio, gender, birthdate, location}
+-- 1  group {name, privacy}
 
--- 3  post
--- 22 poll
--- 8  event
--- 4  comment
--- 24 reel
--- 12 story
+-- 2  post {content}
+-- 3 reel {content}
+-- 4 story {expire}
+-- 5  comment {content}
 
--- 5  media
--- 13 album
+-- 6  media {type, media_id}
+-- 7 album {title, description}
 
+-- ** Social Graph association ** --
+------------------------------------
+-- 0  friend (user<->user)
 
--- 18 ad
--- 19 ad_account
+-- 1  followed (user->user)
+-- 2  followed_by (user<-user)
 
--- 20 notification
+-- 3  reacted (user->post/comment/reel/story)
+-- 4  reacted_by (post/comment/reel/story->user)
 
--- Association type codes (int)
--- 1  friend
--- 2  follow
--- 3  like
--- 4  react
--- 5  comment_on
--- 6  post_to
--- 7  share
--- 8  tag
--- 9  member_of_group
--- 10 admin_of_group
--- 11 invited_to_event
--- 12 going_to_event
--- 13 interested_in_event
--- 14 message_to
--- 15 media_in_album
--- 16 page_follower
--- 17 blocks
--- 18 mute
--- 19 report
--- 20 save
--- 21 reply_to_comment
--- 22 mentioned_in
--- 23 attached_photo
--- 24 attached_video
--- 25 marketplace_saved
--- 26 follows_page
--- 27 joined_community
--- 28 react_to_comment
--- 29 review_of
--- 30 purchased
+-- 5  authored (user->post/comment/reel/story)
+-- 6  authored_by (post/comment/reel/story->user)
 
+-- 7  comment (post/reel/story/comment->comment)
+-- 8  share (post/story->post/reel)
 
+-- 9  published (group->post)
+-- 10  published_in (post->group)
 
+-- 11  tagged (post->user)
+-- 12  tagged_in (user->post)
 
+-- 13  member (user->group)
+-- 14  have_member (group->user)
+
+-- 15 admin (user->group)
+-- 16 have_admin (group->user)
+
+-- 17 watched (user->reel/story)
+-- 18 watched_by (reel/story->user)
+
+-- 19 saved (user->post/reel)
+
+-- 20 owned (user/group->album)
+-- 21 contained (post/reel/story/abum->media)
+
+-- 22 mentioned (post/reel/story/comment->user)
+
+-- ** Social Graph table ** --
+------------------------------
 CREATE TABLE Objects (
     id BIGINT PRIMARY KEY,
-    type SMALLINT NOT NULL,
+    otype SMALLINT NOT NULL,
     version SMALLINT NOT NULL DEFAULT 1,
     data JSONB
 );
@@ -72,6 +69,7 @@ CREATE TABLE Associations (
     data JSONB,
     PRIMARY KEY (id1, atype, id2)
 );
+CREATE INDEX idx_associations ON Associations (id1, atype, id2);
 CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 
 CREATE TABLE Association_Counts (
