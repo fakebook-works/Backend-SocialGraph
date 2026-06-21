@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <AssemblyName>SocialGraph.Api</AssemblyName>
+        <RootNamespace>SocialGraph.Api</RootNamespace>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="HotChocolate.ApolloFederation" Version="16.2.2" />
+        <PackageReference Include="HotChocolate.AspNetCore" Version="16.2.2" />
+        <PackageReference Include="HotChocolate.Data" Version="16.2.2" />
+        <PackageReference Include="HotChocolate.Data.EntityFramework" Version="16.2.2" />
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.26" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.*" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.*">
+          <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+          <PrivateAssets>all</PrivateAssets>
+        </PackageReference>
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.*" />
+        <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    </ItemGroup>
+
+</Project>

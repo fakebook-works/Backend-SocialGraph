@@ -1,0 +1,6 @@
+@SocialGraphService_HostAddress = http://localhost:5223
+
+GET {{SocialGraphService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
