@@ -109,20 +109,20 @@ Mutation
  (dùng hàm update Object như bthg, nếu sửa tên gọi "SearchServiceUpdateIndex" API (user id, name))
 - xoá user (dùng hàm delete Object, gọi "SearchServiceDeleteIndex" API (user id), "MessengerServiceDeleteUser" API (user id), "AuthenticationServiceDeleteUser" API (user id),
 "RecommendServiceDeleteUserEmbedding" API (user id))
-- upload file (truyền vào file name, bên trong tạo tên file mới độc nhất, tạo url tạm thời và vĩnh vễn, trả về url tạm thời và vĩnh viễn)
-- đổi avt bằng ảnh upload (truyền vào url vĩnh viễn của ảnh, dùng nó tạo object media, check xem hiện tại có asso avt chưa, nếu có xoá asso cũ đi, tạo asso avt mới trỏ đến object media mới)
-- đổi avt bằng ảnh đã có (truyền vào id của object media, check xem hiện tại có asso avt chưa, nếu có xoá asso cũ đi, tạo asso avt mới trỏ đến object media mới)
+- upload file do media/upload service hoặc frontend flow bên ngoài xử lý; SocialGraph chỉ nhận URL đã upload xong
+- đổi avt bằng ảnh upload (truyền vào url ảnh gốc và url ảnh sau khi crop; url gốc tạo object media và asso owned, url crop lưu trực tiếp vào data user)
+- đổi avt bằng ảnh đã có (truyền vào url ảnh sau khi crop; không tạo thêm media, chỉ patch avatar trong data user)
 - tạo group (gọi "SearchServiceCreateIndex" API (group id, name), dùng hàm add Object và tao asso admin trỏ đến user tạo group)
 - sửa group (dùng hàm update Object như bthg, nếu sửa tên gọi "SearchServiceUpdateIndex" API (group id, name))
 - xoá group (dùng hàm delete Object, gọi "SearchServiceDeleteIndex" API (group id))
-- đổi avt group bằng ảnh upload (truyền vào url vĩnh viễn của ảnh, dùng nó tạo object media, check xem hiện tại có asso avt chưa, nếu có xoá asso cũ đi, tạo asso avt mới trỏ đến object media mới)
-- đổi avt group bằng ảnh đã có (truyền vào id của object media, check xem hiện tại có asso avt chưa, nếu có xoá asso cũ đi, tạo asso avt mới trỏ đến object media mới)
+- đổi avt group hiện chỉ truyền vào url ảnh sau khi crop và patch trực tiếp vào data group
+- nếu sau này cần lưu ảnh gốc group avatar thì mở rộng giống user avatar, tạo media và owned với owner là group id
 - thêm thành viên group (thêm asso member trỏ đến user)
 - xoá thành viên (xoá asso member trỏ đến user)
 - thêm quản trị (xoá asso member, tạo asso admin))
-- tạo post feed (truyền vào list URL vĩnh viễn của media kèm type của chúng, lần lượt tạo object media cho từng URL, tạo object post và tạo asso contain đến các media vừa tạo, tạo asso authored từ user trỏ đến)
+- tạo post feed (truyền vào list URL media đã upload kèm type của chúng, lần lượt tạo object media cho từng URL, tạo object post và tạo asso contain đến các media vừa tạo, tạo asso authored từ user trỏ đến)
 gọi SearchServiceCreateIndex API (post id, content), gọi RecommendServiceCreatePostEmbedding API (post id, content, danh sách URL)
-- tạo post group (truyền vào list URL vĩnh viễn của media kèm type của chúng, lần lượt tạo object media cho từng URL, tạo object post và tạo asso contain đến các media vừa tạo, tạo asso authored từ user trỏ đến, tạo asso published từ group trỏ vào)
+- tạo post group (truyền vào list URL media đã upload kèm type của chúng, lần lượt tạo object media cho từng URL, tạo object post và tạo asso contain đến các media vừa tạo, tạo asso authored từ user trỏ đến, tạo asso published từ group trỏ vào)
 gọi SearchServiceCreateIndex API (post id, content), gọi RecommendServiceCreatePostEmbedding API (post id, content, danh sách URL)
 - sửa post (privacy) 
 - xoá post ( xoá post kèm asso kèm theo gọi RecommendServiceDeletePostEmbedding API (post id), gọi SearchServiceDeleteIndex API (post id))

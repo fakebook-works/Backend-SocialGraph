@@ -1,0 +1,1096 @@
+# SocialGraph.Api - Tai Lieu Chi Tiet Project Hien Tai
+
+Tai lieu nay mo ta code hien tai cua `SocialGraph.Api`: cau truc file, cong dung, API, service methods, input/output va logic chinh. Muc tieu la de ban hoac agent khac doc vao co the lam viec voi Gateway va cac microservice con lai ma khong phai doc toan bo source truoc.
+
+## 1. Vai tro trong he thong microservice
+
+`SocialGraph.Api` la service nam giu social graph cua ung dung clone Facebook:
+
+- Luu toan bo thuc the xa hoi duoi dang generic object: user, group, post, reel, story, comment, media.
+- Luu moi quan he xa hoi duoi dang association: friend, follow, like, authored, group member, comment, save, watched, blocked...
+- Expose GraphQL Federation cho Gateway/Frontend.
+- Expose REST internal cho Recommendation service lay candidate post/reel.
+- Goi REST sang service khac theo co che best-effort:
+  - Authentication: tao/xoa account.
+  - Messenger: tao/xoa user trong chat.
+  - Search: tao/cap nhat/xoa index.
+  - Recommendation: tao/xoa embedding.
+  - Notification: tao notification.
+  - Billing: doc entitlement `verified` va `feed_boost_author`.
+
+Ranh gioi quan trong:
+
+- Frontend/Gateway chi nen goi SocialGraph qua GraphQL Federation.
+- REST trong SocialGraph chi danh cho service-to-service.
+- PostgreSQL la source of truth.
+- Redis chi la cache.
+- Billing khong nam trong SocialGraph DB; SocialGraph chi doc Billing qua HTTP.
+
+## 2. Cau truc file hien tai
+
+```text
+SocialGraph.Api/
+  Program.cs
+  SocialGraph.Api.csproj
+  appsettings.json
+  Project.md
+  databaseSchemaSocialGraph.md
+  databaseSchemaNotification.md
+  billing-service-contract.md
+  socialgraph-service-notes.md
+  Contracts/
+    SocialGraphContracts.cs
+  Database/
+    Objects.cs
+    Associations.cs
+    MyDbContext.cs
+  RestAPI/
+    Controller.cs
+  Service/
+    GraphConstants.cs
+    GraphJson.cs
+    GraphResults.cs
+    ObjectTypeRules.cs
+    IObjectService.cs
+    ObjectService.cs
+    IAssociationService.cs
+    AssociationService.cs
+    IUserGraphService.cs
+    UserGraphService.cs
+    IGroupGraphService.cs
+    GroupGraphService.cs
+    IContentGraphService.cs
+    ContentGraphService.cs
+    ICandidateService.cs
+    CandidateService.cs
+    IExternalServiceClient.cs
+    ExternalServiceClient.cs
+    IBillingClient.cs
+    BillingClient.cs
+  SubGraphQL/
+    Query.cs
+    Mutation.cs
+  Utils/
+    IdGeneratorUtil.cs
+```
+
+### Program.cs
+
+Dang ky dependency injection va endpoint:
+
+- `AddControllers()`: bat REST controller internal.
+- `AddHttpClient("external-services")`: client goi service ngoai.
+- `AddDbContext<MyDbContext>()`: ket noi PostgreSQL bang connection string `PostgreSQL`.
+- `IConnectionMultiplexer`: ket noi Redis.
+- Dang ky service:
+  - `IObjectService -> ObjectService`
+  - `IAssociationService -> AssociationService`
+  - `IExternalServiceClient -> ExternalServiceClient`
+  - `IBillingClient -> BillingClient`
+  - `IUserGraphService -> UserGraphService`
+  - `IGroupGraphService -> GroupGraphService`
+  - `IContentGraphService -> ContentGraphService`
+  - `ICandidateService -> CandidateService`
+- GraphQL endpoint: `/graphql`
+- REST controller endpoint: map qua `MapControllers()`.
+
+### SocialGraph.Api.csproj
+
+Target framework va packages:
+
+- `.NET 8`
+- HotChocolate GraphQL/Federation `16.2.2`
+- EF Core
+- Npgsql PostgreSQL provider
+- StackExchange Redis cache package
+- NRedisStack cho RedisJSON
+- Swashbuckle hien co nhung chua cau hinh Swagger UI.
+
+### appsettings.json
+
+Dang co:
+
+- `ConnectionStrings:PostgreSQL`: PostgreSQL database `fakebook`, search path `social_graph`.
+- `ConnectionStrings:Redis`: Redis local.
+- `ExternalServices:*`: URL cac service khac.
+
+Luu y: URL service ngoai hien deu dang la placeholder `http://localhost:5001`. Khi service that co endpoint rieng can cap nhat tai day.
+
+## 3. Database model
+
+### Objects.cs
+
+```csharp
+public class Objects
+{
+    public long id { get; set; }
+    public short otype { get; set; }
+    public string data { get; set; } = "{}";
+}
+```
+
+Y nghia:
+
+- `id`: Snowflake ID.
+- `otype`: loai object.
+- `data`: JSONB luu payload thuc te.
+
+Khong con dung EF DTO typed cho `User`, `Post`, `Group`. DB chi map generic JSONB.
+
+### Associations.cs
+
+```csharp
+public class Associations
+{
+    public long id1 { get; set; }
+    public short atype { get; set; }
+    public long id2 { get; set; }
+    public long time { get; set; }
+}
+```
+
+Y nghia:
+
+- `id1`: object nguon.
+- `atype`: loai quan he.
+- `id2`: object dich.
+- `time`: Unix milliseconds, dung lam score Redis sorted set va sort thoi gian.
+
+### MyDbContext.cs
+
+Map EF:
+
+- Schema mac dinh: `social_graph`.
+- Table `objects`:
+  - primary key: `id`
+  - `data` column type: `jsonb`
+- Table `associations`:
+  - composite primary key: `(id1, atype, id2)`
+  - index `(id1, atype, id2)`
+  - index `(id2, atype, id1)`
+
+## 4. Object types va Association types
+
+File: `Service/GraphConstants.cs`
+
+### Object types
+
+| otype | Name | data JSON |
+|---:|---|---|
+| 0 | User | `avatar`, `name`, `bio`, `gender`, `birthdate`, `location`, `privacy`, `create` |
+| 1 | Group | `avatar`, `name`, `bio`, `privacy`, `create` |
+| 2 | Post | `content`, `privacy`, `create` |
+| 3 | Reel | `content`, `create` |
+| 4 | Story | `content`, `create`, `expire` |
+| 5 | Comment | `content`, `create` |
+| 6 | Media | `type`, `url` |
+
+### Association types
+
+| atype | Name | Huong |
+|---:|---|---|
+| 0 | Friend | user <-> user, inverse chinh no |
+| 1 / 2 | Followed / FollowedBy | user -> user |
+| 3 / 4 | Liked / LikedBy | user -> post/comment/reel/story |
+| 5 / 6 | Authored / AuthoredBy | user -> post/comment/reel/story |
+| 7 | Comment | target -> comment, khong inverse |
+| 8 | Share | source post/story -> new post/reel, khong inverse |
+| 9 / 10 | Published / PublishedIn | group -> post |
+| 11 / 12 | Tagged / TaggedIn | post -> user |
+| 13 / 14 | Member / HaveMember | user -> group |
+| 15 / 16 | Admin / HaveAdmin | user -> group |
+| 17 / 18 | Watched / WatchedBy | user -> reel/story |
+| 19 | Saved | user -> post/reel, khong inverse |
+| 20 | Contained | content -> media, khong inverse |
+| 21 | Mentioned | content/comment -> user, khong inverse |
+| 22 | Owned | user/group -> media, khong inverse |
+| 23 / 24 | Blocked / BlockedBy | user -> user |
+
+Association co inverse se duoc `AssociationService.AddAssociationAsync` tao ca 2 chieu neu atype la chieu goc.
+
+## 5. Contracts
+
+File: `Contracts/SocialGraphContracts.cs`
+
+### Input contracts
+
+#### CreateUserInput
+
+Input:
+
+- `Name: string`
+- `Gender: bool`
+- `Birthdate: string`
+- `Location: string`
+- `Email: string`
+- `Password: string`
+- `Avatar: string?`
+
+Dung cho `createUser`.
+
+#### UpdateUserInput
+
+Input:
+
+- `Id: long`
+- `Avatar?: string`
+- `Name?: string`
+- `Bio?: string`
+- `Gender?: bool`
+- `Birthdate?: string`
+- `Location?: string`
+- `Privacy?: int`
+
+Field null se khong patch.
+
+#### CreateGroupInput
+
+- `CreatorId: long`
+- `Name: string`
+- `Bio?: string`
+- `Privacy: int`
+- `Avatar?: string`
+
+#### UpdateGroupInput
+
+- `Id: long`
+- `Avatar?: string`
+- `Name?: string`
+- `Bio?: string`
+- `Privacy?: int`
+
+#### MediaInput
+
+- `Type: int`
+- `Url: string`
+
+Media type theo convention: photo/video/audio/file/link.
+
+#### CreateFeedPostInput
+
+- `AuthorId: long`
+- `Content: string`
+- `Privacy: int`
+- `Media?: IReadOnlyList<MediaInput>`
+
+#### CreateGroupPostInput
+
+- `AuthorId: long`
+- `GroupId: long`
+- `Content: string`
+- `Privacy: int`
+- `Media?: IReadOnlyList<MediaInput>`
+
+#### UpdatePostInput
+
+- `Id: long`
+- `Privacy: int`
+
+#### CreateCommentInput
+
+- `AuthorId: long`
+- `TargetId: long`
+- `Content: string`
+
+#### CreateStoryInput
+
+- `AuthorId: long`
+- `Content: string`
+- `Expire: DateTime`
+- `Media?: IReadOnlyList<MediaInput>`
+
+#### CreateReelInput
+
+- `AuthorId: long`
+- `Content: string`
+- `Media?: IReadOnlyList<MediaInput>`
+
+#### SharePostInput
+
+- `AuthorId: long`
+- `SourceId: long`
+- `Content: string`
+- `Privacy: int`
+
+### Output contracts
+
+#### SocialGraphObjectResult
+
+- `id: long`
+- `otype: short`
+- `data: string`
+
+Core/debug output cua object.
+
+#### AssociationPageResult
+
+- `items: AssociationEdgeResult[]`
+- `nextCursor?: string`
+
+Dung cho association pagination.
+
+#### UserProfileResult
+
+- `Id`
+- `Avatar`
+- `Name`
+- `Bio`
+- `Gender`
+- `Birthdate`
+- `Location`
+- `Privacy`
+- `Create`
+- `IsVerified`
+- `FriendCount`
+- `FollowerCount`
+- `FollowingCount`
+
+`IsVerified` den tu Billing entitlement `verified`.
+
+#### GroupResult
+
+- `Id`
+- `Avatar`
+- `Name`
+- `Bio`
+- `Privacy`
+- `Create`
+- `MemberCount`
+- `AdminCount`
+
+#### ContentResult
+
+- `Id`
+- `Type`
+- `Content`
+- `Privacy`
+- `Create`
+- `AuthorId`
+- `Media`
+
+#### CandidateItemResult
+
+- `Id`
+- `AuthorId`
+- `Source`: `friend`, `followed`, `group`, `recent_public`
+- `CreatedAt`
+- `BoostMultiplier`
+
+`BoostMultiplier` den tu Billing entitlement `feed_boost_author`; fallback la `1.0`.
+
+#### EntitlementResult
+
+- `Type`
+- `ExpiresAt`
+- `Metadata`
+
+Dung noi bo cho Billing client.
+
+## 6. Core services
+
+### IObjectService / ObjectService
+
+#### AddObjectAsync(short otype, string dataJson)
+
+Input:
+
+- `otype`: object type.
+- `dataJson`: JSON object string phu hop voi otype.
+
+Return:
+
+- `SocialGraphObjectResult`.
+
+Logic:
+
+1. Goi `ObjectTypeRules.NormalizeObjectJson` de validate otype va JSON object.
+2. Sinh `id` bang `IdGeneratorUtil.GenerateId`.
+3. Insert vao PostgreSQL:
+   - `social_graph.objects(id, otype, data)`
+   - `data` la JSONB parameter.
+4. Cache RedisJSON:
+   - key: `{id}`
+   - value: `{ "otype": ..., "data": ... }`
+5. Tra object vua tao.
+
+#### UpdateObjectAsync(long id, short otype, string patchJson)
+
+Input:
+
+- `id`
+- `otype`
+- `patchJson`: JSON object chi gom field muon update.
+
+Return:
+
+- `SocialGraphObjectResult?`
+
+Logic:
+
+1. Goi `ObjectTypeRules.FilterPatch` de chi giu field duoc phep sua theo otype.
+2. Neu patch rong:
+   - retrieve object hien tai.
+   - neu otype khop thi tra object, neu khong tra null.
+3. Update PostgreSQL bang JSONB merge:
+   - `data = data || @patch`
+   - dieu kien `id` va `otype`.
+4. Neu Redis co key object thi patch tung field bang `JSON.SET $.data.{field}`.
+5. Retrieve lai object va tra ve.
+
+#### DeleteObjectAsync(long id)
+
+Input:
+
+- `id`
+
+Return:
+
+- `bool`
+
+Logic:
+
+1. Delete row trong PostgreSQL.
+2. Neu xoa thanh cong thi delete Redis key `{id}`.
+3. Tra `true` neu co row bi xoa.
+
+#### RetrieveObjectAsync(long id)
+
+Input:
+
+- `id`
+
+Return:
+
+- `SocialGraphObjectResult?`
+
+Logic:
+
+1. Doc RedisJSON key `{id}` bang `JSON.GET`.
+2. Neu cache hit va parse duoc thi tra object.
+3. Neu miss, query PostgreSQL.
+4. Neu DB co object thi nap RedisJSON roi tra.
+5. Neu khong co thi tra null.
+
+### IAssociationService / AssociationService
+
+#### AddAssociationAsync(long id1, short atype, long id2)
+
+Input:
+
+- `id1`
+- `atype`
+- `id2`
+
+Return:
+
+- `bool`
+
+Logic:
+
+1. Lay `time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()`.
+2. Upsert association `(id1, atype, id2, time)`.
+3. Neu `atype` co inverse thi upsert `(id2, inverseAtype, id1, time)`.
+4. Commit transaction DB.
+5. Cap nhat Redis sorted set neu cache da loaded; neu chua loaded thi hydrate tu DB.
+6. Tra true.
+
+Redis:
+
+- key: `{id1}:{atype}`
+- member: `id2`
+- score: `time`
+- marker key: `{id1}:{atype}:cached`
+
+#### DeleteOneAssociationAsync(long id1, short atype, long id2)
+
+Logic:
+
+1. Delete association goc.
+2. Neu atype co inverse thi delete inverse.
+3. Xoa member khoi Redis sorted set neu cache da loaded.
+4. Tra true neu co row bi delete.
+
+#### DeleteAllAssociationAsync(long id1, short atype)
+
+Logic:
+
+1. Neu atype co inverse thi doc list id2 de biet nhung inverse cache can cap nhat.
+2. Delete tat ca row co `(id1, atype)`.
+3. Neu co inverse thi delete row inverse co `atype = inverse` va `id2 = id1`.
+4. Delete cache key `{id1}:{atype}` va marker.
+5. Remove `id1` khoi cache inverse neu cac cache do dang loaded.
+
+#### DeleteObjectAssociationsAsync(long objectId)
+
+Logic:
+
+1. Tim cac association key bi anh huong khi object nam o `id1` hoac `id2`.
+2. Delete moi association co `id1 = objectId` hoac `id2 = objectId`.
+3. Delete cache cua cac key bi anh huong.
+4. Tra so row bi delete.
+
+Dung khi xoa user/group/content.
+
+#### CountAssociationAsync(long id1, short atype)
+
+Logic:
+
+1. Neu cache marker chua co thi hydrate tu DB.
+2. Tra `SortedSetLength`.
+
+#### RetrieveAssociationAsync(long id1, short atype, string? cursor, int limit)
+
+Logic:
+
+1. Parse `cursor` thanh offset. Cursor hien tai la offset string.
+2. Clamp `limit` trong khoang `1..100`.
+3. Neu cache marker chua co thi hydrate tu DB.
+4. Doc Redis sorted set bang rank descending.
+5. Tra list `AssociationEdgeResult(id2, time)` va `nextCursor`.
+
+## 7. Business services
+
+### UserGraphService
+
+#### CreateUserAsync(CreateUserInput input)
+
+Return: `UserProfileResult`.
+
+Logic:
+
+1. Tao user object type `0`.
+2. Data mac dinh:
+   - `avatar`
+   - `name`
+   - `bio = "Xin chao, minh la {name} den tu {location}"`
+   - `gender = 1 neu input.Gender true, nguoc lai 0`
+   - `birthdate`
+   - `location`
+   - `privacy = 0`
+   - `create = UTC now`
+3. Goi external:
+   - Authentication create user.
+   - Messenger create user.
+   - Search create index user.
+   - Recommendation create user embedding.
+4. Tra profile, profile co `IsVerified` tu Billing.
+
+#### UpdateUserAsync(UpdateUserInput input)
+
+Return: `UserProfileResult?`.
+
+Logic:
+
+1. Tao patch JSON tu field non-null.
+2. Update object type user.
+3. Neu update name thi goi Search update index.
+4. Tra profile moi.
+
+#### DeleteUserAsync(long userId)
+
+Return: `bool`.
+
+Logic:
+
+1. Xoa tat ca association lien quan user.
+2. Xoa user object.
+3. Neu xoa thanh cong thi goi external delete:
+   - Auth
+   - Messenger
+   - Search
+   - Recommendation user embedding
+
+#### GetProfileAsync(long userId)
+
+Return: `UserProfileResult?`.
+
+Logic:
+
+1. Retrieve object.
+2. Neu khong co hoac khong phai user thi null.
+3. Parse JSON data.
+4. Dem friend/follower/following bang association counts.
+5. Goi Billing `IsVerifiedAsync`.
+6. Tra profile result.
+
+#### ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl)
+
+Logic:
+
+1. Kiem tra user ton tai va object type la user.
+2. Neu `originalUrl` khong rong:
+   - tao media object type `6` voi `{ type = photo, url = originalUrl }`.
+   - tao association `userId --owned(22)--> mediaId`.
+3. Patch `avatar = avatarUrl` trong user data.
+4. Tra profile moi.
+
+`avatarUrl` la URL anh da crop de hien thi truc tiep tren profile. `originalUrl` la URL anh goc user vua upload; neu user chon lai anh da owned va chi gui anh crop thi `originalUrl` co the null/rong.
+
+#### SendFriendRequestAsync(long requesterId, long receiverId)
+
+Return: `bool`.
+
+Logic hien tai:
+
+1. Goi Notification action `friend_request`.
+2. Tra true.
+
+Luu y: SocialGraph hien chua luu pending friend request. Notification service nen luu notification/action pending neu can.
+
+#### AcceptFriendRequestAsync(long requesterId, long receiverId)
+
+Logic:
+
+1. Tao association friend type `0` giua requester va receiver.
+2. Goi Notification action `friend_accept`.
+3. Tra bool.
+
+#### FollowUserAsync / UnfollowUserAsync
+
+Logic:
+
+- Follow: tao association `follower --followed(1)--> target`, inverse `followed_by(2)`.
+- Unfollow: xoa association do va inverse.
+
+#### BlockUserAsync / UnblockUserAsync
+
+Logic block:
+
+1. Xoa friend neu co.
+2. Xoa follower/following giua 2 user neu co.
+3. Tao association `blocked(23)` va inverse `blocked_by(24)`.
+
+Unblock xoa association `blocked(23)`.
+
+### GroupGraphService
+
+#### CreateGroupAsync(CreateGroupInput input)
+
+Logic:
+
+1. Tao group object type `1`.
+2. Tao association `creator --admin(15)--> group`, inverse `have_admin(16)`.
+3. Goi Search create index group.
+4. Tra `GroupResult`.
+
+#### UpdateGroupAsync(UpdateGroupInput input)
+
+Logic:
+
+1. Patch avatar/name/bio/privacy.
+2. Neu name thay doi thi goi Search update index.
+3. Tra group moi.
+
+#### DeleteGroupAsync(long groupId)
+
+Logic:
+
+1. Xoa tat ca association lien quan group.
+2. Xoa group object.
+3. Goi Search delete index neu xoa thanh cong.
+
+#### GetGroupAsync(long groupId)
+
+Logic:
+
+1. Retrieve group object.
+2. Parse data.
+3. Dem member/admin bang association count.
+4. Tra `GroupResult`.
+
+#### ChangeGroupAvatarAsync
+
+Patch field `avatar` trong group data.
+
+#### AddMemberAsync / RemoveMemberAsync
+
+- Add: `user --member(13)--> group`, inverse `have_member(14)`.
+- Remove: xoa association tren.
+
+#### AddAdminAsync / RemoveAdminAsync
+
+- AddAdmin: remove member truoc, sau do tao `admin(15)`.
+- RemoveAdmin: xoa `admin(15)`.
+
+### ContentGraphService
+
+#### CreateFeedPostAsync(CreateFeedPostInput input)
+
+Logic:
+
+1. Tao post object type `2`: `{content, privacy, create}`.
+2. Voi moi media input:
+   - tao media object type `6`.
+   - tao `author --owned(22)--> media`.
+   - tao `post --contained(20)--> media`.
+3. Tao `author --authored(5)--> post`, inverse `authored_by(6)`.
+4. Goi Search create index post.
+5. Goi Recommendation create post embedding voi content + media URLs.
+6. Tra `ContentResult`.
+
+#### CreateGroupPostAsync(CreateGroupPostInput input)
+
+Logic:
+
+1. Goi create feed post.
+2. Tao association `group --published(9)--> post`, inverse `published_in(10)`.
+3. Tra content result.
+
+#### UpdatePostAsync(UpdatePostInput input)
+
+Logic:
+
+1. Patch `privacy` cua post.
+2. Tra content result moi.
+
+#### DeleteContentAsync(long contentId)
+
+Logic:
+
+1. Retrieve object.
+2. Xoa tat ca association lien quan.
+3. Xoa object.
+4. Neu object la post thi goi:
+   - Recommendation delete post embedding.
+   - Search delete index.
+
+#### GetContentAsync(long contentId)
+
+Logic:
+
+1. Retrieve object.
+2. Lay author qua association `authored_by(6)`.
+3. Lay media qua association `contained(20)`.
+4. Build `ContentResult`.
+
+#### CreateCommentAsync(CreateCommentInput input)
+
+Logic:
+
+1. Tao comment object type `5`.
+2. Tao `author --authored(5)--> comment`.
+3. Tao `target --comment(7)--> comment`.
+4. Lay author cua target.
+5. Neu target author ton tai va khac commenter thi goi Notification action `comment`.
+6. Tra `ContentResult`.
+
+#### CreateStoryAsync(CreateStoryInput input)
+
+Logic:
+
+1. Tao story object type `4`: `{content, create, expire}`.
+2. Attach media neu co.
+3. Tao authored association.
+4. Tra result.
+
+#### CreateReelAsync(CreateReelInput input)
+
+Logic tuong tu story nhung object type `3`, khong co expire.
+
+#### SharePostAsync(SharePostInput input)
+
+Logic:
+
+1. Tao post moi bang `CreateFeedPostAsync`.
+2. Tao association `source --share(8)--> newPost`.
+3. Tra post moi.
+
+#### LikeAsync / UnlikeAsync
+
+Logic:
+
+- Like: `user --liked(3)--> target`, inverse `liked_by(4)`.
+- Neu target co author khac user, goi Notification action `like`.
+- Unlike: xoa association liked.
+
+#### SaveAsync / UnsaveAsync
+
+- Save: `user --saved(19)--> target`.
+- Unsave: xoa association saved.
+
+#### WatchAsync
+
+- Tao `user --watched(17)--> target`, inverse `watched_by(18)`.
+
+#### TagAsync
+
+- Tao `post --tagged(11)--> user`, inverse `tagged_in(12)`.
+- Goi Notification action `tag`.
+
+#### MentionAsync
+
+- Tao `source --mentioned(21)--> user`.
+- Goi Notification action `mention`.
+
+### CandidateService
+
+#### GetPostCandidatesAsync(long userId, int limit)
+
+Return: `IReadOnlyList<CandidateItemResult>`.
+
+Logic:
+
+1. Clamp limit `1..500`.
+2. Lay blocked ids:
+   - `blocked(23)`
+   - `blocked_by(24)`
+3. Gom candidate tu:
+   - friend authors: user `friend(0)` -> author `authored(5)` post.
+   - followed authors: user `followed(1)` -> author `authored(5)` post.
+   - groups: user `member/admin(13/15)` -> group `published(9)` post.
+   - fallback recent public posts: object type post, privacy `0`.
+4. Loai candidate cua author bi block.
+5. Lay `boostMultiplier` tu Billing cho author.
+6. Sort tam thoi theo boostMultiplier desc, id desc.
+7. Tra top limit.
+
+Recommendation service moi la noi rank feed cuoi cung.
+
+#### GetReelCandidatesAsync(long userId, int limit)
+
+Tuong tu post nhung nguon:
+
+- friend authors -> authored reels.
+- followed authors -> authored reels.
+- recent public reels.
+
+### BillingClient
+
+#### GetActiveEntitlementsAsync(long userId)
+
+Logic:
+
+1. Doc endpoint `ExternalServices:BillingServiceGetActiveEntitlements`.
+2. Goi GET `{endpoint}?userId={userId}`.
+3. Chap nhan response:
+   - array truc tiep, hoac
+   - object co field `entitlements`.
+4. Parse `type`, `expiresAt`, `metadata`.
+5. Neu endpoint thieu, loi HTTP, timeout, JSON invalid: tra list rong.
+
+#### IsVerifiedAsync(long userId)
+
+Tra true neu co entitlement active type `verified`.
+
+#### GetFeedBoostMultiplierAsync(long userId)
+
+Tra:
+
+- `1.0` neu khong co entitlement `feed_boost_author`.
+- `metadata.boostMultiplier` neu parse duoc.
+- fallback `1.3` neu co entitlement nhung khong co metadata multiplier.
+
+### ExternalServiceClient
+
+Tat ca call external la best-effort:
+
+- Neu endpoint thieu config: log debug va return.
+- Neu service tra non-success: log warning.
+- Neu network/timeout: log warning.
+- Khong throw ra ngoai, khong rollback graph local.
+
+Methods:
+
+- `NotifyAsync`: POST NotificationServiceCreateNotification payload `{ creatorId, receiverId, actionType, objectId, data }`.
+- `CreateUserAsync`: goi Auth create, Messenger create, Search create index, Recommend create user embedding.
+- `DeleteUserAsync`: goi Auth delete, Messenger delete, Search delete index, Recommend delete user embedding.
+- `CreateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
+- `UpdateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
+- `DeleteSearchIndexAsync`: POST `{ objectId }`.
+- `CreateUserEmbeddingAsync`: POST `{ userId }`.
+- `DeleteUserEmbeddingAsync`: POST `{ userId }`.
+- `CreatePostEmbeddingAsync`: POST `{ postId, content, mediaUrls }`.
+- `DeletePostEmbeddingAsync`: POST `{ postId }`.
+- `CreateMessengerUserAsync`: POST `{ userId }`.
+- `DeleteMessengerUserAsync`: POST `{ userId }`.
+
+## 8. GraphQL API
+
+GraphQL endpoint: `/graphql`.
+
+### Query
+
+#### object(id)
+
+Input:
+
+- `id: Long`
+
+Return:
+
+- `SocialGraphObjectResult?`
+
+Dung debug/core.
+
+#### association(id1, atype, cursor, limit)
+
+Return:
+
+- `AssociationPageResult`.
+
+#### associationCount(id1, atype)
+
+Return:
+
+- `Long`.
+
+#### profile(userId)
+
+Return:
+
+- `UserProfileResult?`.
+
+#### group(groupId)
+
+Return:
+
+- `GroupResult?`.
+
+#### content(contentId)
+
+Return:
+
+- `ContentResult?`.
+
+#### relationIds(id1, atype, cursor, limit)
+
+Return:
+
+- `long[]`.
+
+Lay list id2 theo association.
+
+#### postCandidates(userId, limit)
+
+Return:
+
+- `CandidateItemResult[]`.
+
+#### reelCandidates(userId, limit)
+
+Return:
+
+- `CandidateItemResult[]`.
+
+### Mutation
+
+Core/debug:
+
+- `addObject(otype, dataJson)`
+- `updateObject(id, otype, patchJson)`
+- `deleteObject(id)`
+- `addAssociation(id1, atype, id2)`
+- `deleteOneAssociation(id1, atype, id2)`
+- `deleteAllAssociation(id1, atype)`
+
+User:
+
+- `createUser(input: CreateUserInput)`
+- `updateUser(input: UpdateUserInput)`
+- `deleteUser(userId)`
+- `changeUserAvatar(userId, avatarUrl, originalUrl)`
+
+Relation:
+
+- `sendFriendRequest(requesterId, receiverId)`
+- `acceptFriendRequest(requesterId, receiverId)`
+- `followUser(followerId, targetUserId)`
+- `unfollowUser(followerId, targetUserId)`
+- `blockUser(blockerId, blockedUserId)`
+- `unblockUser(blockerId, blockedUserId)`
+
+Group:
+
+- `createGroup(input)`
+- `updateGroup(input)`
+- `deleteGroup(groupId)`
+- `changeGroupAvatar(groupId, avatarUrl)`
+- `addGroupMember(groupId, userId)`
+- `removeGroupMember(groupId, userId)`
+- `addGroupAdmin(groupId, userId)`
+- `removeGroupAdmin(groupId, userId)`
+
+Content:
+
+- `createFeedPost(input)`
+- `createGroupPost(input)`
+- `updatePost(input)`
+- `deleteContent(contentId)`
+- `createComment(input)`
+- `createStory(input)`
+- `createReel(input)`
+- `sharePost(input)`
+- `like(userId, targetId)`
+- `unlike(userId, targetId)`
+- `save(userId, targetId)`
+- `unsave(userId, targetId)`
+- `watch(userId, targetId)`
+- `tag(postId, userId)`
+- `mention(sourceId, userId)`
+
+## 9. REST internal API
+
+File: `RestAPI/Controller.cs`
+
+Route prefix: `/internal/recommendation`.
+
+### GET /internal/recommendation/post-candidates
+
+Query:
+
+- `userId: long`
+- `limit: int = 200`
+
+Return:
+
+```json
+[
+  {
+    "id": 123,
+    "authorId": 456,
+    "source": "friend",
+    "createdAt": "2026-07-09T00:00:00.0000000Z",
+    "boostMultiplier": 1.3
+  }
+]
+```
+
+### GET /internal/recommendation/reel-candidates
+
+Tuong tu post candidates nhung object type reel.
+
+## 10. Redis cache
+
+### Object cache
+
+- Key: `{id}`
+- Type: RedisJSON
+- Value:
+
+```json
+{
+  "otype": 0,
+  "data": {
+    "name": "Nguyen Van A"
+  }
+}
+```
+
+### Association cache
+
+- Key: `{id1}:{atype}`
+- Type: sorted set
+- Member: `id2`
+- Score: `time`
+- Marker key: `{id1}:{atype}:cached`
+
+Marker can thiet vi Redis khong giu sorted set rong. Khong co marker thi coi nhu cache miss va hydrate tu DB.
+
+## 11. Nhung diem can luu y khi service khac tich hop
+
+- SocialGraph external calls khong dam bao transaction distributed. Neu Auth/Search/Recommend loi, graph local van co the da ghi thanh cong.
+- Friend request hien chi tao notification, chua co pending table trong SocialGraph.
+- Privacy rule hien moi luu field `privacy`, chua enforce day du tren query/candidate ngoai fallback recent public.
+- Billing service can tra entitlement nhanh va on dinh vi profile/candidate goi Billing.
+- Recommendation service nen coi candidate cua SocialGraph la input pool, khong phai final feed.
+- Notification service phai hieu action type giong `ExternalNotificationAction`.

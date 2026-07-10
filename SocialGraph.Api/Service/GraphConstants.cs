@@ -11,6 +11,15 @@ public static class GraphObjectType
     public const short Media = 6;
 }
 
+public static class GraphMediaType
+{
+    public const int Photo = 0;
+    public const int Video = 1;
+    public const int Audio = 2;
+    public const int File = 3;
+    public const int Link = 4;
+}
+
 public static class GraphAssociationType
 {
     public const short Friend = 0;

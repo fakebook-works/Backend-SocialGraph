@@ -8,20 +8,17 @@ public sealed class UserGraphService : IUserGraphService
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
     private readonly IBillingClient _billingClient;
-    private readonly IConfiguration _configuration;
 
     public UserGraphService(
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient,
-        IBillingClient billingClient,
-        IConfiguration configuration)
+        IBillingClient billingClient)
     {
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
         _billingClient = billingClient;
-        _configuration = configuration;
     }
 
     public async Task<UserProfileResult> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
@@ -97,8 +94,28 @@ public sealed class UserGraphService : IUserGraphService
             await _associationService.CountAssociationAsync(userId, GraphAssociationType.Followed, cancellationToken));
     }
 
-    public async Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, CancellationToken cancellationToken = default)
+    public async Task<UserProfileResult?> ChangeUserAvatarAsync(
+        long userId,
+        string avatarUrl,
+        string? originalUrl = null,
+        CancellationToken cancellationToken = default)
     {
+        var currentUser = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        if (currentUser is null || currentUser.otype != GraphObjectType.User)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(originalUrl))
+        {
+            var media = await _objectService.AddObjectAsync(
+                GraphObjectType.Media,
+                GraphJson.MediaJson(GraphMediaType.Photo, originalUrl),
+                cancellationToken);
+
+            await _associationService.AddAssociationAsync(userId, GraphAssociationType.Owned, media.id, cancellationToken);
+        }
+
         var updated = await _objectService.UpdateObjectAsync(
             userId,
             GraphObjectType.User,
@@ -106,20 +123,6 @@ public sealed class UserGraphService : IUserGraphService
             cancellationToken);
 
         return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
-    }
-
-    public async Task<UploadUrlResult> PrepareUploadAsync(PrepareUploadInput input, CancellationToken cancellationToken = default)
-    {
-        var extension = System.IO.Path.GetExtension(input.FileName);
-        var objectName = $"{input.OwnerId}/{Guid.NewGuid():N}{extension}";
-        var permanentBase = _configuration["Media:PermanentBaseUrl"] ?? "https://media.local";
-        var temporaryBase = _configuration["Media:TemporaryBaseUrl"] ?? permanentBase;
-        var permanentUrl = $"{permanentBase.TrimEnd('/')}/{objectName}";
-        var temporaryUrl = $"{temporaryBase.TrimEnd('/')}/{objectName}?upload=1";
-
-        var media = await _objectService.AddObjectAsync(GraphObjectType.Media, GraphJson.MediaJson(input.Type, permanentUrl), cancellationToken);
-        await _associationService.AddAssociationAsync(input.OwnerId, GraphAssociationType.Owned, media.id, cancellationToken);
-        return new UploadUrlResult(media.id, temporaryUrl, permanentUrl);
     }
 
     public Task<bool> SendFriendRequestAsync(long requesterId, long receiverId, CancellationToken cancellationToken = default)

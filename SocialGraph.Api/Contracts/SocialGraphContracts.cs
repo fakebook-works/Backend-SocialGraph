@@ -35,8 +35,6 @@ public sealed record UpdateGroupInput(
 
 public sealed record MediaInput(int Type, string Url);
 
-public sealed record PrepareUploadInput(long OwnerId, string FileName, int Type);
-
 public sealed record CreateFeedPostInput(long AuthorId, string Content, int Privacy, IReadOnlyList<MediaInput>? Media);
 
 public sealed record CreateGroupPostInput(long AuthorId, long GroupId, string Content, int Privacy, IReadOnlyList<MediaInput>? Media);
@@ -54,8 +52,6 @@ public sealed record SharePostInput(long AuthorId, long SourceId, string Content
 public sealed record OperationResult(bool Success, string? Message = null);
 
 public sealed record MediaResult(long Id, int Type, string Url);
-
-public sealed record UploadUrlResult(long MediaId, string TemporaryUrl, string PermanentUrl);
 
 public sealed record UserProfileResult(
     long Id,

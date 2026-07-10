@@ -89,18 +89,11 @@ public class Mutation
     public Task<UserProfileResult?> ChangeUserAvatarAsync(
         long userId,
         string avatarUrl,
+        string? originalUrl,
         [Service] IUserGraphService userGraphService,
         CancellationToken cancellationToken)
     {
-        return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, cancellationToken);
-    }
-
-    public Task<UploadUrlResult> PrepareUploadAsync(
-        PrepareUploadInput input,
-        [Service] IUserGraphService userGraphService,
-        CancellationToken cancellationToken)
-    {
-        return userGraphService.PrepareUploadAsync(input, cancellationToken);
+        return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, cancellationToken);
     }
 
     public Task<bool> SendFriendRequestAsync(

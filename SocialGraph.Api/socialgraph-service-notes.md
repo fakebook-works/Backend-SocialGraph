@@ -22,7 +22,7 @@
 
 Main mutation groups:
 
-- User: `createUser`, `updateUser`, `deleteUser`, `changeUserAvatar`, `prepareUpload`.
+- User: `createUser`, `updateUser`, `deleteUser`, `changeUserAvatar`.
 - Relation: `sendFriendRequest`, `acceptFriendRequest`, `followUser`, `unfollowUser`, `blockUser`, `unblockUser`.
 - Group: `createGroup`, `updateGroup`, `deleteGroup`, member/admin mutations.
 - Content: `createFeedPost`, `createGroupPost`, `updatePost`, `deleteContent`, `createComment`, `createStory`, `createReel`, `sharePost`, `like`, `save`, `watch`, `tag`, `mention`.
