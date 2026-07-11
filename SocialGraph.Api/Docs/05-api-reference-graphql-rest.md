@@ -122,7 +122,7 @@ Output:
   "content": "hello",
   "privacy": 0,
   "create": "2026-07-11T00:00:00.0000000Z",
-  "authorId": 123, //  cần avt và tên 
+  "authorId": 123, 
   "media": [
     {
       "id": 900,
@@ -492,9 +492,7 @@ Input:
     "birthdate": "2000-01-01",
     "location": "Ha Noi",
     "email": "a@example.com",
-    "password": "secret",
-    "avatar": null,
-    "background": null
+    "password": "secret"
   }
 }
 ```
@@ -504,7 +502,7 @@ Logic:
 1. Tao user object type `0`.
 2. Data mac dinh: `avatar`, `background`, `name`, `bio`, `gender`, `birthdate`, `location`, `verify = ""`, `privacy = 0`, `create = now`.
 3. Goi external create user pipeline.
-4. Return profile moi tao.
+4. Return `true`.
 
 External calls:
 
@@ -513,7 +511,7 @@ External calls:
 - Search `SearchServiceCreateIndex`: `{ objectId: userId, objectType: "user", text: name }`
 - Recommendation `RecommendServiceCreateUserEmbedding`: `{ userId }`
 
-Return: `UserProfileResult`
+Return: `bool`
 
 ### updateUser(input)
 

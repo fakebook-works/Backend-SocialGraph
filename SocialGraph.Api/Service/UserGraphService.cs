@@ -18,15 +18,15 @@ public sealed class UserGraphService : IUserGraphService
         _externalServiceClient = externalServiceClient;
     }
 
-    public async Task<UserProfileResult> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
+    public async Task<bool> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
         var user = await _objectService.AddObjectAsync(
             GraphObjectType.User,
-            GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location, input.Avatar, input.Background),
+            GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location),
             cancellationToken);
 
         await _externalServiceClient.CreateUserAsync(user.id, input.Email, input.Password, input.Name, cancellationToken);
-        return (await GetProfileAsync(user.id, cancellationToken))!;
+        return true;
     }
 
     public async Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default)

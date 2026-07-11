@@ -4,7 +4,7 @@ using SocialGraph.Api.Contracts;
 
 public interface IUserGraphService
 {
-    Task<UserProfileResult> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default);
+    Task<bool> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default);
     Task<bool> DeleteUserAsync(long userId, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> GetProfileAsync(long userId, CancellationToken cancellationToken = default);

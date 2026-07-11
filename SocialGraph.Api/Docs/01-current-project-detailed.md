@@ -223,10 +223,8 @@ Input:
 - `Location: string`
 - `Email: string`
 - `Password: string`
-- `Avatar: string?`
-- `Background: string?`
 
-Dung cho `createUser`.
+Dung cho `createUser`. API dang ky khong nhan `avatar` hoac `background`; 2 field nay chi doi sau bang mutation rieng.
 
 #### UpdateUserInput
 
@@ -555,14 +553,14 @@ Logic:
 
 #### CreateUserAsync(CreateUserInput input)
 
-Return: `UserProfileResult`.
+Return: `bool`.
 
 Logic:
 
 1. Tao user object type `0`.
 2. Data mac dinh:
-   - `avatar`
-   - `background`
+   - `avatar = ""`
+   - `background = ""`
    - `name`
    - `bio = "Xin chao, minh la {name} den tu {location}"`
    - `gender = 1 neu input.Gender true, nguoc lai 0`
@@ -576,7 +574,7 @@ Logic:
    - Messenger create user.
    - Search create index user.
    - Recommendation create user embedding.
-4. Tra profile, profile co `Verify` va `IsVerified` tinh tu user data.
+4. Tra `true` neu tao user local va external pipeline da duoc goi.
 
 #### UpdateUserAsync(UpdateUserInput input)
 

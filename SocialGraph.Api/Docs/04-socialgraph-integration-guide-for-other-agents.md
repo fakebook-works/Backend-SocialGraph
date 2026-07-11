@@ -82,14 +82,14 @@ Mutation `createUser(input)`:
     "birthdate": "2000-01-01",
     "location": "Ha Noi",
     "email": "a@example.com",
-    "password": "secret",
-    "avatar": null,
-    "background": null
+    "password": "secret"
   }
 }
 ```
 
-Return `UserProfileResult`.
+Return `Boolean`. `true` nghia la SocialGraph da tao user local va da goi pipeline Auth/Messenger/Search/Recommendation.
+
+Dang ky khong nhan `avatar` hoac `background`. Hai field nay cap nhat sau bang mutation rieng.
 
 User mutations lien quan avatar/background:
 

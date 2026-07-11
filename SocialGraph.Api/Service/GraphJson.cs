@@ -38,12 +38,12 @@ internal static class GraphJson
         return DateTimeOffset.UtcNow.ToString("O");
     }
 
-    public static string UserJson(string name, bool gender, string birthdate, string location, string? avatar, string? background)
+    public static string UserJson(string name, bool gender, string birthdate, string location)
     {
         return new JsonObject
         {
-            ["avatar"] = avatar ?? "",
-            ["background"] = background ?? "",
+            ["avatar"] = "",
+            ["background"] = "",
             ["name"] = name,
             ["bio"] = $"Xin chao, minh la {name} den tu {location}",
             ["gender"] = gender ? 1 : 0,

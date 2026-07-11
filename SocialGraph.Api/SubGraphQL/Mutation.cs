@@ -62,7 +62,7 @@ public class Mutation
         return associationService.DeleteAllAssociationAsync(id1, atype, cancellationToken);
     }
 
-    public Task<UserProfileResult> CreateUserAsync(
+    public Task<bool> CreateUserAsync(
         CreateUserInput input,
         [Service] IUserGraphService userGraphService,
         CancellationToken cancellationToken)

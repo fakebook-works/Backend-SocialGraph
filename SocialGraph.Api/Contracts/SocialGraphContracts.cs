@@ -6,9 +6,7 @@ public sealed record CreateUserInput(
     string Birthdate,
     string Location,
     string Email,
-    string Password,
-    string? Avatar = null,
-    string? Background = null);
+    string Password);
 
 public sealed record UpdateUserInput(
     long Id,
