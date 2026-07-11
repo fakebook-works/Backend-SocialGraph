@@ -1,66 +1,67 @@
-# Billing Service - Huong Dan Implement Day Du
+# Billing Service - Huong Dan Implement V1
 
-File nay danh cho agent code Billing service. Muc tieu: doc file nay va co the tao mot Billing microservice du chay voi SocialGraph hien tai, dong thoi de sau nay mo rong thanh thanh toan that.
+File nay danh cho agent code Billing/Payment service. Muc tieu V1: xu ly goi tich xanh `verified_18k`, sau khi thanh toan thanh cong thi goi SocialGraph de cap nhat han verify trong `user.data.verify`.
 
-## 1. Boi canh toan he thong microservice
+## 1. Boi canh microservice
 
-He thong gom cac service chinh:
+He thong gom:
 
 - Gateway: GraphQL Federation, frontend chi noi voi Gateway.
-- SocialGraph: nam user/group/post/relation, goi Billing de doc entitlement.
-- Authentication: quan ly email/password/session/token.
-- Messenger: chat user.
+- SocialGraph: nam user/group/post/relation/content, expose GraphQL va REST internal.
+- Authentication: email/password/session/token.
+- Messenger: chat.
 - Search: index user/group/post.
-- Recommendation: embedding/ranking feed.
-- Notification: luu/thong bao notification.
-- Billing: quan ly don hang, goi thanh toan, entitlement tra phi.
+- Recommendation: tao/rank feed tu candidate pool cua SocialGraph.
+- Notification: luu va day notification.
+- Billing/Payment: order, thanh toan, lich su giao dich.
 
-Billing khong can biet chi tiet graph. Billing chi can biet `user_id` va product ma user mua.
+Billing khong sua truc tiep DB cua SocialGraph. Billing chi can biet `userId` va product user mua.
 
-## 2. Vai tro Billing service
+## 2. Boundary moi voi SocialGraph
 
-Billing service can lam:
+SocialGraph khong goi Billing de doc entitlement nua.
 
-- Tao order cho cac goi tra phi.
-- Xac nhan order da thanh toan.
-- Tao hoac gia han entitlement cho user.
-- Cung cap API de service khac doc entitlement active.
-- Sau nay tich hop payment provider/webhook that.
+Billing/Payment se goi nguoc ve SocialGraph khi thanh toan thanh cong:
 
-Billing service khong nen:
+```http
+PUT /internal/users/{userId}/verify
+```
 
-- Sua truc tiep database SocialGraph.
-- Tu quyet feed ranking.
-- Luu password/user profile.
-- Tao notification truc tiep neu khong can. Neu muon thong bao thanh toan thanh cong, co the goi Notification service.
+Body:
 
-## 3. Products bat buoc
+```json
+{
+  "expiresAt": "2026-08-10T00:00:00Z"
+}
+```
+
+Clear verify:
+
+```json
+{
+  "expiresAt": null
+}
+```
+
+SocialGraph luu chuoi ISO nay vao `user.data.verify`. Query profile cua SocialGraph tra:
+
+- `verify`: thoi diem het han dang luu.
+- `isVerified`: true neu parse duoc `verify` va `verify > now`.
+
+## 3. Product bat buoc
 
 ### verified_18k
 
 - Gia: `18000` VND.
-- Entitlement: `verified`.
-- Thoi han: 30 ngay.
-- SocialGraph dung de tra `UserProfileResult.IsVerified = true`.
+- Thoi han de xuat: 30 ngay.
+- Tac dung: cap tich xanh cho user den `expiresAt`.
+- SocialGraph field lien quan: `user.data.verify`.
 
-### feed_boost_36k
-
-- Gia: `36000` VND.
-- Entitlement: `feed_boost_author`.
-- Thoi han: 30 ngay.
-- Metadata default:
-
-```json
-{
-  "boostMultiplier": "1.3"
-}
-```
-
-- SocialGraph dung multiplier nay trong candidate response.
+Goi tra tien de day bai len feed da bi loai khoi V1. Khong tao product rieng cho post promotion, khong tra multiplier cho Recommendation.
 
 ## 4. Database schema de xuat
 
-Dung PostgreSQL. Schema rieng: `billing`.
+Dung PostgreSQL, schema rieng `billing`.
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS billing;
@@ -77,6 +78,7 @@ CREATE TABLE billing_orders (
     paid_at TIMESTAMPTZ,
     provider TEXT,
     provider_ref TEXT,
+    verify_expires_at TIMESTAMPTZ,
     metadata JSONB NOT NULL DEFAULT '{}'
 );
 
@@ -86,52 +88,58 @@ CREATE INDEX idx_billing_orders_user_created
 CREATE INDEX idx_billing_orders_status_created
     ON billing_orders (status, created_at DESC);
 
-CREATE TABLE user_entitlements (
+CREATE TABLE billing_webhook_events (
     id BIGINT PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    type TEXT NOT NULL,
-    source_order_id BIGINT REFERENCES billing_orders(id),
-    starts_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'
+    provider TEXT NOT NULL,
+    provider_event_id TEXT NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ,
+    payload JSONB NOT NULL,
+    UNIQUE (provider, provider_event_id)
 );
-
-CREATE INDEX idx_user_entitlements_lookup
-    ON user_entitlements (user_id, type, expires_at);
-
-CREATE INDEX idx_user_entitlements_order
-    ON user_entitlements (source_order_id);
 ```
 
-Neu dung EF Core, tao entity:
+Entity toi thieu:
 
 - `BillingOrder`
-- `UserEntitlement`
+- `BillingWebhookEvent`
 
-## 5. Status va lifecycle order
+Khong bat buoc tao `user_entitlements` vi SocialGraph khong doc entitlement tu Billing nua. Neu can lich su noi bo, co the tao bang grant rieng, nhung API contract van la goi SocialGraph update verify.
 
-Order status nen co:
+## 5. Order status
+
+Status de xuat:
 
 - `pending`: moi tao, chua tra tien.
-- `paid`: da tra tien, da tao entitlement.
+- `paid`: da tra tien va da sync verify sang SocialGraph.
+- `paid_sync_failed`: da tra tien nhung goi SocialGraph loi, can retry.
 - `failed`: thanh toan loi.
 - `cancelled`: user huy.
-- `refunded`: da hoan tien, entitlement nen bi thu hoi hoac expire ngay.
+- `refunded`: da hoan tien; Billing nen clear verify neu policy yeu cau.
 
-Lifecycle V1 mock:
+## 6. Lifecycle V1
 
 1. Gateway/Frontend goi Billing tao order.
-2. Billing tao row `billing_orders` status `pending`.
-3. Dev/test goi endpoint mock-paid.
-4. Billing update order status `paid`, set `paid_at`.
-5. Billing tao/gia han entitlement 30 ngay.
-6. SocialGraph doc entitlement qua internal API.
+2. Billing tao `billing_orders` status `pending`.
+3. User thanh toan qua mock endpoint hoac provider.
+4. Billing verify payment.
+5. Billing tinh `expiresAt`.
+6. Billing goi SocialGraph `PUT /internal/users/{userId}/verify`.
+7. Neu SocialGraph 2xx: set order `paid`, luu `paid_at`, `verify_expires_at`.
+8. Neu SocialGraph fail: set `paid_sync_failed` va retry bang background job.
 
-## 6. API public cho Gateway/Frontend
+Khi user mua tiep trong luc con han, Billing nen gia han tu:
+
+```text
+base = max(currentVerifyExpiresAt, now)
+newExpiresAt = base + 30 days
+```
+
+Billing co the lay `currentVerifyExpiresAt` tu order paid moi nhat cua chinh Billing, hoac goi Gateway/SocialGraph profile neu can doi chieu. Khong doc truc tiep DB SocialGraph.
+
+## 7. API public cho Gateway/Frontend
 
 ### POST /billing/orders
-
-Tao order.
 
 Request:
 
@@ -144,8 +152,8 @@ Request:
 
 Validation:
 
-- `userId` bat buoc.
-- `productCode` phai la `verified_18k` hoac `feed_boost_36k`.
+- `userId > 0`.
+- `productCode == "verified_18k"`.
 
 Response:
 
@@ -157,12 +165,12 @@ Response:
   "amount": 18000,
   "currency": "VND",
   "status": "pending",
-  "createdAt": "2026-07-09T00:00:00Z",
-  "paymentUrl": "http://localhost:xxxx/billing/orders/987/mock-pay"
+  "createdAt": "2026-07-11T00:00:00Z",
+  "paidAt": null,
+  "verifyExpiresAt": null,
+  "paymentUrl": "http://localhost:5002/billing/orders/987/mock-pay"
 }
 ```
-
-V1 co the tra `paymentUrl` mock. Sau nay thay bang provider URL.
 
 ### GET /billing/orders/{orderId}
 
@@ -176,16 +184,16 @@ Response:
   "amount": 18000,
   "currency": "VND",
   "status": "paid",
-  "createdAt": "2026-07-09T00:00:00Z",
-  "paidAt": "2026-07-09T00:01:00Z"
+  "createdAt": "2026-07-11T00:00:00Z",
+  "paidAt": "2026-07-11T00:01:00Z",
+  "verifyExpiresAt": "2026-08-10T00:01:00Z",
+  "paymentUrl": null
 }
 ```
 
 ### POST /billing/orders/{orderId}/mock-paid
 
-Endpoint development-only de danh dau order da tra tien.
-
-Request co the rong.
+Endpoint development-only.
 
 Response:
 
@@ -194,120 +202,56 @@ Response:
   "success": true,
   "orderId": 987,
   "status": "paid",
-  "entitlement": {
-    "type": "verified",
-    "startsAt": "2026-07-09T00:01:00Z",
-    "expiresAt": "2026-08-08T00:01:00Z",
-    "metadata": {}
-  }
+  "verifyExpiresAt": "2026-08-10T00:01:00Z"
 }
 ```
 
 Logic:
 
 1. Load order.
-2. Neu order khong ton tai -> 404.
-3. Neu da paid roi -> tra current entitlement, khong tao duplicate.
-4. Update status `paid`.
-5. Tao/gia han entitlement.
+2. Neu khong ton tai -> 404.
+3. Neu da `paid` -> tra state hien tai, khong sync duplicate neu khong can.
+4. Tinh `verifyExpiresAt`.
+5. Goi SocialGraph update verify.
+6. Update order.
 
-### GET /billing/users/{userId}/entitlements
+### POST /billing/webhook
 
-API public cho Gateway neu can hien thi trang subscription.
+Dung cho provider that sau nay.
 
-Response:
+Yeu cau:
 
-```json
-{
-  "userId": 123,
-  "entitlements": [
-    {
-      "type": "verified",
-      "startsAt": "2026-07-09T00:00:00Z",
-      "expiresAt": "2026-08-08T00:00:00Z",
-      "metadata": {}
-    }
-  ]
-}
-```
+- Idempotent theo `(provider, provider_event_id)`.
+- Luu raw payload vao `billing_webhook_events`.
+- Chi mark paid khi verify duoc chu ky/provider status.
+- Sau khi paid thi di cung flow sync SocialGraph.
 
-## 7. API internal bat buoc cho SocialGraph
+## 8. API internal can goi SocialGraph
 
-SocialGraph hien cau hinh:
-
-```json
-"BillingServiceGetActiveEntitlements": "http://localhost:5001/internal/billing/entitlements"
-```
-
-### GET /internal/billing/entitlements?userId={userId}
-
-Request:
-
-- query `userId`.
-
-Response chap nhan 1 trong 2 format sau.
-
-Format khuyen nghi:
+Config de xuat trong Billing:
 
 ```json
 {
-  "entitlements": [
-    {
-      "type": "verified",
-      "expiresAt": "2026-08-08T00:00:00Z",
-      "metadata": {}
-    },
-    {
-      "type": "feed_boost_author",
-      "expiresAt": "2026-08-08T00:00:00Z",
-      "metadata": {
-        "boostMultiplier": "1.3"
-      }
-    }
-  ]
-}
-```
-
-Format SocialGraph cung chap nhan:
-
-```json
-[
-  {
-    "type": "verified",
-    "expiresAt": "2026-08-08T00:00:00Z",
-    "metadata": {}
+  "ExternalServices": {
+    "SocialGraphSetUserVerify": "http://localhost:5000/internal/users/{userId}/verify"
   }
-]
-```
-
-Chi tra entitlement active:
-
-- `starts_at <= now`
-- `expires_at IS NULL OR expires_at > now`
-
-Neu user khong co entitlement, tra:
-
-```json
-{
-  "entitlements": []
 }
 ```
 
-## 8. Logic tao/gia han entitlement
+Call:
 
-Khi order paid:
+```http
+PUT /internal/users/123/verify
+Content-Type: application/json
+```
 
-1. Map product sang entitlement:
-   - `verified_18k` -> `verified`
-   - `feed_boost_36k` -> `feed_boost_author`
-2. Tim entitlement active cung user va type.
-3. Neu dang active:
-   - gia han tu `max(existing.expires_at, now) + 30 days`.
-4. Neu khong active:
-   - tao entitlement moi `starts_at = now`, `expires_at = now + 30 days`.
-5. Metadata:
-   - verified: `{}`
-   - boost: `{ "boostMultiplier": "1.3" }`
+```json
+{
+  "expiresAt": "2026-08-10T00:01:00Z"
+}
+```
+
+Response 200 la `UserProfileResult`. Response 404 nghia la user khong ton tai trong SocialGraph, Billing nen de order o `paid_sync_failed` hoac reject tuy policy.
 
 ## 9. DTO de agent tao
 
@@ -323,86 +267,47 @@ public sealed record BillingOrderResponse(
     string Status,
     DateTimeOffset CreatedAt,
     DateTimeOffset? PaidAt,
+    DateTimeOffset? VerifyExpiresAt,
     string? PaymentUrl);
 
-public sealed record EntitlementResponse(
-    string Type,
-    DateTimeOffset? StartsAt,
-    DateTimeOffset? ExpiresAt,
-    IReadOnlyDictionary<string, string> Metadata);
+public sealed record MockPaidResponse(
+    bool Success,
+    long OrderId,
+    string Status,
+    DateTimeOffset? VerifyExpiresAt);
 
-public sealed record ActiveEntitlementsResponse(
-    long UserId,
-    IReadOnlyList<EntitlementResponse> Entitlements);
+public sealed record SetUserVerifyRequest(DateTimeOffset? ExpiresAt);
 ```
 
-## 10. Cach SocialGraph se dung Billing
+## 10. SocialGraph response can parse
 
-### Profile
-
-SocialGraph `GetProfileAsync` goi:
-
-- `IBillingClient.IsVerifiedAsync(userId)`
-
-Neu Billing tra entitlement `verified` active thi profile co:
+Billing chi can biet call update thanh cong hay khong. Neu muon log, parse cac field nay:
 
 ```json
 {
+  "id": 123,
+  "verify": "2026-08-10T00:01:00Z",
   "isVerified": true
 }
 ```
 
-Neu Billing down/loi/empty thi:
+Khong can endpoint `GET /internal/billing/entitlements`; SocialGraph khong dung endpoint do nua.
 
-```json
-{
-  "isVerified": false
-}
-```
+## 11. Test bat buoc
 
-### Feed candidate
-
-SocialGraph `CandidateService` goi:
-
-- `IBillingClient.GetFeedBoostMultiplierAsync(authorId)`
-
-Neu author co `feed_boost_author` active:
-
-```json
-{
-  "boostMultiplier": 1.3
-}
-```
-
-Neu khong:
-
-```json
-{
-  "boostMultiplier": 1.0
-}
-```
-
-Recommendation service moi dung multiplier de rank feed cuoi.
-
-## 11. Yeu cau test
-
-Agent Billing can viet test cho:
-
-- Tao order `verified_18k` dung amount 18000.
-- Tao order `feed_boost_36k` dung amount 36000.
+- Tao order `verified_18k` dung amount `18000`.
 - Product khong hop le bi reject.
-- Mark paid tao entitlement 30 ngay.
-- Mark paid 2 lan khong tao duplicate order side effect.
-- Gia han entitlement neu user mua lai khi con han.
-- Internal entitlements chi tra active entitlement.
-- Expired entitlement khong tra ve.
-- Response JSON khop format SocialGraph doc o tren.
+- Mark paid tinh `verifyExpiresAt = now + 30 days` khi chua con han.
+- Mua lai khi con han thi gia han tu han cu.
+- Mark paid 2 lan idempotent.
+- SocialGraph 404/500 thi order vao `paid_sync_failed` va co the retry.
+- Webhook duplicate khong tao side effect duplicate.
+- Clear verify khi refund neu policy yeu cau.
 
-## 12. Dieu chua can lam V1
+## 12. Viec chua can lam V1
 
-- Khong can payment provider that.
-- Khong can refund phuc tap.
-- Khong can invoice PDF.
-- Khong can subscription auto-renew.
-- Khong can doc/sua SocialGraph DB.
-
+- Chua can payment provider that.
+- Chua can subscription auto-renew.
+- Chua can invoice PDF.
+- Chua can doc/sua database SocialGraph.
+- Chua can feed/post promotion.

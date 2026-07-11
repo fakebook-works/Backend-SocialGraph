@@ -1,6 +1,5 @@
 namespace SocialGraph.Api.Service;
 
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 internal static class GraphJson
@@ -39,26 +38,29 @@ internal static class GraphJson
         return DateTimeOffset.UtcNow.ToString("O");
     }
 
-    public static string UserJson(string name, bool gender, string birthdate, string location, string? avatar)
+    public static string UserJson(string name, bool gender, string birthdate, string location, string? avatar, string? background)
     {
         return new JsonObject
         {
             ["avatar"] = avatar ?? "",
+            ["background"] = background ?? "",
             ["name"] = name,
             ["bio"] = $"Xin chao, minh la {name} den tu {location}",
             ["gender"] = gender ? 1 : 0,
             ["birthdate"] = birthdate,
             ["location"] = location,
+            ["verify"] = "",
             ["privacy"] = 0,
             ["create"] = UtcNowString()
         }.ToJsonString();
     }
 
-    public static string GroupJson(string name, string? bio, int privacy, string? avatar)
+    public static string GroupJson(string name, string? bio, int privacy, string? avatar, string? background)
     {
         return new JsonObject
         {
             ["avatar"] = avatar ?? "",
+            ["background"] = background ?? "",
             ["name"] = name,
             ["bio"] = bio ?? "",
             ["privacy"] = privacy,
@@ -76,6 +78,15 @@ internal static class GraphJson
         }.ToJsonString();
     }
 
+    public static string GroupPostJson(string content)
+    {
+        return new JsonObject
+        {
+            ["content"] = content,
+            ["create"] = UtcNowString()
+        }.ToJsonString();
+    }
+
     public static string ContentJson(string content)
     {
         return new JsonObject
@@ -85,13 +96,14 @@ internal static class GraphJson
         }.ToJsonString();
     }
 
-    public static string StoryJson(string content, DateTime expire)
+    public static string StoryJson(string content)
     {
+        var createdAt = DateTimeOffset.UtcNow;
         return new JsonObject
         {
             ["content"] = content,
-            ["create"] = UtcNowString(),
-            ["expire"] = expire.ToUniversalTime().ToString("O")
+            ["create"] = createdAt.ToString("O"),
+            ["expire"] = createdAt.AddDays(1).ToString("O")
         }.ToJsonString();
     }
 
@@ -120,19 +132,4 @@ internal static class GraphJson
         return json.ToJsonString();
     }
 
-    public static IReadOnlyDictionary<string, string> Metadata(JsonElement element)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (element.ValueKind != JsonValueKind.Object)
-        {
-            return result;
-        }
-
-        foreach (var property in element.EnumerateObject())
-        {
-            result[property.Name] = property.Value.ToString();
-        }
-
-        return result;
-    }
 }

@@ -96,6 +96,16 @@ public class Mutation
         return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, cancellationToken);
     }
 
+    public Task<UserProfileResult?> ChangeUserBackgroundAsync(
+        long userId,
+        string backgroundUrl,
+        string? originalUrl,
+        [Service] IUserGraphService userGraphService,
+        CancellationToken cancellationToken)
+    {
+        return userGraphService.ChangeUserBackgroundAsync(userId, backgroundUrl, originalUrl, cancellationToken);
+    }
+
     public Task<bool> SendFriendRequestAsync(
         long requesterId,
         long receiverId,
@@ -152,6 +162,16 @@ public class Mutation
     public Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, [Service] IGroupGraphService groupGraphService, CancellationToken cancellationToken)
     {
         return groupGraphService.ChangeGroupAvatarAsync(groupId, avatarUrl, cancellationToken);
+    }
+
+    public Task<GroupResult?> ChangeGroupBackgroundAsync(
+        long groupId,
+        string backgroundUrl,
+        string? originalUrl,
+        [Service] IGroupGraphService groupGraphService,
+        CancellationToken cancellationToken)
+    {
+        return groupGraphService.ChangeGroupBackgroundAsync(groupId, backgroundUrl, originalUrl, cancellationToken);
     }
 
     public Task<bool> AddGroupMemberAsync(long groupId, long userId, [Service] IGroupGraphService groupGraphService, CancellationToken cancellationToken)

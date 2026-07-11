@@ -1,11 +1,12 @@
-# Billing Service Contract
+# Payment/Billing Service Contract
 
-SocialGraph does not own billing data. It only calls Billing to read active entitlements.
+SocialGraph khong doc entitlement tu Billing nua. Billing/Payment chi xu ly order va thanh toan; khi goi tich xanh thanh cong thi goi REST internal cua SocialGraph de cap nhat `user.data.verify`.
 
-## Products
+## Product V1
 
-- `verified_18k`: price `18000`, grants entitlement `verified` for 30 days.
-- `feed_boost_36k`: price `36000`, grants entitlement `feed_boost_author` for 30 days.
+- `verified_18k`: price `18000`, cap tich xanh cho user den thoi diem `expiresAt`.
+
+Goi tra tien de tang ti le xuat hien tren feed da bi loai khoi scope hien tai. Recommendation khong nhan multiplier tu SocialGraph.
 
 ## Suggested Database
 
@@ -24,58 +25,60 @@ CREATE TABLE billing_orders (
     paid_at TIMESTAMPTZ,
     provider TEXT,
     provider_ref TEXT,
+    verify_expires_at TIMESTAMPTZ,
     metadata JSONB NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX idx_billing_orders_user ON billing_orders (user_id, created_at DESC);
 
-CREATE TABLE user_entitlements (
+CREATE TABLE billing_webhook_events (
     id BIGINT PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    type TEXT NOT NULL,
-    source_order_id BIGINT REFERENCES billing_orders(id),
-    starts_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'
+    provider TEXT NOT NULL,
+    provider_event_id TEXT NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ,
+    payload JSONB NOT NULL,
+    UNIQUE (provider, provider_event_id)
 );
-
-CREATE INDEX idx_user_entitlements_active
-    ON user_entitlements (user_id, type, expires_at);
 ```
 
-## APIs Needed By SocialGraph
+Khong bat buoc tao bang `user_entitlements` cho SocialGraph. Neu Billing van muon luu lich su quyen loi noi bo, bang do chi la state rieng cua Billing.
 
-### Get Active Entitlements
+## SocialGraph API Billing Can Goi
 
-`GET /internal/billing/entitlements?userId={userId}`
+### Set User Verify
 
-Response:
+```http
+PUT /internal/users/{userId}/verify
+```
+
+Body cap/gia han:
 
 ```json
 {
-  "entitlements": [
-    {
-      "type": "verified",
-      "expiresAt": "2026-08-09T00:00:00Z",
-      "metadata": {}
-    },
-    {
-      "type": "feed_boost_author",
-      "expiresAt": "2026-08-09T00:00:00Z",
-      "metadata": {
-        "boostMultiplier": "1.3"
-      }
-    }
-  ]
+  "expiresAt": "2026-08-10T00:00:00Z"
 }
 ```
 
-SocialGraph fallback behavior: if this API is missing or fails, `isVerified=false` and `boostMultiplier=1.0`.
+Body thu hoi/clear:
+
+```json
+{
+  "expiresAt": null
+}
+```
+
+Rules:
+
+- Billing khong ghi truc tiep database SocialGraph.
+- Billing chi goi endpoint nay sau khi order da paid hoac khi can thu hoi verify.
+- `expiresAt` nen gui dang UTC ISO-8601.
+- SocialGraph se tu tinh `isVerified = verify > now`.
 
 ## APIs For Frontend/Gateway Later
 
-- `POST /billing/orders`: create an order for `verified_18k` or `feed_boost_36k`.
+- `POST /billing/orders`: create an order for `verified_18k`.
 - `POST /billing/orders/{id}/mock-paid`: development-only endpoint to mark an order paid.
 - `POST /billing/webhook`: real payment provider callback later.
 
-When an order becomes paid, Billing creates or extends the matching entitlement by 30 days.
+When an order becomes paid, Billing computes `verify_expires_at` and calls `PUT /internal/users/{userId}/verify`.

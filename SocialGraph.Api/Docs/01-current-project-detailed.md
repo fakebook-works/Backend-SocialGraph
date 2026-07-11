@@ -16,7 +16,7 @@ Tai lieu nay mo ta code hien tai cua `SocialGraph.Api`: cau truc file, cong dung
   - Search: tao/cap nhat/xoa index.
   - Recommendation: tao/xoa embedding.
   - Notification: tao notification.
-  - Billing: doc entitlement `verified` va `feed_boost_author`.
+  - Payment/Billing: goi REST internal cua SocialGraph de cap nhat han `verify` sau khi thanh toan thanh cong.
 
 Ranh gioi quan trong:
 
@@ -24,7 +24,7 @@ Ranh gioi quan trong:
 - REST trong SocialGraph chi danh cho service-to-service.
 - PostgreSQL la source of truth.
 - Redis chi la cache.
-- Billing khong nam trong SocialGraph DB; SocialGraph chi doc Billing qua HTTP.
+- `verify` cua user nam trong `user.data.verify`; chi REST internal moi duoc sua field nay.
 
 ## 2. Cau truc file hien tai
 
@@ -45,7 +45,8 @@ SocialGraph.Api/
     Associations.cs
     MyDbContext.cs
   RestAPI/
-    Controller.cs
+    RecommendationController.cs
+    PaymentController.cs
   Service/
     GraphConstants.cs
     GraphJson.cs
@@ -65,8 +66,6 @@ SocialGraph.Api/
     CandidateService.cs
     IExternalServiceClient.cs
     ExternalServiceClient.cs
-    IBillingClient.cs
-    BillingClient.cs
   SubGraphQL/
     Query.cs
     Mutation.cs
@@ -86,7 +85,6 @@ Dang ky dependency injection va endpoint:
   - `IObjectService -> ObjectService`
   - `IAssociationService -> AssociationService`
   - `IExternalServiceClient -> ExternalServiceClient`
-  - `IBillingClient -> BillingClient`
   - `IUserGraphService -> UserGraphService`
   - `IGroupGraphService -> GroupGraphService`
   - `IContentGraphService -> ContentGraphService`
@@ -177,13 +175,14 @@ File: `Service/GraphConstants.cs`
 
 | otype | Name | data JSON |
 |---:|---|---|
-| 0 | User | `avatar`, `name`, `bio`, `gender`, `birthdate`, `location`, `privacy`, `create` |
-| 1 | Group | `avatar`, `name`, `bio`, `privacy`, `create` |
-| 2 | Post | `content`, `privacy`, `create` |
-| 3 | Reel | `content`, `create` |
-| 4 | Story | `content`, `create`, `expire` |
-| 5 | Comment | `content`, `create` |
-| 6 | Media | `type`, `url` |
+| 0 | User | `avatar`, `background`, `name`, `bio`, `gender`, `birthdate`, `location`, `verify`, `privacy`, `create` |
+| 1 | Group | `avatar`, `background`, `name`, `bio`, `privacy`, `create` |
+| 2 | FeedPost | `content`, `privacy`, `create` |
+| 3 | GroupPost | `content`, `create` va co association `published_in(10)` den group |
+| 4 | Reel | `content`, `create` |
+| 5 | Story | `content`, `create`, `expire` |
+| 6 | Comment | `content`, `create` |
+| 7 | Media | `type`, `url` |
 
 ### Association types
 
@@ -194,9 +193,9 @@ File: `Service/GraphConstants.cs`
 | 3 / 4 | Liked / LikedBy | user -> post/comment/reel/story |
 | 5 / 6 | Authored / AuthoredBy | user -> post/comment/reel/story |
 | 7 | Comment | target -> comment, khong inverse |
-| 8 | Share | source post/story -> new post/reel, khong inverse |
-| 9 / 10 | Published / PublishedIn | group -> post |
-| 11 / 12 | Tagged / TaggedIn | post -> user |
+| 8 | Share | new feed post/story -> shared post/reel, khong inverse |
+| 9 / 10 | Published / PublishedIn | group -> group post |
+| 11 / 12 | Tagged / TaggedIn | feed post -> user |
 | 13 / 14 | Member / HaveMember | user -> group |
 | 15 / 16 | Admin / HaveAdmin | user -> group |
 | 17 / 18 | Watched / WatchedBy | user -> reel/story |
@@ -225,6 +224,7 @@ Input:
 - `Email: string`
 - `Password: string`
 - `Avatar: string?`
+- `Background: string?`
 
 Dung cho `createUser`.
 
@@ -234,6 +234,7 @@ Input:
 
 - `Id: long`
 - `Avatar?: string`
+- `Background?: string`
 - `Name?: string`
 - `Bio?: string`
 - `Gender?: bool`
@@ -250,11 +251,13 @@ Field null se khong patch.
 - `Bio?: string`
 - `Privacy: int`
 - `Avatar?: string`
+- `Background?: string`
 
 #### UpdateGroupInput
 
 - `Id: long`
 - `Avatar?: string`
+- `Background?: string`
 - `Name?: string`
 - `Bio?: string`
 - `Privacy?: int`
@@ -264,7 +267,7 @@ Field null se khong patch.
 - `Type: int`
 - `Url: string`
 
-Media type theo convention: photo/video/audio/file/link.
+Media type theo convention: photo/video/audio/file/link. Frontend truyen URL da upload; SocialGraph tao media object va association tu URL nay, khong yeu cau frontend truyen media id.
 
 #### CreateFeedPostInput
 
@@ -278,13 +281,16 @@ Media type theo convention: photo/video/audio/file/link.
 - `AuthorId: long`
 - `GroupId: long`
 - `Content: string`
-- `Privacy: int`
 - `Media?: IReadOnlyList<MediaInput>`
+
+Group post khong nhan `Privacy`. Khi doc/hien thi, privacy cua group post lay tu group chua post.
 
 #### UpdatePostInput
 
 - `Id: long`
 - `Privacy: int`
+
+Chi dung cho feed post. Group post khong co privacy rieng.
 
 #### CreateCommentInput
 
@@ -296,14 +302,17 @@ Media type theo convention: photo/video/audio/file/link.
 
 - `AuthorId: long`
 - `Content: string`
-- `Expire: DateTime`
-- `Media?: IReadOnlyList<MediaInput>`
+- `Media?: MediaInput`
+
+Story expire tu tinh bang `create + 1 day`, frontend khong truyen expire. Story chi cho toi da 1 media.
 
 #### CreateReelInput
 
 - `AuthorId: long`
 - `Content: string`
-- `Media?: IReadOnlyList<MediaInput>`
+- `Media?: MediaInput`
+
+Reel chi cho toi da 1 media.
 
 #### SharePostInput
 
@@ -333,6 +342,7 @@ Dung cho association pagination.
 
 - `Id`
 - `Avatar`
+- `Background`
 - `Name`
 - `Bio`
 - `Gender`
@@ -340,17 +350,19 @@ Dung cho association pagination.
 - `Location`
 - `Privacy`
 - `Create`
+- `Verify`
 - `IsVerified`
 - `FriendCount`
 - `FollowerCount`
 - `FollowingCount`
 
-`IsVerified` den tu Billing entitlement `verified`.
+`Verify` la thoi diem het han tich xanh dang luu trong `user.data.verify`. `IsVerified` duoc tinh bang cach parse `Verify` va so sanh voi thoi gian hien tai.
 
 #### GroupResult
 
 - `Id`
 - `Avatar`
+- `Background`
 - `Name`
 - `Bio`
 - `Privacy`
@@ -374,17 +386,6 @@ Dung cho association pagination.
 - `AuthorId`
 - `Source`: `friend`, `followed`, `group`, `recent_public`
 - `CreatedAt`
-- `BoostMultiplier`
-
-`BoostMultiplier` den tu Billing entitlement `feed_boost_author`; fallback la `1.0`.
-
-#### EntitlementResult
-
-- `Type`
-- `ExpiresAt`
-- `Metadata`
-
-Dung noi bo cho Billing client.
 
 ## 6. Core services
 
@@ -561,11 +562,13 @@ Logic:
 1. Tao user object type `0`.
 2. Data mac dinh:
    - `avatar`
+   - `background`
    - `name`
    - `bio = "Xin chao, minh la {name} den tu {location}"`
    - `gender = 1 neu input.Gender true, nguoc lai 0`
    - `birthdate`
    - `location`
+   - `verify = ""`
    - `privacy = 0`
    - `create = UTC now`
 3. Goi external:
@@ -573,7 +576,7 @@ Logic:
    - Messenger create user.
    - Search create index user.
    - Recommendation create user embedding.
-4. Tra profile, profile co `IsVerified` tu Billing.
+4. Tra profile, profile co `Verify` va `IsVerified` tinh tu user data.
 
 #### UpdateUserAsync(UpdateUserInput input)
 
@@ -581,7 +584,7 @@ Return: `UserProfileResult?`.
 
 Logic:
 
-1. Tao patch JSON tu field non-null.
+1. Tao patch JSON tu field non-null, gom ca `avatar` va `background` neu co.
 2. Update object type user.
 3. Neu update name thi goi Search update index.
 4. Tra profile moi.
@@ -610,8 +613,21 @@ Logic:
 2. Neu khong co hoac khong phai user thi null.
 3. Parse JSON data.
 4. Dem friend/follower/following bang association counts.
-5. Goi Billing `IsVerifiedAsync`.
+5. Parse `verify` trong user data; neu la thoi gian tuong lai thi `IsVerified = true`.
 6. Tra profile result.
+
+#### SetUserVerifyAsync(long userId, DateTimeOffset? expiresAt)
+
+Chi duoc goi qua REST internal de payment/billing service cap nhat tich xanh.
+
+Logic:
+
+1. Neu `expiresAt` co gia tri thi convert sang UTC ISO string.
+2. Neu `expiresAt` null thi set `verify = ""` de clear tich xanh.
+3. Goi `UpdateSystemObjectAsync` de patch field `verify` bo qua mutable field rules thong thuong.
+4. Tra profile moi.
+
+Field `verify` khong nam trong `ObjectTypeRules.MutableFields`, nen GraphQL `updateUser` va raw `updateObject` khong sua duoc field nay.
 
 #### ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl)
 
@@ -619,12 +635,25 @@ Logic:
 
 1. Kiem tra user ton tai va object type la user.
 2. Neu `originalUrl` khong rong:
-   - tao media object type `6` voi `{ type = photo, url = originalUrl }`.
+   - tao media object type `7` voi `{ type = photo, url = originalUrl }`.
    - tao association `userId --owned(22)--> mediaId`.
 3. Patch `avatar = avatarUrl` trong user data.
 4. Tra profile moi.
 
 `avatarUrl` la URL anh da crop de hien thi truc tiep tren profile. `originalUrl` la URL anh goc user vua upload; neu user chon lai anh da owned va chi gui anh crop thi `originalUrl` co the null/rong.
+
+#### ChangeUserBackgroundAsync(long userId, string backgroundUrl, string? originalUrl)
+
+Logic:
+
+1. Kiem tra user ton tai va object type la user.
+2. Neu `originalUrl` khong rong:
+   - tao media object type `7` voi `{ type = photo, url = originalUrl }`.
+   - tao association `userId --owned(22)--> mediaId`.
+3. Patch `background = backgroundUrl` trong user data.
+4. Tra profile moi.
+
+`backgroundUrl` la URL anh background da crop de hien thi tren profile. `originalUrl` la URL anh goc; neu user chon anh da owned thi co the null/rong de khong tao media moi.
 
 #### SendFriendRequestAsync(long requesterId, long receiverId)
 
@@ -669,6 +698,7 @@ Unblock xoa association `blocked(23)`.
 Logic:
 
 1. Tao group object type `1`.
+   - data gom `avatar`, `background`, `name`, `bio`, `privacy`, `create`.
 2. Tao association `creator --admin(15)--> group`, inverse `have_admin(16)`.
 3. Goi Search create index group.
 4. Tra `GroupResult`.
@@ -677,7 +707,7 @@ Logic:
 
 Logic:
 
-1. Patch avatar/name/bio/privacy.
+1. Patch avatar/background/name/bio/privacy.
 2. Neu name thay doi thi goi Search update index.
 3. Tra group moi.
 
@@ -702,6 +732,19 @@ Logic:
 
 Patch field `avatar` trong group data.
 
+#### ChangeGroupBackgroundAsync(long groupId, string backgroundUrl, string? originalUrl)
+
+Logic:
+
+1. Kiem tra group ton tai va object type la group.
+2. Neu `originalUrl` khong rong:
+   - tao media object type `7` voi `{ type = photo, url = originalUrl }`.
+   - tao association `groupId --owned(22)--> mediaId`.
+3. Patch `background = backgroundUrl` trong group data.
+4. Tra group moi.
+
+`backgroundUrl` la anh background da crop. `originalUrl` la anh goc neu group vua upload anh moi.
+
 #### AddMemberAsync / RemoveMemberAsync
 
 - Add: `user --member(13)--> group`, inverse `have_member(14)`.
@@ -718,9 +761,9 @@ Patch field `avatar` trong group data.
 
 Logic:
 
-1. Tao post object type `2`: `{content, privacy, create}`.
+1. Tao feed post object type `2`: `{content, privacy, create}`.
 2. Voi moi media input:
-   - tao media object type `6`.
+   - tao media object type `7`.
    - tao `author --owned(22)--> media`.
    - tao `post --contained(20)--> media`.
 3. Tao `author --authored(5)--> post`, inverse `authored_by(6)`.
@@ -732,16 +775,25 @@ Logic:
 
 Logic:
 
-1. Goi create feed post.
-2. Tao association `group --published(9)--> post`, inverse `published_in(10)`.
-3. Tra content result.
+1. Tao group post object type `3`: `{content, create}`. Khong luu `privacy` rieng trong group post.
+2. Voi moi media input:
+   - tao media object type `7`.
+   - tao `author --owned(22)--> media`.
+   - tao `post --contained(20)--> media`.
+3. Tao `author --authored(5)--> post`, inverse `authored_by(6)`.
+4. Tao association `group --published(9)--> post`, inverse `published_in(10)`.
+5. Goi Search create index post.
+6. Goi Recommendation create post embedding voi content + media URLs.
+7. Tra content result. `Privacy` trong result lay tu group hien tai.
 
 #### UpdatePostAsync(UpdatePostInput input)
 
 Logic:
 
-1. Patch `privacy` cua post.
-2. Tra content result moi.
+1. Patch object type `FeedPost(2)` voi field `privacy`.
+2. Neu id la group post thi update fail vi otype khong khop, tra null.
+3. Khong can check `published_in(10)` de phan biet feed/group post.
+4. Tra content result moi.
 
 #### DeleteContentAsync(long contentId)
 
@@ -762,12 +814,14 @@ Logic:
 2. Lay author qua association `authored_by(6)`.
 3. Lay media qua association `contained(20)`.
 4. Build `ContentResult`.
+   - Feed post: `Privacy` lay tu post data.
+   - Group post: `Privacy` lay tu group data qua association `published_in(10)`.
 
 #### CreateCommentAsync(CreateCommentInput input)
 
 Logic:
 
-1. Tao comment object type `5`.
+1. Tao comment object type `6`.
 2. Tao `author --authored(5)--> comment`.
 3. Tao `target --comment(7)--> comment`.
 4. Lay author cua target.
@@ -778,21 +832,21 @@ Logic:
 
 Logic:
 
-1. Tao story object type `4`: `{content, create, expire}`.
-2. Attach media neu co.
+1. Tao story object type `5`: `{content, create, expire}` voi `expire = create + 1 day`.
+2. Attach toi da 1 media neu co.
 3. Tao authored association.
 4. Tra result.
 
 #### CreateReelAsync(CreateReelInput input)
 
-Logic tuong tu story nhung object type `3`, khong co expire.
+Logic tuong tu story nhung object type `4`, khong co expire va chi attach toi da 1 media.
 
 #### SharePostAsync(SharePostInput input)
 
 Logic:
 
 1. Tao post moi bang `CreateFeedPostAsync`.
-2. Tao association `source --share(8)--> newPost`.
+2. Tao association `newPost --share(8)--> source`.
 3. Tra post moi.
 
 #### LikeAsync / UnlikeAsync
@@ -835,13 +889,13 @@ Logic:
    - `blocked(23)`
    - `blocked_by(24)`
 3. Gom candidate tu:
-   - friend authors: user `friend(0)` -> author `authored(5)` post.
-   - followed authors: user `followed(1)` -> author `authored(5)` post.
-   - groups: user `member/admin(13/15)` -> group `published(9)` post.
-   - fallback recent public posts: object type post, privacy `0`.
-4. Loai candidate cua author bi block.
-5. Lay `boostMultiplier` tu Billing cho author.
-6. Sort tam thoi theo boostMultiplier desc, id desc.
+   - friend authors: user `friend(0)` -> author `authored(5)` feed post object type `2`.
+   - followed authors: user `followed(1)` -> author `authored(5)` feed post object type `2`.
+   - groups: user `member/admin(13/15)` -> group `published(9)` group post object type `3`.
+   - fallback recent public feed posts: object type `2`, privacy `0`.
+4. Group posts chi lay qua groups cua user vi chung la object type `3`, khong phai loc bang `published_in`.
+5. Loai candidate cua author bi block.
+6. Sort tam thoi theo id desc, Snowflake id lon hon gan voi bai moi hon.
 7. Tra top limit.
 
 Recommendation service moi la noi rank feed cuoi cung.
@@ -853,32 +907,6 @@ Tuong tu post nhung nguon:
 - friend authors -> authored reels.
 - followed authors -> authored reels.
 - recent public reels.
-
-### BillingClient
-
-#### GetActiveEntitlementsAsync(long userId)
-
-Logic:
-
-1. Doc endpoint `ExternalServices:BillingServiceGetActiveEntitlements`.
-2. Goi GET `{endpoint}?userId={userId}`.
-3. Chap nhan response:
-   - array truc tiep, hoac
-   - object co field `entitlements`.
-4. Parse `type`, `expiresAt`, `metadata`.
-5. Neu endpoint thieu, loi HTTP, timeout, JSON invalid: tra list rong.
-
-#### IsVerifiedAsync(long userId)
-
-Tra true neu co entitlement active type `verified`.
-
-#### GetFeedBoostMultiplierAsync(long userId)
-
-Tra:
-
-- `1.0` neu khong co entitlement `feed_boost_author`.
-- `metadata.boostMultiplier` neu parse duoc.
-- fallback `1.3` neu co entitlement nhung khong co metadata multiplier.
 
 ### ExternalServiceClient
 
@@ -989,6 +1017,7 @@ User:
 - `updateUser(input: UpdateUserInput)`
 - `deleteUser(userId)`
 - `changeUserAvatar(userId, avatarUrl, originalUrl)`
+- `changeUserBackground(userId, backgroundUrl, originalUrl)`
 
 Relation:
 
@@ -1005,6 +1034,7 @@ Group:
 - `updateGroup(input)`
 - `deleteGroup(groupId)`
 - `changeGroupAvatar(groupId, avatarUrl)`
+- `changeGroupBackground(groupId, backgroundUrl, originalUrl)`
 - `addGroupMember(groupId, userId)`
 - `removeGroupMember(groupId, userId)`
 - `addGroupAdmin(groupId, userId)`
@@ -1030,9 +1060,12 @@ Content:
 
 ## 9. REST internal API
 
-File: `RestAPI/Controller.cs`
+Files:
 
-Route prefix: `/internal/recommendation`.
+- `RestAPI/RecommendationController.cs`
+- `RestAPI/PaymentController.cs`
+
+Route prefix recommendation: `/internal/recommendation`.
 
 ### GET /internal/recommendation/post-candidates
 
@@ -1049,8 +1082,7 @@ Return:
     "id": 123,
     "authorId": 456,
     "source": "friend",
-    "createdAt": "2026-07-09T00:00:00.0000000Z",
-    "boostMultiplier": 1.3
+    "createdAt": "2026-07-09T00:00:00.0000000Z"
   }
 ]
 ```
@@ -1058,6 +1090,26 @@ Return:
 ### GET /internal/recommendation/reel-candidates
 
 Tuong tu post candidates nhung object type reel.
+
+### PUT /internal/users/{userId}/verify
+
+Endpoint internal de payment/billing service cap nhat tich xanh cho user sau khi thanh toan thanh cong.
+
+Request body:
+
+```json
+{
+  "expiresAt": "2026-08-10T00:00:00Z"
+}
+```
+
+Logic:
+
+- `expiresAt` co gia tri: patch `user.data.verify` bang UTC ISO string.
+- `expiresAt = null`: clear `user.data.verify`, user het tich xanh.
+- Tra `UserProfileResult`; neu user khong ton tai thi `404`.
+
+Field `verify` khong sua duoc qua GraphQL `updateUser` hay raw `updateObject`.
 
 ## 10. Redis cache
 
@@ -1091,6 +1143,6 @@ Marker can thiet vi Redis khong giu sorted set rong. Khong co marker thi coi nhu
 - SocialGraph external calls khong dam bao transaction distributed. Neu Auth/Search/Recommend loi, graph local van co the da ghi thanh cong.
 - Friend request hien chi tao notification, chua co pending table trong SocialGraph.
 - Privacy rule hien moi luu field `privacy`, chua enforce day du tren query/candidate ngoai fallback recent public.
-- Billing service can tra entitlement nhanh va on dinh vi profile/candidate goi Billing.
+- Payment/Billing service khong ghi DB SocialGraph truc tiep; khi thanh toan tich xanh thanh cong thi goi REST internal `PUT /internal/users/{userId}/verify`.
 - Recommendation service nen coi candidate cua SocialGraph la input pool, khong phai final feed.
 - Notification service phai hieu action type giong `ExternalNotificationAction`.

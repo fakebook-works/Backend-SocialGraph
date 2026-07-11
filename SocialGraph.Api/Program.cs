@@ -22,7 +22,6 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp => {
 builder.Services.AddScoped<IObjectService, ObjectService>();
 builder.Services.AddScoped<IAssociationService, AssociationService>();
 builder.Services.AddScoped<IExternalServiceClient, ExternalServiceClient>();
-builder.Services.AddScoped<IBillingClient, BillingClient>();
 builder.Services.AddScoped<IUserGraphService, UserGraphService>();
 builder.Services.AddScoped<IGroupGraphService, GroupGraphService>();
 builder.Services.AddScoped<IContentGraphService, ContentGraphService>();

@@ -3,16 +3,18 @@ SET search_path TO Social_Graph;
 
 -- ** Social Graph object ** --
 -------------------------------
--- 0  user {avatar 1, name 1, bio 1, gender 1, birthdate 1, location 1, privacy 1, create} 
+-- 0  user {avatar 1, background 1, name 1, bio 1, gender 1, birthdate 1, location 1, verify 0, privacy 1, create} 
+--    verify la UTC ISO expiresAt cua tich xanh; 0 nghia la chi REST internal cua SocialGraph cho Payment/Billing duoc sua
 mode: 0 normal (only friend relation), 1 advanced (friend and followed relation) gender: 0 male, 1 female
--- 1  group {avatar 1, name 1, bio 1, privacy 1, create}                                   
+-- 1  group {avatar 1, background 1, name 1, bio 1, privacy 1, create}  privacy: 0 public, 1 private
 
--- 2  post {content, privacy 1, create}
--- 3  reel {content, create}
--- 4  story {content, create, expire}
--- 5  comment {content, create}
+-- 2  post feed {content, privacy 1, create};  privacy: 0 public, 1 friends
+-- 3  post group {content, create}  
+-- 4  reel {content, create}
+-- 5  story {content, create, expire}
+-- 6  comment {content, create}
 
--- 6  media {type, url} type: photo/video/audio/file/link
+-- 7  media {type, url} type: photo/video/audio/file/link
 những trường đánh dấu 1 là có thể sửa đổi, còn lại thì ko, tất cả đều có chức năng xoá
 -- ** Social Graph association ** --
 ------------------------------------
@@ -28,13 +30,13 @@ những trường đánh dấu 1 là có thể sửa đổi, còn lại thì ko,
 -- 6  authored_by (post/comment/reel/story->user)
 
 -- 7  comment (post/reel/story/comment->comment)
--- 8  share (post/story->post/reel)
+-- 8  share (new post feed/story-> shared post(privacy 0)/reel) 
 
--- 9  published (group->post) -- 9 10
--- 10  published_in (post->group)
+-- 9  published (group->post group) -- 9 10
+-- 10  published_in (post group->group)
 
--- 11  tagged (post->user) -- 11 12
--- 12  tagged_in (user->post)
+-- 11  tagged (post feed->user) -- 11 12
+-- 12  tagged_in (user->post feed)
 
 -- 13  member (user->group) -- 13 14
 -- 14  have_member (group->user)

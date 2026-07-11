@@ -7,25 +7,22 @@ public sealed class UserGraphService : IUserGraphService
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
-    private readonly IBillingClient _billingClient;
 
     public UserGraphService(
         IObjectService objectService,
         IAssociationService associationService,
-        IExternalServiceClient externalServiceClient,
-        IBillingClient billingClient)
+        IExternalServiceClient externalServiceClient)
     {
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
-        _billingClient = billingClient;
     }
 
     public async Task<UserProfileResult> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
         var user = await _objectService.AddObjectAsync(
             GraphObjectType.User,
-            GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location, input.Avatar),
+            GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location, input.Avatar, input.Background),
             cancellationToken);
 
         await _externalServiceClient.CreateUserAsync(user.id, input.Email, input.Password, input.Name, cancellationToken);
@@ -36,6 +33,7 @@ public sealed class UserGraphService : IUserGraphService
     {
         var patch = GraphJson.PatchJson(
             ("avatar", input.Avatar),
+            ("background", input.Background),
             ("name", input.Name),
             ("bio", input.Bio),
             ("gender", input.Gender is null ? null : input.Gender.Value ? 1 : 0),
@@ -81,6 +79,7 @@ public sealed class UserGraphService : IUserGraphService
         return new UserProfileResult(
             item.id,
             GraphJson.String(data, "avatar"),
+            GraphJson.String(data, "background"),
             GraphJson.String(data, "name"),
             GraphJson.String(data, "bio"),
             GraphJson.Int(data, "gender"),
@@ -88,7 +87,8 @@ public sealed class UserGraphService : IUserGraphService
             GraphJson.String(data, "location"),
             GraphJson.Int(data, "privacy"),
             GraphJson.String(data, "create"),
-            await _billingClient.IsVerifiedAsync(userId, cancellationToken),
+            GraphJson.String(data, "verify"),
+            IsVerifyActive(data),
             await _associationService.CountAssociationAsync(userId, GraphAssociationType.Friend, cancellationToken),
             await _associationService.CountAssociationAsync(userId, GraphAssociationType.FollowedBy, cancellationToken),
             await _associationService.CountAssociationAsync(userId, GraphAssociationType.Followed, cancellationToken));
@@ -108,18 +108,54 @@ public sealed class UserGraphService : IUserGraphService
 
         if (!string.IsNullOrWhiteSpace(originalUrl))
         {
-            var media = await _objectService.AddObjectAsync(
-                GraphObjectType.Media,
-                GraphJson.MediaJson(GraphMediaType.Photo, originalUrl),
-                cancellationToken);
-
-            await _associationService.AddAssociationAsync(userId, GraphAssociationType.Owned, media.id, cancellationToken);
+            await AddOwnedPhotoAsync(userId, originalUrl, cancellationToken);
         }
 
         var updated = await _objectService.UpdateObjectAsync(
             userId,
             GraphObjectType.User,
             GraphJson.PatchJson(("avatar", avatarUrl)),
+            cancellationToken);
+
+        return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
+    }
+
+    public async Task<UserProfileResult?> SetUserVerifyAsync(
+        long userId,
+        DateTimeOffset? expiresAt,
+        CancellationToken cancellationToken = default)
+    {
+        var verify = expiresAt?.ToUniversalTime().ToString("O") ?? "";
+        var updated = await _objectService.UpdateSystemObjectAsync(
+            userId,
+            GraphObjectType.User,
+            GraphJson.PatchJson(("verify", verify)),
+            cancellationToken);
+
+        return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
+    }
+
+    public async Task<UserProfileResult?> ChangeUserBackgroundAsync(
+        long userId,
+        string backgroundUrl,
+        string? originalUrl = null,
+        CancellationToken cancellationToken = default)
+    {
+        var currentUser = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        if (currentUser is null || currentUser.otype != GraphObjectType.User)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(originalUrl))
+        {
+            await AddOwnedPhotoAsync(userId, originalUrl, cancellationToken);
+        }
+
+        var updated = await _objectService.UpdateObjectAsync(
+            userId,
+            GraphObjectType.User,
+            GraphJson.PatchJson(("background", backgroundUrl)),
             cancellationToken);
 
         return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
@@ -164,5 +200,21 @@ public sealed class UserGraphService : IUserGraphService
     {
         await _externalServiceClient.NotifyAsync(creatorId, receiverId, actionType, objectId, null, cancellationToken);
         return true;
+    }
+
+    private async Task AddOwnedPhotoAsync(long ownerId, string url, CancellationToken cancellationToken)
+    {
+        var media = await _objectService.AddObjectAsync(
+            GraphObjectType.Media,
+            GraphJson.MediaJson(GraphMediaType.Photo, url),
+            cancellationToken);
+
+        await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, media.id, cancellationToken);
+    }
+
+    private static bool IsVerifyActive(System.Text.Json.Nodes.JsonObject data)
+    {
+        var raw = GraphJson.String(data, "verify");
+        return DateTimeOffset.TryParse(raw, out var expiresAt) && expiresAt > DateTimeOffset.UtcNow;
     }
 }

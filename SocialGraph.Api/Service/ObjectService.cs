@@ -57,6 +57,34 @@ public sealed class ObjectService : IObjectService
             return current?.otype == otype ? current : null;
         }
 
+        return await UpdateObjectDataAsync(id, otype, patch, cancellationToken);
+    }
+
+    public async Task<SocialGraphObjectResult?> UpdateSystemObjectAsync(
+        long id,
+        short otype,
+        string patchJson,
+        CancellationToken cancellationToken = default)
+    {
+        if (!ObjectTypeRules.IsKnownObjectType(otype))
+        {
+            throw new ArgumentOutOfRangeException(nameof(otype), $"Unsupported object type: {otype}");
+        }
+
+        var patch = JsonNode.Parse(patchJson) as JsonObject
+            ?? throw new ArgumentException("JSON value must be an object.", nameof(patchJson));
+
+        return patch.Count == 0
+            ? await RetrieveObjectAsync(id, cancellationToken)
+            : await UpdateObjectDataAsync(id, otype, patch, cancellationToken);
+    }
+
+    private async Task<SocialGraphObjectResult?> UpdateObjectDataAsync(
+        long id,
+        short otype,
+        JsonObject patch,
+        CancellationToken cancellationToken)
+    {
         var patchData = patch.ToJsonString();
         var rows = await _dbContext.Database.ExecuteSqlRawAsync(
             "UPDATE social_graph.objects SET data = data || @patch WHERE id = @id AND otype = @otype",

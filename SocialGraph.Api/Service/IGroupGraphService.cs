@@ -9,6 +9,7 @@ public interface IGroupGraphService
     Task<bool> DeleteGroupAsync(long groupId, CancellationToken cancellationToken = default);
     Task<GroupResult?> GetGroupAsync(long groupId, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, CancellationToken cancellationToken = default);
+    Task<GroupResult?> ChangeGroupBackgroundAsync(long groupId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default);

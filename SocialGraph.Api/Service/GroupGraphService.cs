@@ -22,7 +22,7 @@ public sealed class GroupGraphService : IGroupGraphService
     {
         var group = await _objectService.AddObjectAsync(
             GraphObjectType.Group,
-            GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar),
+            GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar, input.Background),
             cancellationToken);
 
         await _associationService.AddAssociationAsync(input.CreatorId, GraphAssociationType.Admin, group.id, cancellationToken);
@@ -35,7 +35,7 @@ public sealed class GroupGraphService : IGroupGraphService
         var updated = await _objectService.UpdateObjectAsync(
             input.Id,
             GraphObjectType.Group,
-            GraphJson.PatchJson(("avatar", input.Avatar), ("name", input.Name), ("bio", input.Bio), ("privacy", input.Privacy)),
+            GraphJson.PatchJson(("avatar", input.Avatar), ("background", input.Background), ("name", input.Name), ("bio", input.Bio), ("privacy", input.Privacy)),
             cancellationToken);
 
         if (updated is null)
@@ -75,6 +75,7 @@ public sealed class GroupGraphService : IGroupGraphService
         return new GroupResult(
             item.id,
             GraphJson.String(data, "avatar"),
+            GraphJson.String(data, "background"),
             GraphJson.String(data, "name"),
             GraphJson.String(data, "bio"),
             GraphJson.Int(data, "privacy"),
@@ -86,6 +87,32 @@ public sealed class GroupGraphService : IGroupGraphService
     public async Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, CancellationToken cancellationToken = default)
     {
         var updated = await _objectService.UpdateObjectAsync(groupId, GraphObjectType.Group, GraphJson.PatchJson(("avatar", avatarUrl)), cancellationToken);
+        return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
+    }
+
+    public async Task<GroupResult?> ChangeGroupBackgroundAsync(
+        long groupId,
+        string backgroundUrl,
+        string? originalUrl = null,
+        CancellationToken cancellationToken = default)
+    {
+        var currentGroup = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        if (currentGroup is null || currentGroup.otype != GraphObjectType.Group)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(originalUrl))
+        {
+            await AddOwnedPhotoAsync(groupId, originalUrl, cancellationToken);
+        }
+
+        var updated = await _objectService.UpdateObjectAsync(
+            groupId,
+            GraphObjectType.Group,
+            GraphJson.PatchJson(("background", backgroundUrl)),
+            cancellationToken);
+
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
     }
 
@@ -108,5 +135,15 @@ public sealed class GroupGraphService : IGroupGraphService
     public Task<bool> RemoveAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
         return _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
+    }
+
+    private async Task AddOwnedPhotoAsync(long ownerId, string url, CancellationToken cancellationToken)
+    {
+        var media = await _objectService.AddObjectAsync(
+            GraphObjectType.Media,
+            GraphJson.MediaJson(GraphMediaType.Photo, url),
+            cancellationToken);
+
+        await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, media.id, cancellationToken);
     }
 }

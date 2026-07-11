@@ -168,5 +168,5 @@ RestAPI
 - lấy candidate post id để recommendation service gọi (chỉ id)
 - lấy candidate reel id để recommendation service gọi (chỉ id)
 
-* cần thêm cơ chế trả 18.000 để có tích xanh
-* cần thêm cơ chế trả 36.000 thì bài đăng của user đó sẽ có tỉ lệ xuất hiện nhiều hơn trên feed người khác 
+* cơ chế trả 18.000 để có tích xanh: Payment/Billing xử lý order, sau khi paid gọi REST internal SocialGraph `PUT /internal/users/{userId}/verify`; SocialGraph lưu thời gian hết hạn trong `user.data.verify`
+* bỏ cơ chế trả 36.000 để tăng tỉ lệ xuất hiện trên feed; candidate chỉ là pool đầu vào, Recommendation tự rank không dùng gói trả phí này

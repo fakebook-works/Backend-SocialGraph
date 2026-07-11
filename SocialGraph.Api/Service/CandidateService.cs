@@ -8,16 +8,13 @@ public sealed class CandidateService : ICandidateService
 {
     private readonly MyDbContext _dbContext;
     private readonly IAssociationService _associationService;
-    private readonly IBillingClient _billingClient;
 
     public CandidateService(
         MyDbContext dbContext,
-        IAssociationService associationService,
-        IBillingClient billingClient)
+        IAssociationService associationService)
     {
         _dbContext = dbContext;
         _associationService = associationService;
-        _billingClient = billingClient;
     }
 
     public async Task<IReadOnlyList<CandidateItemResult>> GetPostCandidatesAsync(
@@ -29,14 +26,13 @@ public sealed class CandidateService : ICandidateService
         var blocked = await GetBlockedUserIdsAsync(userId, cancellationToken);
         var candidates = new Dictionary<long, CandidateItemResult>();
 
-        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 200, cancellationToken), GraphObjectType.Post, "friend", blocked, take, cancellationToken);
-        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.Post, "followed", blocked, take, cancellationToken);
+        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 200, cancellationToken), GraphObjectType.FeedPost, "friend", blocked, take, cancellationToken);
+        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.FeedPost, "followed", blocked, take, cancellationToken);
         await AddGroupPostCandidatesAsync(candidates, await GetUserGroupIdsAsync(userId, cancellationToken), blocked, take, cancellationToken);
-        await AddRecentCandidatesAsync(candidates, GraphObjectType.Post, "recent_public", blocked, take, cancellationToken);
+        await AddRecentCandidatesAsync(candidates, GraphObjectType.FeedPost, "recent_public", blocked, take, cancellationToken);
 
         return candidates.Values
-            .OrderByDescending(item => item.BoostMultiplier)
-            .ThenByDescending(item => item.Id)
+            .OrderByDescending(item => item.Id)
             .Take(take)
             .ToArray();
     }
@@ -55,8 +51,7 @@ public sealed class CandidateService : ICandidateService
         await AddRecentCandidatesAsync(candidates, GraphObjectType.Reel, "recent_public", blocked, take, cancellationToken);
 
         return candidates.Values
-            .OrderByDescending(item => item.BoostMultiplier)
-            .ThenByDescending(item => item.Id)
+            .OrderByDescending(item => item.Id)
             .Take(take)
             .ToArray();
     }
@@ -85,7 +80,7 @@ public sealed class CandidateService : ICandidateService
 
             foreach (var row in rows)
             {
-                await AddCandidateAsync(candidates, row.id, row.AuthorId, row.data, source, blocked, cancellationToken);
+                AddCandidate(candidates, row.id, row.AuthorId, row.data, source, blocked);
             }
         }
     }
@@ -104,7 +99,7 @@ public sealed class CandidateService : ICandidateService
                 join obj in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals obj.id
                 where association.id1 == groupId &&
                     association.atype == GraphAssociationType.Published &&
-                    obj.otype == GraphObjectType.Post
+                    obj.otype == GraphObjectType.GroupPost
                 orderby association.time descending
                 select new { obj.id, obj.data })
                 .Take(Math.Max(5, limit / 2))
@@ -113,7 +108,7 @@ public sealed class CandidateService : ICandidateService
             foreach (var row in rows)
             {
                 var authorId = await GetAuthorIdAsync(row.id, cancellationToken);
-                await AddCandidateAsync(candidates, row.id, authorId, row.data, "group", blocked, cancellationToken);
+                AddCandidate(candidates, row.id, authorId, row.data, "group", blocked);
             }
         }
     }
@@ -136,24 +131,23 @@ public sealed class CandidateService : ICandidateService
         foreach (var row in rows)
         {
             var data = GraphJson.ParseObject(row.data);
-            if (GraphJson.Int(data, "privacy") != 0)
+            if (objectType == GraphObjectType.FeedPost && GraphJson.Int(data, "privacy") != 0)
             {
                 continue;
             }
 
             var authorId = await GetAuthorIdAsync(row.id, cancellationToken);
-            await AddCandidateAsync(candidates, row.id, authorId, row.data, source, blocked, cancellationToken);
+            AddCandidate(candidates, row.id, authorId, row.data, source, blocked);
         }
     }
 
-    private async Task AddCandidateAsync(
+    private static void AddCandidate(
         Dictionary<long, CandidateItemResult> candidates,
         long objectId,
         long authorId,
         string dataJson,
         string source,
-        ISet<long> blocked,
-        CancellationToken cancellationToken)
+        ISet<long> blocked)
     {
         if (authorId <= 0 || blocked.Contains(authorId) || candidates.ContainsKey(objectId))
         {
@@ -165,8 +159,7 @@ public sealed class CandidateService : ICandidateService
             objectId,
             authorId,
             source,
-            GraphJson.String(data, "create"),
-            await _billingClient.GetFeedBoostMultiplierAsync(authorId, cancellationToken));
+            GraphJson.String(data, "create"));
     }
 
     private async Task<IReadOnlyList<long>> GetAssociationIdsAsync(long id1, short atype, int limit, CancellationToken cancellationToken)
@@ -194,4 +187,5 @@ public sealed class CandidateService : ICandidateService
         var author = await _associationService.RetrieveAssociationAsync(objectId, GraphAssociationType.AuthoredBy, null, 1, cancellationToken);
         return author.items.FirstOrDefault()?.id2 ?? 0;
     }
+
 }

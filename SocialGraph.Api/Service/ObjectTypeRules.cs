@@ -7,9 +7,10 @@ internal static class ObjectTypeRules
 {
     private static readonly IReadOnlyDictionary<short, ISet<string>> MutableFields = new Dictionary<short, ISet<string>>
     {
-        [GraphObjectType.User] = new HashSet<string>(StringComparer.Ordinal) { "avatar", "name", "bio", "gender", "birthdate", "location", "privacy" },
-        [GraphObjectType.Group] = new HashSet<string>(StringComparer.Ordinal) { "avatar", "name", "bio", "privacy" },
-        [GraphObjectType.Post] = new HashSet<string>(StringComparer.Ordinal) { "privacy" },
+        [GraphObjectType.User] = new HashSet<string>(StringComparer.Ordinal) { "avatar", "background", "name", "bio", "gender", "birthdate", "location", "privacy" },
+        [GraphObjectType.Group] = new HashSet<string>(StringComparer.Ordinal) { "avatar", "background", "name", "bio", "privacy" },
+        [GraphObjectType.FeedPost] = new HashSet<string>(StringComparer.Ordinal) { "privacy" },
+        [GraphObjectType.GroupPost] = new HashSet<string>(StringComparer.Ordinal),
         [GraphObjectType.Reel] = new HashSet<string>(StringComparer.Ordinal),
         [GraphObjectType.Story] = new HashSet<string>(StringComparer.Ordinal),
         [GraphObjectType.Comment] = new HashSet<string>(StringComparer.Ordinal),

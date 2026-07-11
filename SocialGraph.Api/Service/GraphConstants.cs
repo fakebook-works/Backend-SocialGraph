@@ -4,11 +4,12 @@ public static class GraphObjectType
 {
     public const short User = 0;
     public const short Group = 1;
-    public const short Post = 2;
-    public const short Reel = 3;
-    public const short Story = 4;
-    public const short Comment = 5;
-    public const short Media = 6;
+    public const short FeedPost = 2;
+    public const short GroupPost = 3;
+    public const short Reel = 4;
+    public const short Story = 5;
+    public const short Comment = 6;
+    public const short Media = 7;
 }
 
 public static class GraphMediaType
@@ -60,10 +61,4 @@ public static class ExternalNotificationAction
     public const short Like = 6;
     public const short Mention = 7;
     public const short Tag = 8;
-}
-
-public static class BillingEntitlementType
-{
-    public const string Verified = "verified";
-    public const string FeedBoostAuthor = "feed_boost_author";
 }
