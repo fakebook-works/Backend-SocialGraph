@@ -137,6 +137,47 @@ Output:
 
 Feed post co type `2`; group post co type `3`. Voi group post, `privacy` trong result lay tu group chua post qua association `published_in(10)`.
 
+### HomeStoryPageResult
+
+Output cua `homeStories`:
+
+```json
+{
+  "items": [
+    {
+      "author": {
+        "id": 123,
+        "name": "Nguyen Van A",
+        "avatar": "https://cdn.local/avatar.jpg",
+        "verify": "2026-08-10T00:00:00.0000000Z",
+        "isVerified": true
+      },
+      "latestCreate": "2026-07-12T10:00:00.0000000Z",
+      "stories": [
+        {
+          "id": 901,
+          "content": "Story text",
+          "create": "2026-07-12T09:00:00.0000000Z",
+          "expire": "2026-07-13T09:00:00.0000000Z",
+          "media": [
+            {
+              "id": 3001,
+              "type": 0,
+              "url": "https://cdn.local/story.jpg"
+            }
+          ],
+          "sharedSource": null
+        }
+      ]
+    }
+  ],
+  "endCursor": "base64-json",
+  "hasNextPage": true
+}
+```
+
+`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Story share co `sharedSource`; story thuong thi `sharedSource = null`.
+
 ### CandidateItemResult
 
 Output:
@@ -306,6 +347,36 @@ Logic:
 External calls: khong co.
 
 Return: `ContentResult?`
+
+### homeStories(userId, limit, cursor)
+
+Input:
+
+- `userId: long`
+- `limit: int`, clamp ve `1..50`, la so author bucket can lay
+- `cursor: string?`, base64 JSON cua `(latestCreate, authorId)` bucket cuoi page truoc
+
+Logic:
+
+1. Lay author co the xem story tu `friend(0)` va `followed(1)` cua user.
+2. Loai chinh user, `blocked(23)` va `blocked_by(24)`.
+3. Query story type `5` cua cac author do qua `authored(5)`.
+4. Voi tung story:
+   - neu `expire <= now` hoac expire invalid thi xoa story;
+   - neu con han thi dua vao bucket cua author.
+5. Khi xoa story het han:
+   - lay media qua `story --contained(20)--> media`;
+   - xoa moi association lien quan story;
+   - xoa story object;
+   - xoa moi media object gan truc tiep vao story va association lien quan media.
+6. Group story con han theo author.
+7. Sort author bucket theo `latestCreate desc, authorId desc`.
+8. Apply cursor theo author bucket, khong cursor theo tung story.
+9. Voi moi author bucket duoc chon, tra author summary, toan bo story con han, media cua story, va `sharedSource` neu story share post/reel.
+
+External calls: khong co.
+
+Return: `HomeStoryPageResult`
 
 ### relationIds(id1, atype, cursor, limit)
 
@@ -1045,7 +1116,8 @@ Input:
     "media": {
       "type": 0,
       "url": "https://cdn.local/story.jpg"
-    }
+    },
+    "sharedSourceId": null
   }
 }
 ```
@@ -1054,9 +1126,16 @@ Logic:
 
 1. Tao story object type `5` voi `{ content, create, expire }`.
 2. `expire = create + 1 day`.
-3. Attach toi da mot media neu co.
-4. Tao `author --authored(5)--> story`.
-5. Return content result.
+3. Neu co `sharedSourceId`, validate source:
+   - feed post type `2` phai co `privacy = 0`;
+   - group post type `3` phai nam trong group public `privacy = 0`;
+   - reel type `4` duoc phep share;
+   - source khac bi reject.
+4. Attach toi da mot media neu co bang `story --contained(20)--> media`.
+5. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
+6. Tao `author --authored(5)--> story`.
+7. Neu co `sharedSourceId`, tao `story --share(8)--> sharedSource`.
+8. Return content result.
 
 External calls: khong co.
 

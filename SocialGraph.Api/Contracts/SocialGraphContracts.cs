@@ -47,7 +47,7 @@ public sealed record UpdatePostInput(long Id, int Privacy);
 
 public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
 
-public sealed record CreateStoryInput(long AuthorId, string Content, MediaInput? Media);
+public sealed record CreateStoryInput(long AuthorId, string Content, MediaInput? Media, long? SharedSourceId = null);
 
 public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media);
 
@@ -93,6 +93,48 @@ public sealed record ContentResult(
     string Create,
     long AuthorId,
     IReadOnlyList<MediaResult> Media);
+
+public sealed record UserSummaryResult(
+    long Id,
+    string Name,
+    string Avatar,
+    string Verify,
+    bool IsVerified);
+
+public sealed record GroupSummaryResult(
+    long Id,
+    string Name,
+    string Avatar,
+    string Background,
+    int Privacy);
+
+public sealed record StorySharedSourceResult(
+    long Id,
+    short Type,
+    string Content,
+    int Privacy,
+    string Create,
+    UserSummaryResult? Author,
+    GroupSummaryResult? Group,
+    IReadOnlyList<MediaResult> Media);
+
+public sealed record HomeStoryItemResult(
+    long Id,
+    string Content,
+    string Create,
+    string Expire,
+    IReadOnlyList<MediaResult> Media,
+    StorySharedSourceResult? SharedSource);
+
+public sealed record HomeStoryBucketResult(
+    UserSummaryResult Author,
+    string LatestCreate,
+    IReadOnlyList<HomeStoryItemResult> Stories);
+
+public sealed record HomeStoryPageResult(
+    IReadOnlyList<HomeStoryBucketResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
 
 public sealed record CandidateItemResult(
     long Id,

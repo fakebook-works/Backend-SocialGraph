@@ -11,6 +11,7 @@ public interface IContentGraphService
     Task<ContentResult?> GetContentAsync(long contentId, CancellationToken cancellationToken = default);
     Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default);
     Task<ContentResult> CreateStoryAsync(CreateStoryInput input, CancellationToken cancellationToken = default);
+    Task<HomeStoryPageResult> GetHomeStoriesAsync(long userId, int limit, string? cursor, CancellationToken cancellationToken = default);
     Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default);
     Task<ContentResult> SharePostAsync(SharePostInput input, CancellationToken cancellationToken = default);
     Task<bool> LikeAsync(long userId, long targetId, CancellationToken cancellationToken = default);

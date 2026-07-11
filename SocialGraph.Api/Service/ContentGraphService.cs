@@ -1,18 +1,26 @@
 namespace SocialGraph.Api.Service;
 
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Database;
 
 public sealed class ContentGraphService : IContentGraphService
 {
+    private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
 
     public ContentGraphService(
+        MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient)
     {
+        _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
@@ -99,10 +107,125 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateStoryAsync(CreateStoryInput input, CancellationToken cancellationToken = default)
     {
+        if (input.SharedSourceId is long sharedSourceId)
+        {
+            await ValidateStoryShareSourceAsync(sharedSourceId, cancellationToken);
+        }
+
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
-        var media = await AttachSingleMediaAsync(input.AuthorId, story.id, input.Media, cancellationToken);
+        var media = await AttachTemporarySingleMediaAsync(story.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
+
+        if (input.SharedSourceId is long sourceId)
+        {
+            await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, sourceId, cancellationToken);
+        }
+
         return await BuildContentResultAsync(story, input.AuthorId, media, cancellationToken);
+    }
+
+    public async Task<HomeStoryPageResult> GetHomeStoriesAsync(
+        long userId,
+        int limit,
+        string? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        var take = Math.Clamp(limit, 1, 50);
+        var visibleAuthorIds = await GetVisibleStoryAuthorIdsAsync(userId, cancellationToken);
+        if (visibleAuthorIds.Count == 0)
+        {
+            return new HomeStoryPageResult(Array.Empty<HomeStoryBucketResult>(), null, false);
+        }
+
+        var storyRows = await (
+            from association in _dbContext.AssociationsTb.AsNoTracking()
+            join obj in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals obj.id
+            where visibleAuthorIds.Contains(association.id1) &&
+                association.atype == GraphAssociationType.Authored &&
+                obj.otype == GraphObjectType.Story
+            select new StoryRow(association.id1, obj.id, obj.data))
+            .ToListAsync(cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var activeStoriesByAuthor = new Dictionary<long, List<ActiveStoryRow>>();
+        var expiredStoryIds = new List<long>();
+
+        foreach (var row in storyRows)
+        {
+            var data = GraphJson.ParseObject(row.Data);
+            if (!TryGetDateTimeOffset(data, "expire", out var expiresAt) || expiresAt <= now)
+            {
+                expiredStoryIds.Add(row.StoryId);
+                continue;
+            }
+
+            var createdAt = TryGetDateTimeOffset(data, "create", out var parsedCreatedAt)
+                ? parsedCreatedAt
+                : DateTimeOffset.UnixEpoch;
+
+            if (!activeStoriesByAuthor.TryGetValue(row.AuthorId, out var authorStories))
+            {
+                authorStories = [];
+                activeStoriesByAuthor[row.AuthorId] = authorStories;
+            }
+
+            authorStories.Add(new ActiveStoryRow(
+                row.AuthorId,
+                new SocialGraphObjectResult(row.StoryId, GraphObjectType.Story, row.Data),
+                createdAt));
+        }
+
+        foreach (var expiredStoryId in expiredStoryIds)
+        {
+            await DeleteExpiredStoryWithMediaAsync(expiredStoryId, cancellationToken);
+        }
+
+        var buckets = activeStoriesByAuthor
+            .Select(item => new StoryBucketCandidate(
+                item.Key,
+                item.Value.Max(story => story.CreatedAt),
+                item.Value.OrderBy(story => story.CreatedAt).ToArray()))
+            .OrderByDescending(item => item.LatestCreate)
+            .ThenByDescending(item => item.AuthorId)
+            .ToArray();
+
+        if (TryDecodeStoryCursor(cursor, out var decodedCursor))
+        {
+            buckets = buckets
+                .Where(item => item.LatestCreate < decodedCursor.LatestCreate ||
+                    item.LatestCreate == decodedCursor.LatestCreate && item.AuthorId < decodedCursor.AuthorId)
+                .ToArray();
+        }
+
+        var pageCandidates = buckets.Take(take + 1).ToArray();
+        var selectedCandidates = pageCandidates.Take(take).ToArray();
+        var resultItems = new List<HomeStoryBucketResult>(selectedCandidates.Length);
+
+        foreach (var candidate in selectedCandidates)
+        {
+            var author = await BuildUserSummaryAsync(candidate.AuthorId, cancellationToken);
+            if (author is null)
+            {
+                continue;
+            }
+
+            var stories = new List<HomeStoryItemResult>(candidate.Stories.Count);
+            foreach (var story in candidate.Stories)
+            {
+                stories.Add(await BuildHomeStoryItemAsync(story.Story, cancellationToken));
+            }
+
+            resultItems.Add(new HomeStoryBucketResult(
+                author,
+                candidate.LatestCreate.ToString("O", CultureInfo.InvariantCulture),
+                stories));
+        }
+
+        var endCursor = selectedCandidates.Length == 0
+            ? null
+            : EncodeStoryCursor(selectedCandidates[^1].LatestCreate, selectedCandidates[^1].AuthorId);
+
+        return new HomeStoryPageResult(resultItems, endCursor, pageCandidates.Length > take);
     }
 
     public async Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default)
@@ -177,11 +300,20 @@ public sealed class ContentGraphService : IContentGraphService
         return AttachMediaAsync(ownerId, contentId, media is null ? null : new[] { media }, cancellationToken);
     }
 
+    private Task<IReadOnlyList<MediaResult>> AttachTemporarySingleMediaAsync(
+        long contentId,
+        MediaInput? media,
+        CancellationToken cancellationToken)
+    {
+        return AttachMediaAsync(0, contentId, media is null ? null : new[] { media }, cancellationToken, createOwned: false);
+    }
+
     private async Task<IReadOnlyList<MediaResult>> AttachMediaAsync(
         long ownerId,
         long contentId,
         IReadOnlyList<MediaInput>? media,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool createOwned = true)
     {
         if (media is null || media.Count == 0)
         {
@@ -192,7 +324,11 @@ public sealed class ContentGraphService : IContentGraphService
         foreach (var input in media)
         {
             var mediaObject = await _objectService.AddObjectAsync(GraphObjectType.Media, GraphJson.MediaJson(input.Type, input.Url), cancellationToken);
-            await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, mediaObject.id, cancellationToken);
+            if (createOwned)
+            {
+                await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, mediaObject.id, cancellationToken);
+            }
+
             await _associationService.AddAssociationAsync(contentId, GraphAssociationType.Contained, mediaObject.id, cancellationToken);
             results.Add(new MediaResult(mediaObject.id, input.Type, input.Url));
         }
@@ -273,4 +409,241 @@ public sealed class ContentGraphService : IContentGraphService
         var group = await _associationService.RetrieveAssociationAsync(postId, GraphAssociationType.PublishedIn, null, 1, cancellationToken);
         return group.items.FirstOrDefault()?.id2 ?? 0;
     }
+
+    private async Task<IReadOnlySet<long>> GetVisibleStoryAuthorIdsAsync(long userId, CancellationToken cancellationToken)
+    {
+        var friends = await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 500, cancellationToken);
+        var followed = await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 500, cancellationToken);
+        var blocked = await GetBlockedUserIdsAsync(userId, cancellationToken);
+
+        return friends
+            .Concat(followed)
+            .Where(id => id != userId && !blocked.Contains(id))
+            .ToHashSet();
+    }
+
+    private async Task<IReadOnlyList<long>> GetAssociationIdsAsync(long id1, short atype, int limit, CancellationToken cancellationToken)
+    {
+        var remaining = Math.Clamp(limit, 1, 1000);
+        var results = new List<long>(remaining);
+        string? cursor = null;
+
+        do
+        {
+            var page = await _associationService.RetrieveAssociationAsync(id1, atype, cursor, Math.Min(remaining, 100), cancellationToken);
+            results.AddRange(page.items.Select(item => item.id2));
+            remaining -= page.items.Count;
+            cursor = page.nextCursor;
+        }
+        while (cursor is not null && remaining > 0);
+
+        return results;
+    }
+
+    private async Task<ISet<long>> GetBlockedUserIdsAsync(long userId, CancellationToken cancellationToken)
+    {
+        var blocked = await GetAssociationIdsAsync(userId, GraphAssociationType.Blocked, 500, cancellationToken);
+        var blockedBy = await GetAssociationIdsAsync(userId, GraphAssociationType.BlockedBy, 500, cancellationToken);
+        return blocked.Concat(blockedBy).ToHashSet();
+    }
+
+    private async Task DeleteExpiredStoryWithMediaAsync(long storyId, CancellationToken cancellationToken)
+    {
+        var mediaIds = await GetContainedMediaIdsAsync(storyId, cancellationToken);
+
+        await _associationService.DeleteObjectAssociationsAsync(storyId, cancellationToken);
+        await _objectService.DeleteObjectAsync(storyId, cancellationToken);
+
+        foreach (var mediaId in mediaIds)
+        {
+            await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
+            await _objectService.DeleteObjectAsync(mediaId, cancellationToken);
+        }
+    }
+
+    private async Task<IReadOnlyList<long>> GetContainedMediaIdsAsync(long contentId, CancellationToken cancellationToken)
+    {
+        var media = await _associationService.RetrieveAssociationAsync(contentId, GraphAssociationType.Contained, null, 100, cancellationToken);
+        return media.items.Select(item => item.id2).ToArray();
+    }
+
+    private async Task<HomeStoryItemResult> BuildHomeStoryItemAsync(
+        SocialGraphObjectResult story,
+        CancellationToken cancellationToken)
+    {
+        var data = GraphJson.ParseObject(story.data);
+        return new HomeStoryItemResult(
+            story.id,
+            GraphJson.String(data, "content"),
+            GraphJson.String(data, "create"),
+            GraphJson.String(data, "expire"),
+            await GetMediaAsync(story.id, cancellationToken),
+            await GetSharedSourceAsync(story.id, cancellationToken));
+    }
+
+    private async Task<StorySharedSourceResult?> GetSharedSourceAsync(long storyId, CancellationToken cancellationToken)
+    {
+        var share = await _associationService.RetrieveAssociationAsync(storyId, GraphAssociationType.Share, null, 1, cancellationToken);
+        var sourceId = share.items.FirstOrDefault()?.id2 ?? 0;
+        if (sourceId <= 0)
+        {
+            return null;
+        }
+
+        var source = await _objectService.RetrieveObjectAsync(sourceId, cancellationToken);
+        if (source is null)
+        {
+            return null;
+        }
+
+        return await BuildSharedSourceResultAsync(source, cancellationToken);
+    }
+
+    private async Task<StorySharedSourceResult> BuildSharedSourceResultAsync(
+        SocialGraphObjectResult source,
+        CancellationToken cancellationToken)
+    {
+        var data = GraphJson.ParseObject(source.data);
+        var authorId = await GetAuthorIdAsync(source.id, cancellationToken);
+        return new StorySharedSourceResult(
+            source.id,
+            source.otype,
+            GraphJson.String(data, "content"),
+            await GetContentPrivacyAsync(source, data, cancellationToken),
+            GraphJson.String(data, "create"),
+            authorId > 0 ? await BuildUserSummaryAsync(authorId, cancellationToken) : null,
+            source.otype == GraphObjectType.GroupPost ? await BuildPublishedGroupSummaryAsync(source.id, cancellationToken) : null,
+            await GetMediaAsync(source.id, cancellationToken));
+    }
+
+    private async Task<UserSummaryResult?> BuildUserSummaryAsync(long userId, CancellationToken cancellationToken)
+    {
+        var user = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        if (user is null || user.otype != GraphObjectType.User)
+        {
+            return null;
+        }
+
+        var data = GraphJson.ParseObject(user.data);
+        var verify = GraphJson.String(data, "verify");
+        return new UserSummaryResult(
+            user.id,
+            GraphJson.String(data, "name"),
+            GraphJson.String(data, "avatar"),
+            verify,
+            DateTimeOffset.TryParse(verify, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var expiresAt) &&
+                expiresAt > DateTimeOffset.UtcNow);
+    }
+
+    private async Task<GroupSummaryResult?> BuildPublishedGroupSummaryAsync(long postId, CancellationToken cancellationToken)
+    {
+        var groupId = await GetPublishedGroupIdAsync(postId, cancellationToken);
+        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        if (group is null || group.otype != GraphObjectType.Group)
+        {
+            return null;
+        }
+
+        var data = GraphJson.ParseObject(group.data);
+        return new GroupSummaryResult(
+            group.id,
+            GraphJson.String(data, "name"),
+            GraphJson.String(data, "avatar"),
+            GraphJson.String(data, "background"),
+            GraphJson.Int(data, "privacy"));
+    }
+
+    private async Task ValidateStoryShareSourceAsync(long sourceId, CancellationToken cancellationToken)
+    {
+        var source = await _objectService.RetrieveObjectAsync(sourceId, cancellationToken)
+            ?? throw new ArgumentException("Shared source does not exist.", nameof(sourceId));
+
+        var data = GraphJson.ParseObject(source.data);
+        switch (source.otype)
+        {
+            case GraphObjectType.FeedPost:
+                if (GraphJson.Int(data, "privacy") != 0)
+                {
+                    throw new ArgumentException("Only public feed posts can be shared to story.", nameof(sourceId));
+                }
+
+                return;
+
+            case GraphObjectType.GroupPost:
+                var groupId = await GetPublishedGroupIdAsync(source.id, cancellationToken);
+                var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+                if (group is null || group.otype != GraphObjectType.Group)
+                {
+                    throw new ArgumentException("Group post source is missing its group.", nameof(sourceId));
+                }
+
+                if (GraphJson.Int(GraphJson.ParseObject(group.data), "privacy") != 0)
+                {
+                    throw new ArgumentException("Only posts in public groups can be shared to story.", nameof(sourceId));
+                }
+
+                return;
+
+            case GraphObjectType.Reel:
+                return;
+
+            default:
+                throw new ArgumentException("Stories can only share public feed posts, public group posts, or reels.", nameof(sourceId));
+        }
+    }
+
+    private static bool TryGetDateTimeOffset(
+        System.Text.Json.Nodes.JsonObject data,
+        string field,
+        out DateTimeOffset value)
+    {
+        return DateTimeOffset.TryParse(
+            GraphJson.String(data, field),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal,
+            out value);
+    }
+
+    private static string EncodeStoryCursor(DateTimeOffset latestCreate, long authorId)
+    {
+        var payload = JsonSerializer.Serialize(new StoryCursor(latestCreate, authorId));
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(payload));
+    }
+
+    private static bool TryDecodeStoryCursor(string? cursor, out StoryCursor storyCursor)
+    {
+        storyCursor = default;
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return false;
+        }
+
+        try
+        {
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+            return JsonSerializer.Deserialize<StoryCursor>(json) is { } decoded && SetCursor(decoded, out storyCursor);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool SetCursor(StoryCursor source, out StoryCursor target)
+    {
+        target = source;
+        return source.AuthorId > 0;
+    }
+
+    private sealed record StoryRow(long AuthorId, long StoryId, string Data);
+
+    private sealed record ActiveStoryRow(long AuthorId, SocialGraphObjectResult Story, DateTimeOffset CreatedAt);
+
+    private sealed record StoryBucketCandidate(long AuthorId, DateTimeOffset LatestCreate, IReadOnlyList<ActiveStoryRow> Stories);
+
+    private readonly record struct StoryCursor(DateTimeOffset LatestCreate, long AuthorId);
 }

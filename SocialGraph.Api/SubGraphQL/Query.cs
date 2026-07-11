@@ -58,6 +58,16 @@ public class Query
         return contentGraphService.GetContentAsync(contentId, cancellationToken);
     }
 
+    public Task<HomeStoryPageResult> GetHomeStoriesAsync(
+        long userId,
+        int limit,
+        string? cursor,
+        [Service] IContentGraphService contentGraphService,
+        CancellationToken cancellationToken)
+    {
+        return contentGraphService.GetHomeStoriesAsync(userId, limit, cursor, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<long>> GetRelationIdsAsync(
         long id1,
         short atype,
