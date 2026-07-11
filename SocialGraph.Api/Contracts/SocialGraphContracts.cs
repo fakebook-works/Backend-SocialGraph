@@ -8,6 +8,8 @@ public sealed record CreateUserInput(
     string Email,
     string Password);
 
+public sealed record CreateUserPayload(bool Success, long? UserId, string? Message);
+
 public sealed record UpdateUserInput(
     long Id,
     string? Avatar,

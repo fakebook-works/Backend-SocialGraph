@@ -2,7 +2,9 @@
 
 File nay liet ke tat ca API hien co cua SocialGraph, gom GraphQL va REST internal. Moi API co input, output, logic chinh va external service call neu co.
 
-Luu y ve ten GraphQL: HotChocolate thuong bo tien to `Get` va hau to `Async`, sau do camelCase ten field. Vi du `GetProfileAsync` thanh `profile`, `CreateUserAsync` thanh `createUser`. Khi Gateway code that nen introspect `/graphql` de lay schema chinh xac.
+Luu y ve ten GraphQL: HotChocolate thuong bo tien to `Get` va hau to `Async`, sau do camelCase ten field. Vi du `GetProfileAsync` thanh `profile`, `CreateUserAsync` thanh `createUser`. Khi schema thay doi, export SDL tu runtime HotChocolate va compose lai `gateway.far`; khong viet schema Gateway bang tay.
+
+Gateway hien chi public SocialGraph `createUser`. Cac query va mutation SocialGraph con lai dang `@internal` cho den khi authorization duoc implement.
 
 ## 1. Endpoint Tong Quan
 
@@ -152,14 +154,14 @@ Output:
 
 ## 3. External Service Calls
 
-Tat ca external call trong SocialGraph la best-effort. Neu config key thieu, service ngoai loi, network loi hoac timeout, SocialGraph chi log warning/debug va khong rollback DB local.
+Phan lon external call trong SocialGraph la best-effort. Rieng `AuthenticationServiceCreateUser` la required; neu Auth fail, SocialGraph rollback object user vua tao va tra payload fail.
 
 | Config key | Service nhan | Payload |
 |---|---|---|
-| `AuthenticationServiceCreateUser` | Authentication | `{ userId, email, password }` |
+| `AuthenticationServiceCreateUser` | Authentication | `{ userId, email, password, displayName, dob }` |
 | `AuthenticationServiceDeleteUser` | Authentication | `{ userId }` |
-| `MessengerServiceCreateUser` | Messenger | `{ userId }` |
-| `MessengerServiceDeleteUser` | Messenger | `{ userId }` |
+| `MessengerServiceCreateUser` | Messenger | `{ userId }` - tam disable |
+| `MessengerServiceDeleteUser` | Messenger | `{ userId }` - tam disable |
 | `SearchServiceCreateIndex` | Search | `{ objectId, objectType, text }` |
 | `SearchServiceUpdateIndex` | Search | `{ objectId, objectType, text }` |
 | `SearchServiceDeleteIndex` | Search | `{ objectId }` |
@@ -492,7 +494,7 @@ Input:
     "birthdate": "2000-01-01",
     "location": "Ha Noi",
     "email": "a@example.com",
-    "password": "secret"
+    "password": "secret123"
   }
 }
 ```
@@ -501,17 +503,19 @@ Logic:
 
 1. Tao user object type `0`.
 2. Data mac dinh: `avatar`, `background`, `name`, `bio`, `gender`, `birthdate`, `location`, `verify = ""`, `privacy = 0`, `create = now`.
-3. Goi external create user pipeline.
-4. Return `true`.
+3. Goi Auth internal create user voi `userId`, `email`, `password`, `displayName`, `dob`.
+4. Neu Auth fail, xoa object user local va return fail payload.
+5. Neu Auth thanh cong, goi Search/Recommendation best-effort.
+6. Return payload co `userId`.
 
 External calls:
 
-- Authentication `AuthenticationServiceCreateUser`: `{ userId, email, password }`
-- Messenger `MessengerServiceCreateUser`: `{ userId }`
+- Authentication `AuthenticationServiceCreateUser`: `{ userId, email, password, displayName, dob }`
+- Messenger `MessengerServiceCreateUser`: tam disable
 - Search `SearchServiceCreateIndex`: `{ objectId: userId, objectType: "user", text: name }`
 - Recommendation `RecommendServiceCreateUserEmbedding`: `{ userId }`
 
-Return: `bool`
+Return: `CreateUserPayload { success, userId, message }`
 
 ### updateUser(input)
 
@@ -562,7 +566,7 @@ Logic:
 External calls:
 
 - Authentication `AuthenticationServiceDeleteUser`: `{ userId }`
-- Messenger `MessengerServiceDeleteUser`: `{ userId }`
+- Messenger `MessengerServiceDeleteUser`: tam disable
 - Search `SearchServiceDeleteIndex`: `{ objectId: userId }`
 - Recommendation `RecommendServiceDeleteUserEmbedding`: `{ userId }`
 
@@ -1325,4 +1329,4 @@ Nhung API sau nen coi la debug/internal cho service owner:
 - REST `/internal/recommendation/*`
 - REST `/internal/users/{userId}/verify`
 
-Frontend nen di qua Gateway GraphQL va dung cac API business: user, group, content, relation. Payment/Billing chi goi REST verify sau khi thanh toan thanh cong.
+Frontend phai di qua Gateway GraphQL. Hien frontend chi dung duoc `createUser` cua SocialGraph; cac API business user/group/content/relation khac chua duoc public qua Gateway va khong duoc goi truc tiep tu Internet. Payment/Billing chi goi REST verify sau khi thanh toan thanh cong.

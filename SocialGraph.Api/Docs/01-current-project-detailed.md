@@ -8,13 +8,13 @@ Tai lieu nay mo ta code hien tai cua `SocialGraph.Api`: cau truc file, cong dung
 
 - Luu toan bo thuc the xa hoi duoi dang generic object: user, group, post, reel, story, comment, media.
 - Luu moi quan he xa hoi duoi dang association: friend, follow, like, authored, group member, comment, save, watched, blocked...
-- Expose GraphQL Federation cho Gateway/Frontend.
+- Expose GraphQL Federation cho Gateway; hien Gateway chi public `createUser`, cac field SocialGraph khac dang `@internal`.
 - Expose REST internal cho Recommendation service lay candidate post/reel.
-- Goi REST sang service khac theo co che best-effort:
-  - Authentication: tao/xoa account.
-  - Messenger: tao/xoa user trong chat.
-  - Search: tao/cap nhat/xoa index.
-  - Recommendation: tao/xoa embedding.
+- Goi REST sang service khac:
+  - Authentication: create identity trong `createUser` la required; fail thi rollback user object. Cac call Auth khac hien best-effort.
+  - Messenger: create/delete user dang tam disable.
+  - Search: tao/cap nhat/xoa index theo best-effort.
+  - Recommendation: tao/xoa embedding theo best-effort.
   - Notification: tao notification.
   - Payment/Billing: goi REST internal cua SocialGraph de cap nhat han `verify` sau khi thanh toan thanh cong.
 
@@ -110,9 +110,10 @@ Dang co:
 
 - `ConnectionStrings:PostgreSQL`: PostgreSQL database `fakebook`, search path `social_graph`.
 - `ConnectionStrings:Redis`: Redis local.
+- `Gateway:InternalSharedSecret`: shared secret gui trong `X-Gateway-Secret` khi goi Auth internal API.
 - `ExternalServices:*`: URL cac service khac.
 
-Luu y: URL service ngoai hien deu dang la placeholder `http://localhost:5001`. Khi service that co endpoint rieng can cap nhat tai day.
+Luu y: `AuthenticationServiceCreateUser` phai tro den Auth internal endpoint `/internal/users`. Cac URL service ngoai khac hien nhieu cai van la placeholder `http://localhost:5001`.
 
 ## 3. Database model
 
@@ -224,7 +225,13 @@ Input:
 - `Email: string`
 - `Password: string`
 
-Dung cho `createUser`. API dang ky khong nhan `avatar` hoac `background`; 2 field nay chi doi sau bang mutation rieng.
+Dung cho `createUser`. API dang ky khong nhan `avatar` hoac `background`; 2 field nay chi doi sau bang mutation rieng. `Password` van phai thoa policy cua Authentication.
+
+#### CreateUserPayload
+
+- `Success: bool`
+- `UserId: long?`
+- `Message: string?`
 
 #### UpdateUserInput
 
@@ -553,7 +560,7 @@ Logic:
 
 #### CreateUserAsync(CreateUserInput input)
 
-Return: `bool`.
+Return: `CreateUserPayload`.
 
 Logic:
 
@@ -569,12 +576,11 @@ Logic:
    - `verify = ""`
    - `privacy = 0`
    - `create = UTC now`
-3. Goi external:
-   - Authentication create user.
-   - Messenger create user.
-   - Search create index user.
-   - Recommendation create user embedding.
-4. Tra `true` neu tao user local va external pipeline da duoc goi.
+3. Goi Authentication internal create user voi `userId`, `email`, `password`, `displayName`, `dob`.
+4. Neu Authentication fail, xoa object user vua tao trong SocialGraph va tra `{ success: false, userId: null }`.
+5. Neu Authentication thanh cong, goi Search create index va Recommendation create user embedding theo best-effort.
+6. Messenger create user tam thoi disable.
+7. Tra `{ success: true, userId }`.
 
 #### UpdateUserAsync(UpdateUserInput input)
 
@@ -908,18 +914,18 @@ Tuong tu post nhung nguon:
 
 ### ExternalServiceClient
 
-Tat ca call external la best-effort:
+Phan lon call external la best-effort, rieng Authentication create user la required:
 
 - Neu endpoint thieu config: log debug va return.
 - Neu service tra non-success: log warning.
 - Neu network/timeout: log warning.
-- Khong throw ra ngoai, khong rollback graph local.
+- Required Auth create user fail se throw trong client, UserGraphService rollback object user local.
 
 Methods:
 
 - `NotifyAsync`: POST NotificationServiceCreateNotification payload `{ creatorId, receiverId, actionType, objectId, data }`.
-- `CreateUserAsync`: goi Auth create, Messenger create, Search create index, Recommend create user embedding.
-- `DeleteUserAsync`: goi Auth delete, Messenger delete, Search delete index, Recommend delete user embedding.
+- `CreateUserAsync`: goi Auth create bat buoc, sau do Search create index va Recommend create user embedding best-effort. Messenger create dang tam disable.
+- `DeleteUserAsync`: goi Auth delete, Search delete index, Recommend delete user embedding. Messenger delete dang tam disable.
 - `CreateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
 - `UpdateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
 - `DeleteSearchIndexAsync`: POST `{ objectId }`.

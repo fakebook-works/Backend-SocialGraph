@@ -91,23 +91,24 @@ sau đó trả về list id2 theo limit (dùng cơ chế cursor pagination trên
 Dùng các hàm trên để viết API dưới đây, ngoài ra gọi thêm Rest API của các serivce khác 
 GraphQL
 Mutation
-- CreateUser (string name, bool gender, DateOnly birthday, sting location, string email, string password) 
+- CreateUser (string name, bool gender, string birthdate, string location, string email, string password) -> CreateUserPayload { success, userId, message }
   bio mặc định "Xin chào, mình là [name] đến từ [location]",
   privacy mặc định là 0 (normal),
   create lấy thời gian hiện tại,
   đóng gói data thành dạng json {name: string, bio: string, gender: 0/1, birthdate: dateOnly, location: sting, privacy: 0/1, create: dateTime}
   gọi hàm object add (0, data)
-  gọi RecommendServiceCreateUserEmbedding API (user id), 
-  gọi AuthenticationServiceCreateUser API (user id, password, email),
-  gọi MessengerServiceCreateUser API (user id), 
-  gọi SearchServiceCreateIndex API (user id, name
+  gọi AuthenticationServiceCreateUser API (user id, password, email, name, birthdate) bắt buộc,
+  nếu Authentication fail thì rollback object user vừa tạo,
+  gọi RecommendServiceCreateUserEmbedding API (user id) theo best-effort,
+  MessengerServiceCreateUser tạm disable,
+  gọi SearchServiceCreateIndex API (user id, name) theo best-effort
 
   
 - UpdateUser ( id, updateData)
   nếu đổi tên thì gọi API SearchServiceUpdateIndex (user id, name)
   
  (dùng hàm update Object như bthg, nếu sửa tên gọi "SearchServiceUpdateIndex" API (user id, name))
-- xoá user (dùng hàm delete Object, gọi "SearchServiceDeleteIndex" API (user id), "MessengerServiceDeleteUser" API (user id), "AuthenticationServiceDeleteUser" API (user id),
+- xoá user (dùng hàm delete Object, gọi "SearchServiceDeleteIndex" API (user id), "AuthenticationServiceDeleteUser" API (user id),
 "RecommendServiceDeleteUserEmbedding" API (user id))
 - upload file do media/upload service hoặc frontend flow bên ngoài xử lý; SocialGraph chỉ nhận URL đã upload xong
 - đổi avt bằng ảnh upload (truyền vào url ảnh gốc và url ảnh sau khi crop; url gốc tạo object media và asso owned, url crop lưu trực tiếp vào data user)

@@ -37,4 +37,4 @@ builder.Services
 var app = builder.Build();
 app.MapGraphQL("/graphql"); // Mở cửa duy nhất
 app.MapControllers();
-app.Run();
+app.RunWithGraphQLCommands(args);

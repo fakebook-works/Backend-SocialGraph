@@ -35,7 +35,7 @@ Frontend:
 
 Service-to-service:
 
-- SocialGraph goi REST den Auth/Search/Recommend/Messenger/Notification.
+- SocialGraph goi REST den Auth/Search/Recommend/Notification. Messenger create/delete dang tam disable.
 - Recommendation goi REST candidate cua SocialGraph.
 - Payment/Billing goi REST internal cua SocialGraph de cap nhat verify sau khi thanh toan.
 
@@ -47,8 +47,9 @@ User ID duoc tao tai SocialGraph bang Snowflake ID. Khi tao user:
 
 1. Gateway goi `createUser` tren SocialGraph.
 2. SocialGraph tao user id.
-3. SocialGraph goi Auth service voi user id + email + password.
-4. Cac service khac nen coi user id tu SocialGraph la canonical ID.
+3. SocialGraph goi Auth service voi user id + email + password + display name + dob.
+4. Neu Auth fail, SocialGraph rollback object user vua tao.
+5. Cac service khac nen coi user id tu SocialGraph la canonical ID.
 
 ### Object IDs
 
@@ -62,13 +63,21 @@ Feed post la object type `2` va co `privacy` rieng trong post data. Group post l
 
 ## 4. GraphQL operation chinh cho Gateway
 
+Gateway hien compose SocialGraph nhung chi expose public mutation `createUser`. Cac query va mutation SocialGraph khac dang duoc mark `@internal` trong Gateway cho den khi authorization duoc implement.
+
 Ten GraphQL field co the duoc HotChocolate camelCase tu method C#:
 
 - `GetProfileAsync` -> `profile`
 - `CreateUserAsync` -> `createUser`
 - `CreateFeedPostAsync` -> `createFeedPost`
 
-Gateway agent nen introspect schema sau khi chay app de lay ten chinh xac.
+Export schema that cua SocialGraph vao mot thu muc tam, copy rieng `schema.graphqls` sang Gateway, sau do compose lai `gateway.far` cung schema Authentication:
+
+```powershell
+dotnet run --project .\SocialGraph.Api\SocialGraph.Api.csproj -- schema export --output <temporary-absolute-path-to-schema.graphqls>
+```
+
+Lenh export cung sinh `schema-settings.json` mac dinh. Khong ghi de file settings va extensions do Gateway so huu.
 
 ### User
 
@@ -82,12 +91,12 @@ Mutation `createUser(input)`:
     "birthdate": "2000-01-01",
     "location": "Ha Noi",
     "email": "a@example.com",
-    "password": "secret"
+    "password": "secret123"
   }
 }
 ```
 
-Return `Boolean`. `true` nghia la SocialGraph da tao user local va da goi pipeline Auth/Messenger/Search/Recommendation.
+Return `CreateUserPayload`: `{ success, userId, message }`. `success: true` nghia la SocialGraph da tao user local va Auth da tao identity voi dung `userId`.
 
 Dang ky khong nhan `avatar` hoac `background`. Hai field nay cap nhat sau bang mutation rieng.
 
@@ -140,6 +149,7 @@ Query `profile(userId)` return:
 
 SocialGraph config keys:
 
+- `Gateway:InternalSharedSecret`
 - `AuthenticationServiceCreateUser`
 - `AuthenticationServiceDeleteUser`
 
@@ -151,7 +161,9 @@ SocialGraph POST payload:
 {
   "userId": 123,
   "email": "a@example.com",
-  "password": "secret"
+  "password": "secret123",
+  "displayName": "Nguyen Van A",
+  "dob": "2000-01-01"
 }
 ```
 
@@ -160,9 +172,10 @@ Auth nen:
 - Luu user credential voi `userId` canonical.
 - Hash password.
 - Email unique.
+- Require `X-Gateway-Secret`.
 - Tra 2xx neu ok.
 
-SocialGraph hien khong rollback neu Auth fail, nen Auth service nen idempotent theo `userId/email`.
+SocialGraph rollback object user local neu Auth fail. Search/Recommendation sau Auth la best-effort.
 
 ### Delete user
 
@@ -177,6 +190,8 @@ Payload:
 Nen disable/xoa credential.
 
 ## 6. Endpoints ma Messenger service can co
+
+Messenger create/delete user dang tam disable trong SocialGraph, nhung contract de day cho luc bat lai.
 
 Config:
 

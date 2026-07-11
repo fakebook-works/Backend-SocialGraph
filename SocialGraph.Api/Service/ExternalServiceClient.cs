@@ -23,9 +23,20 @@ public sealed class ExternalServiceClient : IExternalServiceClient
         return PostAsync("NotificationServiceCreateNotification", new { creatorId, receiverId, actionType, objectId, data }, cancellationToken);
     }
 
-    public async Task CreateUserAsync(long userId, string email, string password, string name, CancellationToken cancellationToken = default)
+    public async Task CreateUserAsync(long userId, string email, string password, string name, string birthdate, CancellationToken cancellationToken = default)
     {
-        await PostAsync("AuthenticationServiceCreateUser", new { userId, email, password }, cancellationToken);
+        await PostRequiredAsync(
+            "AuthenticationServiceCreateUser",
+            new
+            {
+                userId,
+                email,
+                password,
+                displayName = name,
+                dob = birthdate
+            },
+            cancellationToken);
+
         // Temporarily disabled until Messenger service registration flow is ready.
         // await CreateMessengerUserAsync(userId, cancellationToken);
         await CreateSearchIndexAsync(userId, "user", name, cancellationToken);
@@ -97,7 +108,8 @@ public sealed class ExternalServiceClient : IExternalServiceClient
 
         try
         {
-            var response = await _httpClientFactory.CreateClient("external-services").PostAsJsonAsync(url, payload, cancellationToken);
+            using var request = CreateJsonPost(url, payload);
+            using var response = await _httpClientFactory.CreateClient("external-services").SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("External service {EndpointKey} returned {StatusCode}.", key, response.StatusCode);
@@ -108,4 +120,72 @@ public sealed class ExternalServiceClient : IExternalServiceClient
             _logger.LogWarning(exception, "External service {EndpointKey} call failed.", key);
         }
     }
+
+    private async Task PostRequiredAsync(string key, object payload, CancellationToken cancellationToken)
+    {
+        var url = _configuration[$"ExternalServices:{key}"];
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            throw new ExternalServiceCallException(key, "Required external service endpoint is not configured.");
+        }
+
+        try
+        {
+            using var request = CreateJsonPost(url, payload);
+            using var response = await _httpClientFactory.CreateClient("external-services").SendAsync(request, cancellationToken);
+            if (response.IsSuccessStatusCode)
+            {
+                return;
+            }
+
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogWarning(
+                "Required external service {EndpointKey} returned {StatusCode}: {ResponseBody}",
+                key,
+                response.StatusCode,
+                Truncate(body));
+
+            throw new ExternalServiceCallException(
+                key,
+                $"Required external service returned HTTP {(int)response.StatusCode}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+            _logger.LogWarning(exception, "Required external service {EndpointKey} call failed.", key);
+            throw new ExternalServiceCallException(key, "Required external service call failed.", exception);
+        }
+    }
+
+    private HttpRequestMessage CreateJsonPost(string url, object payload)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = JsonContent.Create(payload)
+        };
+
+        var secret = _configuration["Gateway:InternalSharedSecret"] ??
+                     _configuration["InternalServices:SharedSecret"];
+        if (!string.IsNullOrWhiteSpace(secret))
+        {
+            request.Headers.TryAddWithoutValidation("X-Gateway-Secret", secret);
+        }
+
+        return request;
+    }
+
+    private static string Truncate(string value)
+    {
+        return value.Length <= 500 ? value : value[..500];
+    }
+}
+
+public sealed class ExternalServiceCallException : Exception
+{
+    public ExternalServiceCallException(string endpointKey, string message, Exception? innerException = null)
+        : base($"{endpointKey}: {message}", innerException)
+    {
+        EndpointKey = endpointKey;
+    }
+
+    public string EndpointKey { get; }
 }

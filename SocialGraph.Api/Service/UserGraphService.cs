@@ -18,15 +18,30 @@ public sealed class UserGraphService : IUserGraphService
         _externalServiceClient = externalServiceClient;
     }
 
-    public async Task<bool> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
+    public async Task<CreateUserPayload> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
         var user = await _objectService.AddObjectAsync(
             GraphObjectType.User,
             GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location),
             cancellationToken);
 
-        await _externalServiceClient.CreateUserAsync(user.id, input.Email, input.Password, input.Name, cancellationToken);
-        return true;
+        try
+        {
+            await _externalServiceClient.CreateUserAsync(
+                user.id,
+                input.Email,
+                input.Password,
+                input.Name,
+                input.Birthdate,
+                cancellationToken);
+
+            return new CreateUserPayload(true, user.id, "User created.");
+        }
+        catch (ExternalServiceCallException)
+        {
+            await _objectService.DeleteObjectAsync(user.id, cancellationToken);
+            return new CreateUserPayload(false, null, "Authentication user creation failed.");
+        }
     }
 
     public async Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default)

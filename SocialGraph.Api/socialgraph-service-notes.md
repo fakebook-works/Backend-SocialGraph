@@ -3,6 +3,7 @@
 ## Public Boundary
 
 - Gateway/frontend should call SocialGraph through GraphQL Federation only.
+- The current Gateway composition exposes only `createUser`; all other SocialGraph fields remain `@internal` until authorization is implemented.
 - REST endpoints in this service are internal service-to-service endpoints.
 - PostgreSQL is the source of truth; Redis is only cache.
 
@@ -47,7 +48,9 @@ Payment/Billing should use the verify endpoint to set or clear `user.data.verify
 
 ## External Services
 
-External calls are best-effort in V1. SocialGraph logs failures but keeps local graph writes complete.
+Most external calls are best-effort in V1. Authentication identity creation during `createUser` is the required exception.
 
-- Auth/Messenger/Search/Recommendation/Notification are called from `ExternalServiceClient`.
+- Auth/Search/Recommendation/Notification are called from `ExternalServiceClient`.
+- User creation requires Auth to succeed. SocialGraph rolls back the local user object if Auth rejects the internal create-user call.
+- Messenger user create/delete calls are temporarily disabled until its registration flow is ready.
 - SocialGraph no longer reads paid-state APIs from Billing. Payment/Billing calls SocialGraph only after successful payment.
