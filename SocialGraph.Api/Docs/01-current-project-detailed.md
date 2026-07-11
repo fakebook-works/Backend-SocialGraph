@@ -44,6 +44,9 @@ SocialGraph.Api/
     Objects.cs
     Associations.cs
     MyDbContext.cs
+  Infrastructure/
+    CorrelationIdMiddleware.cs
+    InternalApiAuthenticationMiddleware.cs
   RestAPI/
     RecommendationController.cs
     PaymentController.cs
@@ -71,6 +74,8 @@ SocialGraph.Api/
     Mutation.cs
   Utils/
     IdGeneratorUtil.cs
+tests/
+  SocialGraph.Api.Tests/
 ```
 
 ### Program.cs
@@ -79,6 +84,7 @@ Dang ky dependency injection va endpoint:
 
 - `AddControllers()`: bat REST controller internal.
 - `AddHttpClient("external-services")`: client goi service ngoai.
+- `AddHttpContextAccessor()`: forward correlation ID tu request hien tai sang internal services.
 - `AddDbContext<MyDbContext>()`: ket noi PostgreSQL bang connection string `PostgreSQL`.
 - `IConnectionMultiplexer`: ket noi Redis.
 - Dang ky service:
@@ -91,6 +97,8 @@ Dang ky dependency injection va endpoint:
   - `ICandidateService -> CandidateService`
 - GraphQL endpoint: `/graphql`
 - REST controller endpoint: map qua `MapControllers()`.
+- `CorrelationIdMiddleware`: preserve/tao `X-Correlation-ID`.
+- `InternalApiAuthenticationMiddleware`: bao ve moi route `/internal/*` bang fixed-time shared-secret comparison.
 
 ### SocialGraph.Api.csproj
 
@@ -110,10 +118,14 @@ Dang co:
 
 - `ConnectionStrings:PostgreSQL`: PostgreSQL database `fakebook`, search path `social_graph`.
 - `ConnectionStrings:Redis`: Redis local.
-- `Gateway:InternalSharedSecret`: shared secret gui trong `X-Gateway-Secret` khi goi Auth internal API.
-- `ExternalServices:*`: URL cac service khac.
+- `Gateway:InternalSharedSecret`: shared secret toi thieu 32 byte, dung cho ca inbound `/internal/*` va outbound internal calls.
+- `ExternalServices:AuthenticationServiceCreateUser`: Auth internal endpoint `/internal/users`.
+- `InternalServices:Search:BaseUrl`: Search base URL, mac dinh local `http://localhost:5191`.
+- `InternalServices:Recommendation:BaseUrl`: Recommendation base URL, mac dinh local `http://localhost:8000`.
+- `InternalServices:TimeoutSeconds`: timeout outbound call, mac dinh 10 giay va clamp trong khoang 1..60.
+- `ExternalServices:*`: URL cac service legacy/khac nhu Auth delete, Notification va Messenger.
 
-Luu y: `AuthenticationServiceCreateUser` phai tro den Auth internal endpoint `/internal/users`. Cac URL service ngoai khac hien nhieu cai van la placeholder `http://localhost:5001`.
+Search va Recommendation khong cau hinh tung operation URL. Client ghep canonical path tu base URL. Secret phai trung voi Auth, Search, Recommendation va caller cua REST internal SocialGraph.
 
 ## 3. Database model
 
@@ -578,9 +590,10 @@ Logic:
    - `create = UTC now`
 3. Goi Authentication internal create user voi `userId`, `email`, `password`, `displayName`, `dob`.
 4. Neu Authentication fail, xoa object user vua tao trong SocialGraph va tra `{ success: false, userId: null }`.
-5. Neu Authentication thanh cong, goi Search create index va Recommendation create user embedding theo best-effort.
-6. Messenger create user tam thoi disable.
-7. Tra `{ success: true, userId }`.
+5. Neu Authentication thanh cong, chay dong thoi `PUT /internal/search/indexes/{userId}` va `PUT /internal/recommendation/users/{userId}/embedding`.
+6. Hai projection call idempotent, best-effort; non-2xx/network timeout duoc log va khong rollback Auth/SocialGraph da tao.
+7. Messenger create user tam thoi disable.
+8. Tra `{ success: true, userId }`.
 
 #### UpdateUserAsync(UpdateUserInput input)
 
@@ -914,7 +927,7 @@ Tuong tu post nhung nguon:
 
 ### ExternalServiceClient
 
-Phan lon call external la best-effort, rieng Authentication create user la required:
+Phan lon call external la best-effort, rieng Authentication create user la required. Moi operation tao mot correlation ID (hoac dung ID inbound), gui `X-Gateway-Secret` va `X-Correlation-ID`:
 
 - Neu endpoint thieu config: log debug va return.
 - Neu service tra non-success: log warning.
@@ -924,15 +937,14 @@ Phan lon call external la best-effort, rieng Authentication create user la requi
 Methods:
 
 - `NotifyAsync`: POST NotificationServiceCreateNotification payload `{ creatorId, receiverId, actionType, objectId, data }`.
-- `CreateUserAsync`: goi Auth create bat buoc, sau do Search create index va Recommend create user embedding best-effort. Messenger create dang tam disable.
+- `CreateUserAsync`: goi Auth create bat buoc; chi khi Auth thanh cong moi chay Search va Recommendation dong thoi theo best-effort. Messenger create dang tam disable.
 - `DeleteUserAsync`: goi Auth delete, Search delete index, Recommend delete user embedding. Messenger delete dang tam disable.
-- `CreateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
-- `UpdateSearchIndexAsync`: POST `{ objectId, objectType, text }`.
-- `DeleteSearchIndexAsync`: POST `{ objectId }`.
-- `CreateUserEmbeddingAsync`: POST `{ userId }`.
-- `DeleteUserEmbeddingAsync`: POST `{ userId }`.
-- `CreatePostEmbeddingAsync`: POST `{ postId, content, mediaUrls }`.
-- `DeletePostEmbeddingAsync`: POST `{ postId }`.
+- `CreateSearchIndexAsync` / `UpdateSearchIndexAsync`: `PUT /internal/search/indexes/{objectId}`, body `{ objectType, text }`.
+- `DeleteSearchIndexAsync`: `DELETE /internal/search/indexes/{objectId}`.
+- `CreateUserEmbeddingAsync`: `PUT /internal/recommendation/users/{userId}/embedding`.
+- `DeleteUserEmbeddingAsync`: `DELETE /internal/recommendation/users/{userId}/embedding`.
+- `CreatePostEmbeddingAsync`: `PUT /internal/recommendation/posts/{postId}/embedding`, body `{ content, mediaUrls }`.
+- `DeletePostEmbeddingAsync`: `DELETE /internal/recommendation/posts/{postId}/embedding`.
 - `CreateMessengerUserAsync`: POST `{ userId }`.
 - `DeleteMessengerUserAsync`: POST `{ userId }`.
 
@@ -1063,6 +1075,8 @@ Content:
 - `mention(sourceId, userId)`
 
 ## 9. REST internal API
+
+Moi endpoint `/internal/*` yeu cau `X-Gateway-Secret`. Secret server phai co it nhat 32 byte; missing/wrong secret tra `403`, chua cau hinh hop le tra `503`. Middleware preserve hoac tao `X-Correlation-ID` va tra ID trong response.
 
 Files:
 

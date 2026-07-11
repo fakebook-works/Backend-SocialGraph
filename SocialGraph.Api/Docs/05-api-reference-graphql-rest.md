@@ -154,22 +154,23 @@ Output:
 
 ## 3. External Service Calls
 
-Phan lon external call trong SocialGraph la best-effort. Rieng `AuthenticationServiceCreateUser` la required; neu Auth fail, SocialGraph rollback object user vua tao va tra payload fail.
+Phan lon external call trong SocialGraph la best-effort. Rieng Authentication create user la required; neu Auth fail, SocialGraph rollback object user vua tao, khong goi derived services va tra payload fail.
 
-| Config key | Service nhan | Payload |
+| Config/contract | Method va path | Body |
 |---|---|---|
-| `AuthenticationServiceCreateUser` | Authentication | `{ userId, email, password, displayName, dob }` |
-| `AuthenticationServiceDeleteUser` | Authentication | `{ userId }` |
-| `MessengerServiceCreateUser` | Messenger | `{ userId }` - tam disable |
-| `MessengerServiceDeleteUser` | Messenger | `{ userId }` - tam disable |
-| `SearchServiceCreateIndex` | Search | `{ objectId, objectType, text }` |
-| `SearchServiceUpdateIndex` | Search | `{ objectId, objectType, text }` |
-| `SearchServiceDeleteIndex` | Search | `{ objectId }` |
-| `RecommendServiceCreateUserEmbedding` | Recommendation | `{ userId }` |
-| `RecommendServiceDeleteUserEmbedding` | Recommendation | `{ userId }` |
-| `RecommendServiceCreatePostEmbedding` | Recommendation | `{ postId, content, mediaUrls }` |
-| `RecommendServiceDeletePostEmbedding` | Recommendation | `{ postId }` |
-| `NotificationServiceCreateNotification` | Notification | `{ creatorId, receiverId, actionType, objectId, data }` |
+| `ExternalServices:AuthenticationServiceCreateUser` | `POST /internal/users` | `{ userId, email, password, displayName, dob }` |
+| `ExternalServices:AuthenticationServiceDeleteUser` | configured legacy `POST` | `{ userId }` |
+| `ExternalServices:MessengerServiceCreateUser` | configured legacy `POST`, tam disable | `{ userId }` |
+| `ExternalServices:MessengerServiceDeleteUser` | configured legacy `POST`, tam disable | `{ userId }` |
+| `InternalServices:Search:BaseUrl` | `PUT /internal/search/indexes/{objectId}` | `{ objectType, text }` |
+| `InternalServices:Search:BaseUrl` | `DELETE /internal/search/indexes/{objectId}` | none |
+| `InternalServices:Recommendation:BaseUrl` | `PUT /internal/recommendation/users/{userId}/embedding` | none |
+| `InternalServices:Recommendation:BaseUrl` | `DELETE /internal/recommendation/users/{userId}/embedding` | none |
+| `InternalServices:Recommendation:BaseUrl` | `PUT /internal/recommendation/posts/{postId}/embedding` | `{ content, mediaUrls }` |
+| `InternalServices:Recommendation:BaseUrl` | `DELETE /internal/recommendation/posts/{postId}/embedding` | none |
+| `ExternalServices:NotificationServiceCreateNotification` | configured `POST` | `{ creatorId, receiverId, actionType, objectId, data }` |
+
+Moi call gui `X-Gateway-Secret` va `X-Correlation-ID`. Trong registration, Auth chay truoc; Search va Recommendation chi duoc start sau Auth va chay dong thoi bang cung canonical `userId`.
 
 Notification action types:
 
@@ -505,15 +506,16 @@ Logic:
 2. Data mac dinh: `avatar`, `background`, `name`, `bio`, `gender`, `birthdate`, `location`, `verify = ""`, `privacy = 0`, `create = now`.
 3. Goi Auth internal create user voi `userId`, `email`, `password`, `displayName`, `dob`.
 4. Neu Auth fail, xoa object user local va return fail payload.
-5. Neu Auth thanh cong, goi Search/Recommendation best-effort.
-6. Return payload co `userId`.
+5. Neu Auth thanh cong, start dong thoi Search index `PUT` va Recommendation user embedding `PUT`.
+6. Hai call derived la idempotent/best-effort; failure duoc log va khong rollback user da co Auth.
+7. Return payload co canonical `userId`.
 
 External calls:
 
-- Authentication `AuthenticationServiceCreateUser`: `{ userId, email, password, displayName, dob }`
+- Authentication: `POST /internal/users`, body `{ userId, email, password, displayName, dob }`
 - Messenger `MessengerServiceCreateUser`: tam disable
-- Search `SearchServiceCreateIndex`: `{ objectId: userId, objectType: "user", text: name }`
-- Recommendation `RecommendServiceCreateUserEmbedding`: `{ userId }`
+- Search: `PUT /internal/search/indexes/{userId}`, body `{ objectType: "user", text: name }`
+- Recommendation: `PUT /internal/recommendation/users/{userId}/embedding`, no body
 
 Return: `CreateUserPayload { success, userId, message }`
 
@@ -547,7 +549,7 @@ Logic:
 
 External calls:
 
-- Neu `name` khong rong: Search `SearchServiceUpdateIndex`: `{ objectId: userId, objectType: "user", text: name }`
+- Neu `name` khong rong: `PUT /internal/search/indexes/{userId}`, body `{ objectType: "user", text: name }`
 
 Return: `UserProfileResult?`
 
@@ -567,8 +569,8 @@ External calls:
 
 - Authentication `AuthenticationServiceDeleteUser`: `{ userId }`
 - Messenger `MessengerServiceDeleteUser`: tam disable
-- Search `SearchServiceDeleteIndex`: `{ objectId: userId }`
-- Recommendation `RecommendServiceDeleteUserEmbedding`: `{ userId }`
+- Search: `DELETE /internal/search/indexes/{userId}`
+- Recommendation: `DELETE /internal/recommendation/users/{userId}/embedding`
 
 Return: `bool`
 
@@ -736,7 +738,7 @@ Logic:
 
 External calls:
 
-- Search `SearchServiceCreateIndex`: `{ objectId: groupId, objectType: "group", text: name }`
+- Search: `PUT /internal/search/indexes/{groupId}`, body `{ objectType: "group", text: name }`
 
 Return: `GroupResult`
 
@@ -765,7 +767,7 @@ Logic:
 
 External calls:
 
-- Neu `name` khong rong: Search `SearchServiceUpdateIndex`: `{ objectId: groupId, objectType: "group", text: name }`
+- Neu `name` khong rong: `PUT /internal/search/indexes/{groupId}`, body `{ objectType: "group", text: name }`
 
 Return: `GroupResult?`
 
@@ -783,7 +785,7 @@ Logic:
 
 External calls:
 
-- Search `SearchServiceDeleteIndex`: `{ objectId: groupId }`
+- Search: `DELETE /internal/search/indexes/{groupId}`
 
 Return: `bool`
 
@@ -917,8 +919,8 @@ Logic:
 
 External calls:
 
-- Search `SearchServiceCreateIndex`: `{ objectId: postId, objectType: "post", text: content }`
-- Recommendation `RecommendServiceCreatePostEmbedding`: `{ postId, content, mediaUrls }`
+- Search: `PUT /internal/search/indexes/{postId}`, body `{ objectType: "post", text: content }`
+- Recommendation: `PUT /internal/recommendation/posts/{postId}/embedding`, body `{ content, mediaUrls }`
 
 Return: `ContentResult`
 
@@ -954,8 +956,8 @@ Logic:
 
 External calls:
 
-- Search `SearchServiceCreateIndex`: `{ objectId: postId, objectType: "post", text: content }`
-- Recommendation `RecommendServiceCreatePostEmbedding`: `{ postId, content, mediaUrls }`
+- Search: `PUT /internal/search/indexes/{postId}`, body `{ objectType: "post", text: content }`
+- Recommendation: `PUT /internal/recommendation/posts/{postId}/embedding`, body `{ content, mediaUrls }`
 
 Return: `ContentResult`
 
@@ -999,8 +1001,8 @@ Logic:
 
 External calls:
 
-- Neu content la post: Recommendation `RecommendServiceDeletePostEmbedding`: `{ postId: contentId }`
-- Neu content la post: Search `SearchServiceDeleteIndex`: `{ objectId: contentId }`
+- Neu content la post: `DELETE /internal/recommendation/posts/{contentId}/embedding`
+- Neu content la post: `DELETE /internal/search/indexes/{contentId}`
 
 Return: `bool`
 
@@ -1235,6 +1237,15 @@ External calls:
 Return: `bool`
 
 ## 6. REST Internal APIs
+
+Tat ca endpoint trong section nay yeu cau:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-Correlation-ID: <optional trace id>
+```
+
+Thieu/sai secret tra `403`. Neu server secret chua cau hinh hop le thi tra `503`. Correlation ID inbound duoc preserve; neu thieu, SocialGraph tao ID va tra lai trong response header.
 
 ### GET /internal/recommendation/post-candidates
 

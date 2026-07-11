@@ -147,15 +147,20 @@ Query `profile(userId)` return:
 
 ## 5. Endpoints ma Auth service can co
 
-SocialGraph config keys:
+SocialGraph config:
 
 - `Gateway:InternalSharedSecret`
-- `AuthenticationServiceCreateUser`
-- `AuthenticationServiceDeleteUser`
+- `ExternalServices:AuthenticationServiceCreateUser`
+- `ExternalServices:AuthenticationServiceDeleteUser`
 
-### Create user
+Create identity la call required:
 
-SocialGraph POST payload:
+```http
+POST /internal/users
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
+```
 
 ```json
 {
@@ -167,27 +172,11 @@ SocialGraph POST payload:
 }
 ```
 
-Auth nen:
+Auth luu credential bang canonical `userId`, hash password, enforce email unique va tra 2xx khi thanh cong. Neu Auth fail/non-2xx, SocialGraph rollback object user local va khong goi Search/Recommendation.
 
-- Luu user credential voi `userId` canonical.
-- Hash password.
-- Email unique.
-- Require `X-Gateway-Secret`.
-- Tra 2xx neu ok.
+Sau khi Auth thanh cong, Search va Recommendation duoc provision dong thoi, idempotent va best-effort.
 
-SocialGraph rollback object user local neu Auth fail. Search/Recommendation sau Auth la best-effort.
-
-### Delete user
-
-Payload:
-
-```json
-{
-  "userId": 123
-}
-```
-
-Nen disable/xoa credential.
+Auth delete hien van la legacy configured POST payload `{ "userId": 123 }` va duoc goi best-effort.
 
 ## 6. Endpoints ma Messenger service can co
 
@@ -195,8 +184,8 @@ Messenger create/delete user dang tam disable trong SocialGraph, nhung contract 
 
 Config:
 
-- `MessengerServiceCreateUser`
-- `MessengerServiceDeleteUser`
+- `ExternalServices:MessengerServiceCreateUser`
+- `ExternalServices:MessengerServiceDeleteUser`
 
 Create payload:
 
@@ -216,89 +205,73 @@ Delete payload:
 
 Messenger nen dung chung canonical user id.
 
-## 7. Endpoints ma Search service can co
+## 7. Contract voi Search service
 
-Config:
+Config base URL:
 
-- `SearchServiceCreateIndex`
-- `SearchServiceUpdateIndex`
-- `SearchServiceDeleteIndex`
+- `InternalServices:Search:BaseUrl`
 
-### Create/update index
+Create va update cung dung idempotent upsert:
 
-Payload:
+```http
+PUT /internal/search/indexes/{objectId}
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
+```
 
 ```json
 {
-  "objectId": 123,
   "objectType": "post",
   "text": "noi dung index"
 }
 ```
 
-`objectType` co the la:
+`objectType` hop le: `user`, `group`, `post`, `reel`. `objectId` nam tren path va la positive signed 64-bit Snowflake ID.
 
-- `user`
-- `group`
-- `post`
+Delete:
 
-Search nen upsert theo `(objectType, objectId)`.
-
-### Delete index
-
-Payload:
-
-```json
-{
-  "objectId": 123
-}
+```http
+DELETE /internal/search/indexes/{objectId}
 ```
 
-Neu Search can objectType de xoa chinh xac, service Search nen chap nhan thieu objectType hoac SocialGraph can duoc update sau.
+Upsert va delete deu phai idempotent. Delete tra `204` ke ca khi index khong ton tai.
 
-## 8. Endpoints ma Recommendation service can co
+## 8. Contract voi Recommendation service
 
-Config SocialGraph goi:
+Config base URL:
 
-- `RecommendServiceCreateUserEmbedding`
-- `RecommendServiceDeleteUserEmbedding`
-- `RecommendServiceCreatePostEmbedding`
-- `RecommendServiceDeletePostEmbedding`
+- `InternalServices:Recommendation:BaseUrl`
 
-### Create user embedding
+User embedding:
 
-Payload:
-
-```json
-{
-  "userId": 123
-}
+```http
+PUT /internal/recommendation/users/{userId}/embedding
+DELETE /internal/recommendation/users/{userId}/embedding
 ```
 
-### Delete user embedding
+`PUT` khong co body, chi tao vector neu user chua co. `DELETE` idempotent va tra `204`.
 
-```json
-{
-  "userId": 123
-}
+Post embedding:
+
+```http
+PUT /internal/recommendation/posts/{postId}/embedding
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
 ```
 
-### Create post embedding
-
 ```json
 {
-  "postId": 456,
   "content": "post content",
   "mediaUrls": ["https://media.local/a.jpg"]
 }
 ```
 
-### Delete post embedding
+Delete post embedding:
 
-```json
-{
-  "postId": 456
-}
+```http
+DELETE /internal/recommendation/posts/{postId}/embedding
 ```
 
 Recommendation service nen lay candidates tu SocialGraph:
@@ -306,6 +279,8 @@ Recommendation service nen lay candidates tu SocialGraph:
 ```http
 GET /internal/recommendation/post-candidates?userId=123&limit=200
 GET /internal/recommendation/reel-candidates?userId=123&limit=200
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
 ```
 
 Response:
@@ -332,7 +307,7 @@ Recommendation nen:
 
 Config:
 
-- `NotificationServiceCreateNotification`
+- `ExternalServices:NotificationServiceCreateNotification`
 
 SocialGraph POST payload:
 
@@ -412,8 +387,9 @@ Background flow:
 
 ## 12. Important caveats cho agent khac
 
-- External calls tu SocialGraph la best-effort, nen service khac nen idempotent.
-- Neu Search/Recommend fail, SocialGraph van co the da tao post/user.
+- External projection calls tu SocialGraph la best-effort, nen service khac phai idempotent.
+- User Search/Recommendation projection chi bat dau sau khi Auth create thanh cong. Neu projection fail, Auth va SocialGraph user van da duoc tao.
+- Search va Recommendation user provisioning duoc start dong thoi va dung cung canonical user ID/correlation ID.
 - Service khac nen co endpoint repair/reindex neu can sync lai.
 - Friend request pending hien nam o Notification domain, khong co table pending trong SocialGraph.
 - Candidate endpoint la candidate pool, khong phai final feed.
@@ -422,9 +398,9 @@ Background flow:
 ## 13. Checklist khi code service khac
 
 - Dung `long userId/objectId` tu SocialGraph.
-- Implement endpoint dung payload SocialGraph dang POST/GET.
+- Implement dung HTTP method, path va body canonical trong file nay.
 - Endpoint nen idempotent.
 - Tra 2xx neu request duplicate nhung state da dung.
-- Log ro request den tu SocialGraph.
+- Validate `X-Gateway-Secret` va propagate/log `X-Correlation-ID`.
 - Khong doc truc tiep DB SocialGraph.
 - Neu can them contract, cap nhat file nay va appsettings cua SocialGraph.

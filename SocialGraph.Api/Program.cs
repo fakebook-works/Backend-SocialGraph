@@ -2,13 +2,22 @@ using StackExchange.Redis;
 
 using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Database;
+using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
 using SocialGraph.Api.SubGraphQL;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-builder.Services.AddHttpClient("external-services");
+builder.Services.AddHttpClient("external-services", client =>
+{
+    var timeoutSeconds = Math.Clamp(
+        builder.Configuration.GetValue<int?>("InternalServices:TimeoutSeconds") ?? 10,
+        1,
+        60);
+    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+});
+builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddDbContext<MyDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSQL")));
@@ -35,6 +44,8 @@ builder.Services
     .AddApolloFederation();
 
 var app = builder.Build();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<InternalApiAuthenticationMiddleware>();
 app.MapGraphQL("/graphql"); // Mở cửa duy nhất
 app.MapControllers();
 app.RunWithGraphQLCommands(args);

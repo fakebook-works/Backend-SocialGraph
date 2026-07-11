@@ -1,6 +1,38 @@
-@SocialGraphService_HostAddress = http://localhost:5223
+@host = http://localhost:5223
+@internalSecret = replace-with-at-least-32-bytes
+@userId = 9000000000000001
 
-GET {{SocialGraphService_HostAddress}}/weatherforecast/
-Accept: application/json
+POST {{host}}/graphql
+Content-Type: application/json
+X-Correlation-ID: manual-register-test
+
+{
+  "query": "mutation CreateUser($input: CreateUserInput!) { createUser(input: $input) { success userId message } }",
+  "variables": {
+    "input": {
+      "name": "Nguyen Van A",
+      "gender": true,
+      "birthdate": "2000-01-01",
+      "location": "Ha Noi",
+      "email": "a@example.com",
+      "password": "secret123"
+    }
+  }
+}
 
 ###
+
+GET {{host}}/internal/recommendation/post-candidates?userId={{userId}}&limit=20
+X-Gateway-Secret: {{internalSecret}}
+X-Correlation-ID: manual-candidate-test
+
+###
+
+PUT {{host}}/internal/users/{{userId}}/verify
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-Correlation-ID: manual-verify-test
+
+{
+  "expiresAt": "2026-08-10T00:00:00Z"
+}
