@@ -26,7 +26,8 @@ public sealed class ExternalServiceClient : IExternalServiceClient
     public async Task CreateUserAsync(long userId, string email, string password, string name, CancellationToken cancellationToken = default)
     {
         await PostAsync("AuthenticationServiceCreateUser", new { userId, email, password }, cancellationToken);
-        await CreateMessengerUserAsync(userId, cancellationToken);
+        // Temporarily disabled until Messenger service registration flow is ready.
+        // await CreateMessengerUserAsync(userId, cancellationToken);
         await CreateSearchIndexAsync(userId, "user", name, cancellationToken);
         await CreateUserEmbeddingAsync(userId, cancellationToken);
     }
@@ -34,7 +35,8 @@ public sealed class ExternalServiceClient : IExternalServiceClient
     public async Task DeleteUserAsync(long userId, CancellationToken cancellationToken = default)
     {
         await PostAsync("AuthenticationServiceDeleteUser", new { userId }, cancellationToken);
-        await DeleteMessengerUserAsync(userId, cancellationToken);
+        // Temporarily disabled until Messenger service registration flow is ready.
+        // await DeleteMessengerUserAsync(userId, cancellationToken);
         await DeleteSearchIndexAsync(userId, cancellationToken);
         await DeleteUserEmbeddingAsync(userId, cancellationToken);
     }
