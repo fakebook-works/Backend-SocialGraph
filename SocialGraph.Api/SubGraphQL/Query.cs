@@ -1,0 +1,90 @@
+﻿namespace SocialGraph.Api.SubGraphQL;
+
+using HotChocolate;
+using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Service;
+
+public class Query
+{
+    public Task<SocialGraphObjectResult?> GetObjectAsync(
+        long id,
+        [Service] IObjectService objectService,
+        CancellationToken cancellationToken)
+    {
+        return objectService.RetrieveObjectAsync(id, cancellationToken);
+    }
+
+    public Task<AssociationPageResult> GetAssociationAsync(
+        long id1,
+        short atype,
+        string? cursor,
+        int limit,
+        [Service] IAssociationService associationService,
+        CancellationToken cancellationToken)
+    {
+        return associationService.RetrieveAssociationAsync(id1, atype, cursor, limit, cancellationToken);
+    }
+
+    public Task<long> GetAssociationCountAsync(
+        long id1,
+        short atype,
+        [Service] IAssociationService associationService,
+        CancellationToken cancellationToken)
+    {
+        return associationService.CountAssociationAsync(id1, atype, cancellationToken);
+    }
+
+    public Task<UserProfileResult?> GetProfileAsync(
+        long userId,
+        [Service] IUserGraphService userGraphService,
+        CancellationToken cancellationToken)
+    {
+        return userGraphService.GetProfileAsync(userId, cancellationToken);
+    }
+
+    public Task<GroupResult?> GetGroupAsync(
+        long groupId,
+        [Service] IGroupGraphService groupGraphService,
+        CancellationToken cancellationToken)
+    {
+        return groupGraphService.GetGroupAsync(groupId, cancellationToken);
+    }
+
+    public Task<ContentResult?> GetContentAsync(
+        long contentId,
+        [Service] IContentGraphService contentGraphService,
+        CancellationToken cancellationToken)
+    {
+        return contentGraphService.GetContentAsync(contentId, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<long>> GetRelationIdsAsync(
+        long id1,
+        short atype,
+        string? cursor,
+        int limit,
+        [Service] IAssociationService associationService,
+        CancellationToken cancellationToken)
+    {
+        var page = await associationService.RetrieveAssociationAsync(id1, atype, cursor, limit, cancellationToken);
+        return page.items.Select(item => item.id2).ToArray();
+    }
+
+    public Task<IReadOnlyList<CandidateItemResult>> GetPostCandidatesAsync(
+        long userId,
+        int limit,
+        [Service] ICandidateService candidateService,
+        CancellationToken cancellationToken)
+    {
+        return candidateService.GetPostCandidatesAsync(userId, limit, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
+        long userId,
+        int limit,
+        [Service] ICandidateService candidateService,
+        CancellationToken cancellationToken)
+    {
+        return candidateService.GetReelCandidatesAsync(userId, limit, cancellationToken);
+    }
+}
