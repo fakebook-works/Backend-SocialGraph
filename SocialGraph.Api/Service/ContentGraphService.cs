@@ -470,14 +470,34 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var data = GraphJson.ParseObject(story.data);
         var sharedSource = await GetSharedSourceAsync(story.id, cancellationToken);
-        if (sharedSource is not null)
+        if (sharedSource is FeedPostSharedSourceResult feedPostSource)
         {
-            return new ShareStoryResult(
+            return new FeedPostShareStoryResult(
                 story.id,
                 GraphJson.String(data, "content"),
                 GraphJson.String(data, "create"),
                 GraphJson.String(data, "expire"),
-                sharedSource);
+                feedPostSource);
+        }
+
+        if (sharedSource is GroupPostSharedSourceResult groupPostSource)
+        {
+            return new GroupPostShareStoryResult(
+                story.id,
+                GraphJson.String(data, "content"),
+                GraphJson.String(data, "create"),
+                GraphJson.String(data, "expire"),
+                groupPostSource);
+        }
+
+        if (sharedSource is ReelSharedSourceResult reelSource)
+        {
+            return new ReelShareStoryResult(
+                story.id,
+                GraphJson.String(data, "content"),
+                GraphJson.String(data, "create"),
+                GraphJson.String(data, "expire"),
+                reelSource);
         }
 
         return new NormalStoryResult(

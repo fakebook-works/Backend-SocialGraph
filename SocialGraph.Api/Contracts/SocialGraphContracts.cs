@@ -111,7 +111,6 @@ public sealed record GroupSummaryResult(
     string Background,
     int Privacy);
 
-[UnionType("StorySharedSource")]
 public interface IStorySharedSourceResult;
 
 [GraphQLName("FeedPostSharedSource")]
@@ -152,13 +151,29 @@ public sealed record NormalStoryResult(
     string Expire,
     IReadOnlyList<MediaResult> Media) : IHomeStoryResult;
 
-[GraphQLName("ShareStory")]
-public sealed record ShareStoryResult(
+[GraphQLName("FeedPostShareStory")]
+public sealed record FeedPostShareStoryResult(
     long Id,
     string Content,
     string Create,
     string Expire,
-    IStorySharedSourceResult SharedSource) : IHomeStoryResult;
+    FeedPostSharedSourceResult SharedSource) : IHomeStoryResult;
+
+[GraphQLName("GroupPostShareStory")]
+public sealed record GroupPostShareStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    string Expire,
+    GroupPostSharedSourceResult SharedSource) : IHomeStoryResult;
+
+[GraphQLName("ReelShareStory")]
+public sealed record ReelShareStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    string Expire,
+    ReelSharedSourceResult SharedSource) : IHomeStoryResult;
 
 public sealed record HomeStoryBucketResult(
     UserSummaryResult Author,
