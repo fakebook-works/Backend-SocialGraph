@@ -176,7 +176,159 @@ Output cua `homeStories`:
 }
 ```
 
-`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Story share co `sharedSource`; story thuong thi `sharedSource = null`.
+`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Story thuong co `sharedSource = null`. Story share co `sharedSource` la GraphQL union `StorySharedSource`.
+
+`StorySharedSource` co 3 concrete type:
+
+```graphql
+union StorySharedSource =
+    FeedPostSharedSource
+  | GroupPostSharedSource
+  | ReelSharedSource
+```
+
+Frontend phai query bang `__typename` va inline fragment:
+
+```graphql
+sharedSource {
+  __typename
+
+  ... on FeedPostSharedSource {
+    id
+    content
+    privacy
+    create
+    author {
+      id
+      name
+      avatar
+      verify
+      isVerified
+    }
+    media {
+      id
+      type
+      url
+    }
+  }
+
+  ... on GroupPostSharedSource {
+    id
+    content
+    privacy
+    create
+    author {
+      id
+      name
+      avatar
+      verify
+      isVerified
+    }
+    group {
+      id
+      name
+      avatar
+      background
+      privacy
+    }
+    media {
+      id
+      type
+      url
+    }
+  }
+
+  ... on ReelSharedSource {
+    id
+    content
+    create
+    author {
+      id
+      name
+      avatar
+      verify
+      isVerified
+    }
+    media {
+      id
+      type
+      url
+    }
+  }
+}
+```
+
+Vi du story share feed post:
+
+```json
+{
+  "sharedSource": {
+    "__typename": "FeedPostSharedSource",
+    "id": 789,
+    "content": "Feed post public",
+    "privacy": 0,
+    "create": "2026-07-12T08:00:00.0000000Z",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "verify": "",
+      "isVerified": false
+    },
+    "media": []
+  }
+}
+```
+
+Vi du story share group post:
+
+```json
+{
+  "sharedSource": {
+    "__typename": "GroupPostSharedSource",
+    "id": 790,
+    "content": "Group post public",
+    "privacy": 0,
+    "create": "2026-07-12T08:00:00.0000000Z",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "verify": "",
+      "isVerified": false
+    },
+    "group": {
+      "id": 88,
+      "name": "Public Group",
+      "avatar": "",
+      "background": "",
+      "privacy": 0
+    },
+    "media": []
+  }
+}
+```
+
+Vi du story share reel:
+
+```json
+{
+  "sharedSource": {
+    "__typename": "ReelSharedSource",
+    "id": 800,
+    "content": "Reel caption",
+    "create": "2026-07-12T08:00:00.0000000Z",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "verify": "",
+      "isVerified": false
+    },
+    "media": []
+  }
+}
+```
 
 ### CandidateItemResult
 

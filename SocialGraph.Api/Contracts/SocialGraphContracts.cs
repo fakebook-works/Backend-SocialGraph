@@ -1,5 +1,8 @@
 namespace SocialGraph.Api.Contracts;
 
+using HotChocolate;
+using HotChocolate.Types;
+
 public sealed record CreateUserInput(
     string Name,
     bool Gender,
@@ -108,15 +111,35 @@ public sealed record GroupSummaryResult(
     string Background,
     int Privacy);
 
-public sealed record StorySharedSourceResult(
+[UnionType("StorySharedSource")]
+public interface IStorySharedSourceResult;
+
+[GraphQLName("FeedPostSharedSource")]
+public sealed record FeedPostSharedSourceResult(
     long Id,
-    short Type,
+    string Content,
+    int Privacy,
+    string Create,
+    UserSummaryResult? Author,
+    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
+
+[GraphQLName("GroupPostSharedSource")]
+public sealed record GroupPostSharedSourceResult(
+    long Id,
     string Content,
     int Privacy,
     string Create,
     UserSummaryResult? Author,
     GroupSummaryResult? Group,
-    IReadOnlyList<MediaResult> Media);
+    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
+
+[GraphQLName("ReelSharedSource")]
+public sealed record ReelSharedSourceResult(
+    long Id,
+    string Content,
+    string Create,
+    UserSummaryResult? Author,
+    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
 
 public sealed record HomeStoryItemResult(
     long Id,
@@ -124,7 +147,7 @@ public sealed record HomeStoryItemResult(
     string Create,
     string Expire,
     IReadOnlyList<MediaResult> Media,
-    StorySharedSourceResult? SharedSource);
+    IStorySharedSourceResult? SharedSource);
 
 public sealed record HomeStoryBucketResult(
     UserSummaryResult Author,

@@ -1,6 +1,7 @@
 using StackExchange.Redis;
 
 using Microsoft.EntityFrameworkCore;
+using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
 using SocialGraph.Api.Service;
 using SocialGraph.Api.SubGraphQL;
@@ -32,6 +33,9 @@ builder.Services
     .AddGraphQLServer()
     .AddQueryType<Query>()
     .AddMutationType<Mutation>()
+    .AddType<FeedPostSharedSourceResult>()
+    .AddType<GroupPostSharedSourceResult>()
+    .AddType<ReelSharedSourceResult>()
     .AddApolloFederation();
 
 var app = builder.Build();

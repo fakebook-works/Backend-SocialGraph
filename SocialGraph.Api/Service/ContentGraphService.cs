@@ -481,7 +481,7 @@ public sealed class ContentGraphService : IContentGraphService
             await GetSharedSourceAsync(story.id, cancellationToken));
     }
 
-    private async Task<StorySharedSourceResult?> GetSharedSourceAsync(long storyId, CancellationToken cancellationToken)
+    private async Task<IStorySharedSourceResult?> GetSharedSourceAsync(long storyId, CancellationToken cancellationToken)
     {
         var share = await _associationService.RetrieveAssociationAsync(storyId, GraphAssociationType.Share, null, 1, cancellationToken);
         var sourceId = share.items.FirstOrDefault()?.id2 ?? 0;
@@ -499,21 +499,45 @@ public sealed class ContentGraphService : IContentGraphService
         return await BuildSharedSourceResultAsync(source, cancellationToken);
     }
 
-    private async Task<StorySharedSourceResult> BuildSharedSourceResultAsync(
+    private async Task<IStorySharedSourceResult> BuildSharedSourceResultAsync(
         SocialGraphObjectResult source,
         CancellationToken cancellationToken)
     {
         var data = GraphJson.ParseObject(source.data);
         var authorId = await GetAuthorIdAsync(source.id, cancellationToken);
-        return new StorySharedSourceResult(
-            source.id,
-            source.otype,
-            GraphJson.String(data, "content"),
-            await GetContentPrivacyAsync(source, data, cancellationToken),
-            GraphJson.String(data, "create"),
-            authorId > 0 ? await BuildUserSummaryAsync(authorId, cancellationToken) : null,
-            source.otype == GraphObjectType.GroupPost ? await BuildPublishedGroupSummaryAsync(source.id, cancellationToken) : null,
-            await GetMediaAsync(source.id, cancellationToken));
+        var author = authorId > 0 ? await BuildUserSummaryAsync(authorId, cancellationToken) : null;
+        var media = await GetMediaAsync(source.id, cancellationToken);
+        var content = GraphJson.String(data, "content");
+        var createdAt = GraphJson.String(data, "create");
+
+        return source.otype switch
+        {
+            GraphObjectType.FeedPost => new FeedPostSharedSourceResult(
+                source.id,
+                content,
+                await GetContentPrivacyAsync(source, data, cancellationToken),
+                createdAt,
+                author,
+                media),
+
+            GraphObjectType.GroupPost => new GroupPostSharedSourceResult(
+                source.id,
+                content,
+                await GetContentPrivacyAsync(source, data, cancellationToken),
+                createdAt,
+                author,
+                await BuildPublishedGroupSummaryAsync(source.id, cancellationToken),
+                media),
+
+            GraphObjectType.Reel => new ReelSharedSourceResult(
+                source.id,
+                content,
+                createdAt,
+                author,
+                media),
+
+            _ => throw new InvalidOperationException("Unsupported story shared source type.")
+        };
     }
 
     private async Task<UserSummaryResult?> BuildUserSummaryAsync(long userId, CancellationToken cancellationToken)
