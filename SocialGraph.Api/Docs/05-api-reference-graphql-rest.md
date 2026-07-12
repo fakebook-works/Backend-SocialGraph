@@ -137,6 +137,193 @@ Output:
 
 Feed post co type `2`; group post co type `3`. Voi group post, `privacy` trong result lay tu group chua post qua association `published_in(10)`.
 
+### HomeStoryPageResult
+
+Output cua `homeStories` va `myStories`:
+
+```json
+{
+  "items": [
+    {
+      "author": {
+        "id": 123,
+        "name": "Nguyen Van A",
+        "avatar": "https://cdn.local/avatar.jpg",
+        "isVerified": true
+      },
+      "latestCreate": "2026-07-12T10:00:00.0000000Z",
+      "stories": [
+        {
+          "__typename": "NormalStory",
+          "id": 901,
+          "content": "Story text",
+          "create": "2026-07-12T09:00:00.0000000Z",
+          "media": [
+            {
+              "id": 3001,
+              "type": 0,
+              "url": "https://cdn.local/story.jpg"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "endCursor": "base64-json",
+  "hasNextPage": true
+}
+```
+
+`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Field `stories` la GraphQL union `HomeStory`. `myStories` tra mot `HomeStoryBucketResult?` cho chinh user, khong co paging.
+
+`HomeStory` co 3 concrete type:
+
+```graphql
+union HomeStory =
+    NormalStory
+  | FeedPostShareStory
+  | ReelShareStory
+```
+
+- `NormalStory`: story thuong, co list `media`.
+- `FeedPostShareStory`: story share feed post public.
+- `ReelShareStory`: story share reel.
+
+Story share group post da bi chan, ke ca group public. Neu can share group post sau nay thi phai them type moi va can than voi privacy group.
+
+Frontend phai query bang `__typename` va inline fragment:
+
+```graphql
+stories {
+  __typename
+
+  ... on NormalStory {
+    id
+    content
+    create
+    media {
+      id
+      type
+      url
+    }
+  }
+
+  ... on FeedPostShareStory {
+    id
+    content
+    create
+    sharedSource {
+      id
+      content
+      author {
+        id
+        name
+        avatar
+        isVerified
+      }
+      media {
+        id
+        type
+        url
+      }
+    }
+  }
+
+  ... on ReelShareStory {
+    id
+    content
+    create
+    sharedSource {
+      id
+      content
+      author {
+        id
+        name
+        avatar
+        isVerified
+      }
+      media {
+        id
+        type
+        url
+      }
+    }
+  }
+}
+```
+
+Trong `FeedPostSharedSource` va `ReelSharedSource`, field `media` la mot object nullable, khong phai list. Service lay media dau tien cua bai/reel goc de lam preview. `author` cung nullable neu source bi thieu association author.
+
+Vi du normal story:
+
+```json
+{
+  "__typename": "NormalStory",
+  "id": 901,
+  "content": "Story text",
+  "create": "2026-07-12T09:00:00.0000000Z",
+  "media": [
+    {
+      "id": 3001,
+      "type": 0,
+      "url": "https://cdn.local/story.jpg"
+    }
+  ]
+}
+```
+
+Vi du story share feed post:
+
+```json
+{
+  "__typename": "FeedPostShareStory",
+  "id": 902,
+  "content": "Xem bai nay",
+  "create": "2026-07-12T10:00:00.0000000Z",
+  "sharedSource": {
+    "id": 789,
+    "content": "Feed post public",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "isVerified": false
+    },
+    "media": {
+      "id": 3101,
+      "type": 0,
+      "url": "https://cdn.local/feed-preview.jpg"
+    }
+  }
+}
+```
+
+Vi du story share reel:
+
+```json
+{
+  "__typename": "ReelShareStory",
+  "id": 904,
+  "content": "Xem reel nay",
+  "create": "2026-07-12T10:00:00.0000000Z",
+  "sharedSource": {
+    "id": 800,
+    "content": "Reel caption",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "isVerified": false
+    },
+    "media": {
+      "id": 3201,
+      "type": 1,
+      "url": "https://cdn.local/reel.mp4"
+    }
+  }
+}
+```
+
 ### CandidateItemResult
 
 Output:
@@ -306,6 +493,57 @@ Logic:
 External calls: khong co.
 
 Return: `ContentResult?`
+
+### homeStories(userId, limit, cursor)
+
+Input:
+
+- `userId: long`
+- `limit: int`, clamp ve `1..50`, la so author bucket can lay
+- `cursor: string?`, base64 JSON cua `(latestCreate, authorId)` bucket cuoi page truoc
+
+Logic:
+
+1. Lay author co the xem story tu `friend(0)` va `followed(1)` cua user.
+2. Loai chinh user khoi danh sach author.
+3. Query story type `5` cua cac author do qua `authored(5)`.
+4. Voi tung story:
+   - neu `expire <= now` hoac expire invalid thi xoa story;
+   - neu con han thi dua vao bucket cua author.
+5. Khi xoa story het han:
+   - lay media qua `story --contained(20)--> media`;
+   - xoa moi association lien quan story;
+   - xoa story object;
+   - xoa moi media object gan truc tiep vao story va association lien quan media.
+6. Group story con han theo author.
+7. Sort author bucket theo `latestCreate desc, authorId desc`.
+8. Apply cursor theo author bucket, khong cursor theo tung story.
+9. Voi moi author bucket duoc chon, tra author summary va toan bo story con han. Moi story tra theo union `NormalStory`, `FeedPostShareStory`, hoac `ReelShareStory`.
+
+External calls: khong co.
+
+Return: `HomeStoryPageResult`
+
+### myStories(userId)
+
+Input:
+
+- `userId: long`
+
+Logic:
+
+1. Lay user summary cua chinh `userId`.
+2. Query story type `5` do user nay tao qua `user --authored(5)--> story`.
+3. Voi tung story:
+   - neu `expire <= now` hoac expire invalid thi xoa story va media temporary gan truc tiep vao story;
+   - neu con han thi dua vao bucket cua user.
+4. Sort story con han theo `create asc`.
+5. `latestCreate` la `create` lon nhat trong bucket.
+6. Neu user khong ton tai hoac khong con story hop le thi tra `null`.
+
+External calls: khong co.
+
+Return: `HomeStoryBucketResult?`
 
 ### relationIds(id1, atype, cursor, limit)
 
@@ -1033,7 +1271,7 @@ External calls:
 
 Return: `ContentResult`
 
-### createStory(input)
+### createNormalStory(input)
 
 Input:
 
@@ -1054,13 +1292,86 @@ Logic:
 
 1. Tao story object type `5` voi `{ content, create, expire }`.
 2. `expire = create + 1 day`.
-3. Attach toi da mot media neu co.
-4. Tao `author --authored(5)--> story`.
-5. Return content result.
+3. Neu input co `media`, tao media object tu `{ type, url }`.
+4. Attach toi da mot media bang `story --contained(20)--> media`.
+5. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
+6. Tao `author --authored(5)--> story`.
+7. Return story thuong theo type `NormalStory`.
 
 External calls: khong co.
 
-Return: `ContentResult`
+Return: `NormalStory`
+
+### createShareStory(input)
+
+Input:
+
+```json
+{
+  "input": {
+    "authorId": 123,
+    "content": "Xem bai nay",
+    "sharedSourceId": 789
+  }
+}
+```
+
+Logic:
+
+1. Validate `sharedSourceId`:
+   - feed post type `2` phai co `privacy = 0`;
+   - reel type `4` duoc phep share;
+   - group post type `3` va cac object khac bi reject.
+2. Tao story object type `5` voi `{ content, create, expire }`.
+3. `expire = create + 1 day`.
+4. Tao `author --authored(5)--> story`.
+5. Tao `story --share(8)--> sharedSource`.
+6. Return story share theo union `HomeStory`:
+   - `FeedPostShareStory` neu source la feed post public;
+   - `ReelShareStory` neu source la reel.
+7. Story share khong tao media rieng. Preview media lay tu source goc va chi lay media dau tien.
+
+External calls: khong co.
+
+Return: `HomeStory`
+
+### deleteStory(input)
+
+Input:
+
+```json
+{
+  "input": {
+    "authorId": 123,
+    "storyId": 901
+  }
+}
+```
+
+Logic:
+
+1. Retrieve `storyId`.
+2. Neu object khong ton tai hoac khong phai type `5` thi tra payload `success = false`.
+3. Lay author cua story qua `story --authored_by(7)--> author`.
+4. Neu author khac `authorId` thi tra payload `success = false`.
+5. Lay media temporary qua `story --contained(20)--> media`.
+6. Xoa moi association lien quan story.
+7. Xoa story object.
+8. Xoa moi media temporary gan truc tiep vao story va association lien quan media.
+9. Khong xoa source goc neu story la story share.
+
+External calls: khong co.
+
+Return:
+
+```json
+{
+  "success": true,
+  "message": "Story deleted."
+}
+```
+
+Type: `DeleteStoryPayload`
 
 ### createReel(input)
 

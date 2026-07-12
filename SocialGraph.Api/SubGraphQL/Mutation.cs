@@ -219,9 +219,28 @@ public class Mutation
         return contentGraphService.CreateCommentAsync(input, cancellationToken);
     }
 
-    public Task<ContentResult> CreateStoryAsync(CreateStoryInput input, [Service] IContentGraphService contentGraphService, CancellationToken cancellationToken)
+    public Task<NormalStoryResult> CreateNormalStoryAsync(
+        CreateNormalStoryInput input,
+        [Service] IContentGraphService contentGraphService,
+        CancellationToken cancellationToken)
     {
-        return contentGraphService.CreateStoryAsync(input, cancellationToken);
+        return contentGraphService.CreateNormalStoryAsync(input, cancellationToken);
+    }
+
+    public Task<IHomeStoryResult> CreateShareStoryAsync(
+        CreateShareStoryInput input,
+        [Service] IContentGraphService contentGraphService,
+        CancellationToken cancellationToken)
+    {
+        return contentGraphService.CreateShareStoryAsync(input, cancellationToken);
+    }
+
+    public Task<DeleteStoryPayload> DeleteStoryAsync(
+        DeleteStoryInput input,
+        [Service] IContentGraphService contentGraphService,
+        CancellationToken cancellationToken)
+    {
+        return contentGraphService.DeleteStoryAsync(input, cancellationToken);
     }
 
     public Task<ContentResult> CreateReelAsync(CreateReelInput input, [Service] IContentGraphService contentGraphService, CancellationToken cancellationToken)

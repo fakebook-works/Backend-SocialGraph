@@ -1,5 +1,8 @@
 namespace SocialGraph.Api.Contracts;
 
+using HotChocolate;
+using HotChocolate.Types;
+
 public sealed record CreateUserInput(
     string Name,
     bool Gender,
@@ -47,7 +50,13 @@ public sealed record UpdatePostInput(long Id, int Privacy);
 
 public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
 
-public sealed record CreateStoryInput(long AuthorId, string Content, MediaInput? Media);
+public sealed record CreateNormalStoryInput(long AuthorId, string Content, MediaInput? Media);
+
+public sealed record CreateShareStoryInput(long AuthorId, string Content, long SharedSourceId);
+
+public sealed record DeleteStoryInput(long AuthorId, long StoryId);
+
+public sealed record DeleteStoryPayload(bool Success, string? Message = null);
 
 public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media);
 
@@ -93,6 +102,67 @@ public sealed record ContentResult(
     string Create,
     long AuthorId,
     IReadOnlyList<MediaResult> Media);
+
+public sealed record UserSummaryResult(
+    long Id,
+    string Name,
+    string Avatar,
+    bool IsVerified);
+
+public sealed record GroupSummaryResult(
+    long Id,
+    string Name,
+    string Avatar);
+
+public interface IStorySharedSourceResult;
+
+[GraphQLName("FeedPostSharedSource")]
+public sealed record FeedPostSharedSourceResult(
+    long Id,
+    string Content,
+    MediaResult? Media,
+    UserSummaryResult? Author) : IStorySharedSourceResult;
+
+[GraphQLName("ReelSharedSource")]
+public sealed record ReelSharedSourceResult(
+    long Id,
+    string Content,
+    MediaResult? Media,
+    UserSummaryResult? Author) : IStorySharedSourceResult;
+
+[UnionType("HomeStory")]
+public interface IHomeStoryResult;
+
+[GraphQLName("NormalStory")]
+public sealed record NormalStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    IReadOnlyList<MediaResult> Media) : IHomeStoryResult;
+
+[GraphQLName("FeedPostShareStory")]
+public sealed record FeedPostShareStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    FeedPostSharedSourceResult SharedSource) : IHomeStoryResult;
+
+[GraphQLName("ReelShareStory")]
+public sealed record ReelShareStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    ReelSharedSourceResult SharedSource) : IHomeStoryResult;
+
+public sealed record HomeStoryBucketResult(
+    UserSummaryResult Author,
+    string LatestCreate,
+    IReadOnlyList<IHomeStoryResult> Stories);
+
+public sealed record HomeStoryPageResult(
+    IReadOnlyList<HomeStoryBucketResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
 
 public sealed record CandidateItemResult(
     long Id,
