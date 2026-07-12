@@ -2,6 +2,10 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SocialGraph.Api", "SocialGraph.Api\SocialGraph.Api.csproj", "{7ED7A76F-0206-48F3-B010-CC4CEF362C9A}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{E98FB111-39C6-4DD7-B7C9-23BFB001E32C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SocialGraph.Api.Tests", "tests\SocialGraph.Api.Tests\SocialGraph.Api.Tests.csproj", "{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -12,5 +16,12 @@ Global
 		{7ED7A76F-0206-48F3-B010-CC4CEF362C9A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7ED7A76F-0206-48F3-B010-CC4CEF362C9A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7ED7A76F-0206-48F3-B010-CC4CEF362C9A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{6ECB1DE3-9C57-4B98-A09A-E17AB914BA78} = {E98FB111-39C6-4DD7-B7C9-23BFB001E32C}
 	EndGlobalSection
 EndGlobal

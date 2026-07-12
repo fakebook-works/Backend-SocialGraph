@@ -25,6 +25,8 @@ Billing/Payment se goi nguoc ve SocialGraph khi thanh toan thanh cong:
 
 ```http
 PUT /internal/users/{userId}/verify
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-Correlation-ID: <trace id>
 ```
 
 Body:
@@ -243,6 +245,8 @@ Call:
 ```http
 PUT /internal/users/123/verify
 Content-Type: application/json
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-Correlation-ID: billing-order-456
 ```
 
 ```json
@@ -251,7 +255,7 @@ Content-Type: application/json
 }
 ```
 
-Response 200 la `UserProfileResult`. Response 404 nghia la user khong ton tai trong SocialGraph, Billing nen de order o `paid_sync_failed` hoac reject tuy policy.
+Response 200 la `UserProfileResult`. Response 404 nghia la user khong ton tai trong SocialGraph. Response 403 nghia la shared secret sai/thieu; 503 nghia la SocialGraph chua cau hinh internal auth. Billing nen de order o `paid_sync_failed` va retry theo policy cho loi co the phuc hoi.
 
 ## 9. DTO de agent tao
 

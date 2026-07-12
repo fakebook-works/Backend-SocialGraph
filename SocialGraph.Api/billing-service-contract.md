@@ -50,6 +50,9 @@ Khong bat buoc tao bang `user_entitlements` cho SocialGraph. Neu Billing van muo
 
 ```http
 PUT /internal/users/{userId}/verify
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
 ```
 
 Body cap/gia han:
@@ -71,9 +74,11 @@ Body thu hoi/clear:
 Rules:
 
 - Billing khong ghi truc tiep database SocialGraph.
+- Billing phai dung shared secret trung voi `Gateway:InternalSharedSecret` cua SocialGraph.
 - Billing chi goi endpoint nay sau khi order da paid hoac khi can thu hoi verify.
 - `expiresAt` nen gui dang UTC ISO-8601.
 - SocialGraph se tu tinh `isVerified = verify > now`.
+- Missing/wrong secret tra `403`; SocialGraph chua cau hinh secret hop le tra `503`.
 
 ## APIs For Frontend/Gateway Later
 

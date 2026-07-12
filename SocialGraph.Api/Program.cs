@@ -3,19 +3,30 @@ using StackExchange.Redis;
 using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
+using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
 using SocialGraph.Api.SubGraphQL;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-builder.Services.AddHttpClient("external-services");
+builder.Services.AddHttpClient("external-services", client =>
+{
+    var timeoutSeconds = Math.Clamp(
+        builder.Configuration.GetValue<int?>("InternalServices:TimeoutSeconds") ?? 10,
+        1,
+        60);
+    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+});
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ITrustedCallerAccessor, TrustedCallerAccessor>();
 
 builder.Services.AddDbContext<MyDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSQL")));
 
 // 1. Đăng ký kết nối Redis (Dòng code của bạn)
-builder.Services.AddSingleton<IConnectionMultiplexer>(sp => {
+builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+{
     var configuration = builder.Configuration.GetConnectionString("Redis");
     return ConnectionMultiplexer.Connect(configuration!);
 });
@@ -27,6 +38,7 @@ builder.Services.AddScoped<IUserGraphService, UserGraphService>();
 builder.Services.AddScoped<IGroupGraphService, GroupGraphService>();
 builder.Services.AddScoped<IContentGraphService, ContentGraphService>();
 builder.Services.AddScoped<ICandidateService, CandidateService>();
+builder.Services.AddHostedService<StoryCleanupBackgroundService>();
 
 // 3. Đăng ký bộ điều phối GraphQL Subgraph
 builder.Services
@@ -41,6 +53,8 @@ builder.Services
     .AddApolloFederation();
 
 var app = builder.Build();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<InternalApiAuthenticationMiddleware>();
 app.MapGraphQL("/graphql"); // Mở cửa duy nhất
 app.MapControllers();
 app.RunWithGraphQLCommands(args);

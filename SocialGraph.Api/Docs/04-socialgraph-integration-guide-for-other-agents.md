@@ -24,6 +24,7 @@ REST internal:
 - `/internal/recommendation/post-candidates`
 - `/internal/recommendation/reel-candidates`
 - `/internal/users/{userId}/verify`
+- `DELETE /internal/stories/expired`
 
 ## 2. Service boundary
 
@@ -61,9 +62,11 @@ Search/Recommendation/Messenger/Notification khong tu tao object ID cho cac obje
 
 Feed post la object type `2` va co `privacy` rieng trong post data. Group post la object type `3`, khong co `privacy` rieng; khi doc/hien thi thi privacy lay tu group chua post qua `published_in(10)`. Service khac nen khong gop 2 loai post thanh mot type.
 
+Story chi share feed post public hoac reel. SocialGraph kiem tra privacy feed post luc tao va moi lan doc; neu source bi chuyen sang private hoac bi xoa thi story share khong duoc return.
+
 ## 4. GraphQL operation chinh cho Gateway
 
-Gateway hien compose SocialGraph nhung chi expose public mutation `createUser`. Cac query va mutation SocialGraph khac dang duoc mark `@internal` trong Gateway cho den khi authorization duoc implement.
+Gateway hien compose SocialGraph nhung chi expose public mutation `createUser`. Story authorization da co trong subgraph, nhung source schema/extensions va `gateway.far` hien tai chua duoc refresh de public Story. Cac field business khac van `@internal` cho den khi co authorization rieng.
 
 Ten GraphQL field co the duoc HotChocolate camelCase tu method C#:
 
@@ -127,7 +130,12 @@ Query `profile(userId)` return:
 - `createFeedPost(input)`
 - `createGroupPost(input)` khong nhan `privacy`; group post dung privacy cua group.
 - `createComment(input)`
-- `createStory(input)`
+- `homeStories(userId, limit, cursor)`
+- `myStories(userId)`
+- `createNormalStory(input)`
+- `createShareStory(input)`
+- `deleteStory(input)`
+- `createStory(input)` chi la compatibility mutation da deprecated
 - `createReel(input)`
 - `sharePost(input)`
 - `like(userId, targetId)`
@@ -136,6 +144,17 @@ Query `profile(userId)` return:
 - `tag(postId, userId)`
 - `mention(sourceId, userId)`
 - `content(contentId)`
+
+Story query/mutation bat buoc co hai header do Gateway tao sau khi validate session:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-User-Id: <authenticated user id>
+```
+
+Gateway phai xoa header cung ten do client gui len. `userId`/`authorId` trong GraphQL phai trung `X-User-Id`; SocialGraph fail closed neu secret/user header thieu, sai hoac mismatch.
+
+`homeStories` page theo author bucket (`limit` clamp `1..50`), con `myStories` tra mot bucket. Ca hai chi filter story het han, khong xoa data. Cleanup chay qua background worker hoac `DELETE /internal/stories/expired?limit=100` voi `X-Gateway-Secret`.
 
 ### Relations
 
@@ -147,15 +166,20 @@ Query `profile(userId)` return:
 
 ## 5. Endpoints ma Auth service can co
 
-SocialGraph config keys:
+SocialGraph config:
 
 - `Gateway:InternalSharedSecret`
-- `AuthenticationServiceCreateUser`
-- `AuthenticationServiceDeleteUser`
+- `ExternalServices:AuthenticationServiceCreateUser`
+- `ExternalServices:AuthenticationServiceDeleteUser`
 
-### Create user
+Create identity la call required:
 
-SocialGraph POST payload:
+```http
+POST /internal/users
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
+```
 
 ```json
 {
@@ -167,27 +191,11 @@ SocialGraph POST payload:
 }
 ```
 
-Auth nen:
+Auth luu credential bang canonical `userId`, hash password, enforce email unique va tra 2xx khi thanh cong. Neu Auth fail/non-2xx, SocialGraph rollback object user local va khong goi Search/Recommendation.
 
-- Luu user credential voi `userId` canonical.
-- Hash password.
-- Email unique.
-- Require `X-Gateway-Secret`.
-- Tra 2xx neu ok.
+Sau khi Auth thanh cong, Search va Recommendation duoc provision dong thoi, idempotent va best-effort.
 
-SocialGraph rollback object user local neu Auth fail. Search/Recommendation sau Auth la best-effort.
-
-### Delete user
-
-Payload:
-
-```json
-{
-  "userId": 123
-}
-```
-
-Nen disable/xoa credential.
+Auth delete hien van la legacy configured POST payload `{ "userId": 123 }` va duoc goi best-effort.
 
 ## 6. Endpoints ma Messenger service can co
 
@@ -195,8 +203,8 @@ Messenger create/delete user dang tam disable trong SocialGraph, nhung contract 
 
 Config:
 
-- `MessengerServiceCreateUser`
-- `MessengerServiceDeleteUser`
+- `ExternalServices:MessengerServiceCreateUser`
+- `ExternalServices:MessengerServiceDeleteUser`
 
 Create payload:
 
@@ -216,89 +224,73 @@ Delete payload:
 
 Messenger nen dung chung canonical user id.
 
-## 7. Endpoints ma Search service can co
+## 7. Contract voi Search service
 
-Config:
+Config base URL:
 
-- `SearchServiceCreateIndex`
-- `SearchServiceUpdateIndex`
-- `SearchServiceDeleteIndex`
+- `InternalServices:Search:BaseUrl`
 
-### Create/update index
+Create va update cung dung idempotent upsert:
 
-Payload:
+```http
+PUT /internal/search/indexes/{objectId}
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
+```
 
 ```json
 {
-  "objectId": 123,
   "objectType": "post",
   "text": "noi dung index"
 }
 ```
 
-`objectType` co the la:
+`objectType` hop le: `user`, `group`, `post`, `reel`. `objectId` nam tren path va la positive signed 64-bit Snowflake ID.
 
-- `user`
-- `group`
-- `post`
+Delete:
 
-Search nen upsert theo `(objectType, objectId)`.
-
-### Delete index
-
-Payload:
-
-```json
-{
-  "objectId": 123
-}
+```http
+DELETE /internal/search/indexes/{objectId}
 ```
 
-Neu Search can objectType de xoa chinh xac, service Search nen chap nhan thieu objectType hoac SocialGraph can duoc update sau.
+Upsert va delete deu phai idempotent. Delete tra `204` ke ca khi index khong ton tai.
 
-## 8. Endpoints ma Recommendation service can co
+## 8. Contract voi Recommendation service
 
-Config SocialGraph goi:
+Config base URL:
 
-- `RecommendServiceCreateUserEmbedding`
-- `RecommendServiceDeleteUserEmbedding`
-- `RecommendServiceCreatePostEmbedding`
-- `RecommendServiceDeletePostEmbedding`
+- `InternalServices:Recommendation:BaseUrl`
 
-### Create user embedding
+User embedding:
 
-Payload:
-
-```json
-{
-  "userId": 123
-}
+```http
+PUT /internal/recommendation/users/{userId}/embedding
+DELETE /internal/recommendation/users/{userId}/embedding
 ```
 
-### Delete user embedding
+`PUT` khong co body, chi tao vector neu user chua co. `DELETE` idempotent va tra `204`.
 
-```json
-{
-  "userId": 123
-}
+Post embedding:
+
+```http
+PUT /internal/recommendation/posts/{postId}/embedding
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
+Content-Type: application/json
 ```
 
-### Create post embedding
-
 ```json
 {
-  "postId": 456,
   "content": "post content",
   "mediaUrls": ["https://media.local/a.jpg"]
 }
 ```
 
-### Delete post embedding
+Delete post embedding:
 
-```json
-{
-  "postId": 456
-}
+```http
+DELETE /internal/recommendation/posts/{postId}/embedding
 ```
 
 Recommendation service nen lay candidates tu SocialGraph:
@@ -306,6 +298,8 @@ Recommendation service nen lay candidates tu SocialGraph:
 ```http
 GET /internal/recommendation/post-candidates?userId=123&limit=200
 GET /internal/recommendation/reel-candidates?userId=123&limit=200
+X-Gateway-Secret: <shared secret>
+X-Correlation-ID: <trace id>
 ```
 
 Response:
@@ -332,7 +326,7 @@ Recommendation nen:
 
 Config:
 
-- `NotificationServiceCreateNotification`
+- `ExternalServices:NotificationServiceCreateNotification`
 
 SocialGraph POST payload:
 
@@ -390,11 +384,13 @@ Post/story/reel flow:
 
 1. Client upload file sang media storage/service ben ngoai.
 2. Gateway goi `createFeedPost`/`createGroupPost` voi list `MediaInput { type, url }`. Caller khong truyen media id.
-3. Gateway goi `createStory`/`createReel` voi toi da mot `MediaInput { type, url }`.
+3. Gateway goi `createNormalStory`/`createReel` voi toi da mot `MediaInput { type, url }`; story share dung `createShareStory` va khong tao media rieng.
 4. SocialGraph tao media object type `7` cho tung URL.
 5. SocialGraph tao association:
    - `authorId --owned(22)--> mediaId`
    - `contentId --contained(20)--> mediaId`
+
+Ngoai le Story: media tao rieng cho normal story chi co `storyId --contained(20)--> mediaId` va duoc coi la temporary; khong tao `owned(22)`. Khi story bi xoa/cleanup, media temporary cung bi xoa, nhung media owned hoac dang duoc content khac reference se duoc giu lai.
 
 Avatar flow:
 
@@ -412,19 +408,22 @@ Background flow:
 
 ## 12. Important caveats cho agent khac
 
-- External calls tu SocialGraph la best-effort, nen service khac nen idempotent.
-- Neu Search/Recommend fail, SocialGraph van co the da tao post/user.
+- External projection calls tu SocialGraph la best-effort, nen service khac phai idempotent.
+- User Search/Recommendation projection chi bat dau sau khi Auth create thanh cong. Neu projection fail, Auth va SocialGraph user van da duoc tao.
+- Search va Recommendation user provisioning duoc start dong thoi va dung cung canonical user ID/correlation ID.
 - Service khac nen co endpoint repair/reindex neu can sync lai.
 - Friend request pending hien nam o Notification domain, khong co table pending trong SocialGraph.
 - Candidate endpoint la candidate pool, khong phai final feed.
 - Verify/tich xanh chi duoc cap nhat qua REST internal cua SocialGraph; service khac khong doc hay ghi truc tiep DB SocialGraph.
+- Story reads side-effect free; operational cleanup phai dung background worker hoac authenticated maintenance endpoint.
+- Khi compose Story vao Gateway, khong public legacy `createStory`; uu tien `createNormalStory`, `createShareStory`, `deleteStory`, `homeStories`, `myStories` va forward trusted identity headers.
 
 ## 13. Checklist khi code service khac
 
 - Dung `long userId/objectId` tu SocialGraph.
-- Implement endpoint dung payload SocialGraph dang POST/GET.
+- Implement dung HTTP method, path va body canonical trong file nay.
 - Endpoint nen idempotent.
 - Tra 2xx neu request duplicate nhung state da dung.
-- Log ro request den tu SocialGraph.
+- Validate `X-Gateway-Secret` va propagate/log `X-Correlation-ID`.
 - Khong doc truc tiep DB SocialGraph.
 - Neu can them contract, cap nhat file nay va appsettings cua SocialGraph.
