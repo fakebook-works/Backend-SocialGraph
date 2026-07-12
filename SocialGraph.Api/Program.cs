@@ -1,5 +1,6 @@
 using StackExchange.Redis;
 
+using HotChocolate.AspNetCore;
 using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
@@ -38,6 +39,7 @@ builder.Services.AddScoped<IUserGraphService, UserGraphService>();
 builder.Services.AddScoped<IGroupGraphService, GroupGraphService>();
 builder.Services.AddScoped<IContentGraphService, ContentGraphService>();
 builder.Services.AddScoped<ICandidateService, CandidateService>();
+builder.Services.AddDataLoader<HomePostByIdDataLoader>();
 builder.Services.AddHostedService<StoryCleanupBackgroundService>();
 
 // 3. Đăng ký bộ điều phối GraphQL Subgraph
@@ -45,6 +47,8 @@ builder.Services
     .AddGraphQLServer()
     .AddQueryType<Query>()
     .AddMutationType<Mutation>()
+    .AddType<RecommendationItemResult>()
+    .AddTypeExtension<RecommendationItemResolvers>()
     .AddType<FeedPostDetailResult>()
     .AddType<GroupPostDetailResult>()
     .AddType<NormalStoryResult>()
@@ -57,6 +61,10 @@ builder.Services
 var app = builder.Build();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<InternalApiAuthenticationMiddleware>();
-app.MapGraphQL("/graphql"); // Mở cửa duy nhất
+app.MapGraphQL("/graphql").WithOptions(options =>
+{
+    options.Batching = AllowedBatching.All;
+    options.MaxBatchSize = ContentGraphService.MaxPostDetailIds;
+});
 app.MapControllers();
 app.RunWithGraphQLCommands(args);

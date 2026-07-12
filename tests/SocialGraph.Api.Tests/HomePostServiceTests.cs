@@ -1,0 +1,172 @@
+namespace SocialGraph.Api.Tests;
+
+using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
+using Moq;
+using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Database;
+using SocialGraph.Api.Service;
+
+public sealed class HomePostServiceTests
+{
+    private const long ViewerId = 100;
+    private const long FeedAuthorId = 200;
+    private const long GroupAuthorId = 201;
+    private const long GroupId = 300;
+
+    [Fact]
+    public async Task PostDetails_PreservesRankedOrder_Deduplicates_AndDistinguishesGroupPosts()
+    {
+        await using var context = CreateContext();
+        const long feedPostId = 1_000;
+        const long groupPostId = 1_001;
+        const long mediaId = 1_100;
+        context.ObjectsTb.AddRange(
+            User(FeedAuthorId, "Feed Author"),
+            User(GroupAuthorId, "Group Author"),
+            Group(GroupId, "Dotnet Vietnam", privacy: 1),
+            Post(feedPostId, GraphObjectType.FeedPost, "public feed", privacy: 0),
+            Post(groupPostId, GraphObjectType.GroupPost, "member post", privacy: 0),
+            Media(mediaId, "https://cdn.example/post.jpg"));
+        context.AssociationsTb.AddRange(
+            Edge(feedPostId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(groupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(groupPostId, GraphAssociationType.PublishedIn, GroupId),
+            Edge(groupPostId, GraphAssociationType.Contained, mediaId),
+            Edge(ViewerId, GraphAssociationType.Member, GroupId));
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var results = await service.GetPostDetailsAsync(
+            ViewerId,
+            new[] { groupPostId, feedPostId, groupPostId, -1L });
+
+        Assert.Equal(2, results.Count);
+        var groupPost = Assert.IsType<GroupPostDetailResult>(results[0]);
+        Assert.Equal(groupPostId, groupPost.Id);
+        Assert.Equal(GroupId, groupPost.Group.Id);
+        Assert.Equal("Dotnet Vietnam", groupPost.Group.Name);
+        Assert.False(groupPost.Group.CanJoin);
+        Assert.Equal("Group Author", groupPost.Author.Name);
+        Assert.Equal("https://cdn.example/post.jpg", Assert.Single(groupPost.Media).Url);
+
+        var feedPost = Assert.IsType<FeedPostDetailResult>(results[1]);
+        Assert.Equal(feedPostId, feedPost.Id);
+        Assert.Equal("Feed Author", feedPost.Author.Name);
+    }
+
+    [Fact]
+    public async Task PostDetails_FiltersBlockedAuthorsAndInaccessiblePrivatePosts()
+    {
+        await using var context = CreateContext();
+        const long blockedAuthorId = 210;
+        const long privateAuthorId = 211;
+        const long blockedPostId = 1_010;
+        const long privatePostId = 1_011;
+        context.ObjectsTb.AddRange(
+            User(blockedAuthorId, "Blocked Author"),
+            User(privateAuthorId, "Private Author"),
+            Post(blockedPostId, GraphObjectType.FeedPost, "blocked public", privacy: 0),
+            Post(privatePostId, GraphObjectType.FeedPost, "private", privacy: 1));
+        context.AssociationsTb.AddRange(
+            Edge(blockedPostId, GraphAssociationType.AuthoredBy, blockedAuthorId),
+            Edge(privatePostId, GraphAssociationType.AuthoredBy, privateAuthorId),
+            Edge(ViewerId, GraphAssociationType.Blocked, blockedAuthorId));
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var results = await service.GetPostDetailsAsync(ViewerId, new[] { blockedPostId, privatePostId });
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task PostDetails_AllowsPrivateFriendPost_AndRejectsOversizedBatch()
+    {
+        await using var context = CreateContext();
+        const long privatePostId = 1_020;
+        context.ObjectsTb.AddRange(
+            User(FeedAuthorId, "Friend"),
+            Post(privatePostId, GraphObjectType.FeedPost, "friends only", privacy: 1));
+        context.AssociationsTb.AddRange(
+            Edge(privatePostId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(ViewerId, GraphAssociationType.Friend, FeedAuthorId));
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var visible = await service.GetPostDetailAsync(ViewerId, privatePostId);
+
+        Assert.IsType<FeedPostDetailResult>(visible);
+        var oversized = Enumerable.Range(1, ContentGraphService.MaxPostDetailIds + 1)
+            .Select(id => (long)id)
+            .ToArray();
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => service.GetPostDetailsAsync(ViewerId, oversized));
+    }
+
+    private static ContentGraphService CreateContentService(MyDbContext context) => new(
+        context,
+        Mock.Of<IObjectService>(),
+        Mock.Of<IAssociationService>(),
+        Mock.Of<IExternalServiceClient>());
+
+    private static MyDbContext CreateContext()
+    {
+        var options = new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options;
+        return new MyDbContext(options);
+    }
+
+    private static Objects User(long id, string name) => new()
+    {
+        id = id,
+        otype = GraphObjectType.User,
+        data = new JsonObject
+        {
+            ["name"] = name,
+            ["avatar"] = $"https://cdn.example/{id}.jpg",
+            ["privacy"] = 1,
+            ["verify"] = ""
+        }.ToJsonString()
+    };
+
+    private static Objects Group(long id, string name, int privacy) => new()
+    {
+        id = id,
+        otype = GraphObjectType.Group,
+        data = new JsonObject
+        {
+            ["name"] = name,
+            ["avatar"] = "https://cdn.example/group.jpg",
+            ["privacy"] = privacy
+        }.ToJsonString()
+    };
+
+    private static Objects Post(long id, short type, string content, int privacy) => new()
+    {
+        id = id,
+        otype = type,
+        data = new JsonObject
+        {
+            ["content"] = content,
+            ["privacy"] = privacy,
+            ["create"] = DateTimeOffset.UtcNow.ToString("O")
+        }.ToJsonString()
+    };
+
+    private static Objects Media(long id, string url) => new()
+    {
+        id = id,
+        otype = GraphObjectType.Media,
+        data = new JsonObject { ["type"] = GraphMediaType.Photo, ["url"] = url }.ToJsonString()
+    };
+
+    private static Associations Edge(long id1, short type, long id2, long time = 1) => new()
+    {
+        id1 = id1,
+        atype = type,
+        id2 = id2,
+        time = time
+    };
+}

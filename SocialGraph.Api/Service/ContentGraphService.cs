@@ -10,6 +10,8 @@ using SocialGraph.Api.Database;
 
 public sealed class ContentGraphService : IContentGraphService
 {
+    public const int MaxPostDetailIds = 100;
+
     private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
@@ -96,72 +98,7 @@ public sealed class ContentGraphService : IContentGraphService
         long postId,
         CancellationToken cancellationToken = default)
     {
-        var item = await _objectService.RetrieveObjectAsync(postId, cancellationToken);
-        if (item is null || item.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost))
-        {
-            return null;
-        }
-
-        var data = GraphJson.ParseObject(item.data);
-        var authorId = await GetAuthorIdAsync(postId, cancellationToken);
-        var authorObject = await _dbContext.ObjectsTb
-            .AsNoTracking()
-            .FirstOrDefaultAsync(obj => obj.id == authorId && obj.otype == GraphObjectType.User, cancellationToken);
-        if (authorObject is null)
-        {
-            return null;
-        }
-
-        Objects? groupObject = null;
-        long groupId = 0;
-        int privacy;
-        if (item.otype == GraphObjectType.GroupPost)
-        {
-            groupObject = await GetPublishedGroupObjectAsync(postId, cancellationToken);
-            if (groupObject is null)
-            {
-                return null;
-            }
-
-            groupId = groupObject.id;
-            privacy = GraphJson.Int(GraphJson.ParseObject(groupObject.data), "privacy");
-        }
-        else
-        {
-            privacy = GraphJson.Int(data, "privacy");
-        }
-
-        if (!await CanViewPostAsync(viewerId, authorId, item.otype, privacy, groupId, cancellationToken))
-        {
-            return null;
-        }
-
-        var content = GraphJson.String(data, "content");
-        var create = GraphJson.String(data, "create");
-        var author = await BuildPostAuthorAsync(viewerId, authorObject, cancellationToken);
-        var media = await GetMediaAsync(postId, cancellationToken);
-
-        if (item.otype == GraphObjectType.GroupPost && groupObject is not null)
-        {
-            return new GroupPostDetailResult(
-                item.id,
-                item.otype,
-                content,
-                privacy,
-                create,
-                author,
-                await BuildPostGroupAsync(viewerId, groupObject, cancellationToken),
-                media);
-        }
-
-        return new FeedPostDetailResult(
-            item.id,
-            item.otype,
-            content,
-            privacy,
-            create,
-            author,
-            media);
+        return (await GetPostDetailsAsync(viewerId, new[] { postId }, cancellationToken)).FirstOrDefault();
     }
 
     public async Task<IReadOnlyList<IHomePostResult>> GetPostDetailsAsync(
@@ -169,20 +106,169 @@ public sealed class ContentGraphService : IContentGraphService
         IReadOnlyList<long> postIds,
         CancellationToken cancellationToken = default)
     {
-        var results = new List<IHomePostResult>(postIds.Count);
-        var seen = new HashSet<long>();
-        foreach (var postId in postIds)
+        if (postIds.Count > MaxPostDetailIds)
         {
-            if (!seen.Add(postId))
+            throw new ArgumentOutOfRangeException(
+                nameof(postIds),
+                $"At most {MaxPostDetailIds} post IDs can be requested.");
+        }
+
+        var orderedPostIds = postIds
+            .Where(id => id > 0)
+            .Distinct()
+            .ToArray();
+        if (orderedPostIds.Length == 0)
+        {
+            return Array.Empty<IHomePostResult>();
+        }
+
+        var posts = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => orderedPostIds.Contains(item.id) &&
+                (item.otype == GraphObjectType.FeedPost || item.otype == GraphObjectType.GroupPost))
+            .ToDictionaryAsync(item => item.id, cancellationToken);
+        if (posts.Count == 0)
+        {
+            return Array.Empty<IHomePostResult>();
+        }
+
+        var loadedPostIds = posts.Keys.ToArray();
+        var postLinks = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => loadedPostIds.Contains(item.id1) &&
+                (item.atype == GraphAssociationType.AuthoredBy ||
+                 item.atype == GraphAssociationType.Contained ||
+                 item.atype == GraphAssociationType.PublishedIn))
+            .ToListAsync(cancellationToken);
+        var authorByPost = postLinks
+            .Where(item => item.atype == GraphAssociationType.AuthoredBy)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var groupByPost = postLinks
+            .Where(item => item.atype == GraphAssociationType.PublishedIn)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var relatedIds = authorByPost.Values
+            .Concat(groupByPost.Values)
+            .Concat(postLinks
+                .Where(item => item.atype == GraphAssociationType.Contained)
+                .Select(item => item.id2))
+            .Distinct()
+            .ToArray();
+        var relatedObjects = relatedIds.Length == 0
+            ? new Dictionary<long, Objects>()
+            : await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .Where(item => relatedIds.Contains(item.id))
+                .ToDictionaryAsync(item => item.id, cancellationToken);
+
+        var relationTargetIds = authorByPost.Values
+            .Concat(groupByPost.Values)
+            .Distinct()
+            .ToArray();
+        var viewerLinks = relationTargetIds.Length == 0
+            ? new List<Associations>()
+            : await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == viewerId &&
+                    relationTargetIds.Contains(item.id2) &&
+                    (item.atype == GraphAssociationType.Friend ||
+                     item.atype == GraphAssociationType.Followed ||
+                     item.atype == GraphAssociationType.Blocked ||
+                     item.atype == GraphAssociationType.BlockedBy ||
+                     item.atype == GraphAssociationType.Member ||
+                     item.atype == GraphAssociationType.Admin))
+                .ToListAsync(cancellationToken);
+        var friends = RelationTargets(viewerLinks, GraphAssociationType.Friend);
+        var followed = RelationTargets(viewerLinks, GraphAssociationType.Followed);
+        var blocked = RelationTargets(viewerLinks, GraphAssociationType.Blocked, GraphAssociationType.BlockedBy);
+        var participatingGroups = RelationTargets(viewerLinks, GraphAssociationType.Member, GraphAssociationType.Admin);
+        var results = new List<IHomePostResult>(orderedPostIds.Length);
+
+        foreach (var postId in orderedPostIds)
+        {
+            if (!posts.TryGetValue(postId, out var post) ||
+                !authorByPost.TryGetValue(postId, out var authorId) ||
+                !relatedObjects.TryGetValue(authorId, out var author) ||
+                author.otype != GraphObjectType.User ||
+                viewerId != authorId && blocked.Contains(authorId))
             {
                 continue;
             }
 
-            var detail = await GetPostDetailAsync(viewerId, postId, cancellationToken);
-            if (detail is not null)
+            Objects? group = null;
+            var groupId = 0L;
+            var postData = GraphJson.ParseObject(post.data);
+            var privacy = GraphJson.Int(postData, "privacy");
+            if (post.otype == GraphObjectType.GroupPost)
             {
-                results.Add(detail);
+                if (!groupByPost.TryGetValue(postId, out groupId) ||
+                    !relatedObjects.TryGetValue(groupId, out group) ||
+                    group.otype != GraphObjectType.Group)
+                {
+                    continue;
+                }
+
+                privacy = GraphJson.Int(GraphJson.ParseObject(group.data), "privacy");
             }
+
+            var canView = viewerId == authorId ||
+                privacy == 0 ||
+                post.otype == GraphObjectType.FeedPost && friends.Contains(authorId) ||
+                post.otype == GraphObjectType.GroupPost && participatingGroups.Contains(groupId);
+            if (!canView)
+            {
+                continue;
+            }
+
+            var authorData = GraphJson.ParseObject(author.data);
+            var postAuthor = new PostAuthorResult(
+                author.id,
+                GraphJson.String(authorData, "name"),
+                GraphJson.String(authorData, "avatar"),
+                IsVerifyActive(authorData),
+                viewerId != authorId &&
+                GraphJson.Int(authorData, "privacy") == 1 &&
+                !friends.Contains(authorId) &&
+                !followed.Contains(authorId));
+            var media = postLinks
+                .Where(item => item.id1 == postId && item.atype == GraphAssociationType.Contained)
+                .OrderByDescending(item => item.time)
+                .Select(item => relatedObjects.TryGetValue(item.id2, out var mediaObject)
+                    ? BuildMediaResult(mediaObject)
+                    : null)
+                .OfType<MediaResult>()
+                .ToArray();
+            var content = GraphJson.String(postData, "content");
+            var create = GraphJson.String(postData, "create");
+
+            if (post.otype == GraphObjectType.GroupPost && group is not null)
+            {
+                var groupData = GraphJson.ParseObject(group.data);
+                results.Add(new GroupPostDetailResult(
+                    post.id,
+                    post.otype,
+                    content,
+                    privacy,
+                    create,
+                    postAuthor,
+                    new PostGroupResult(
+                        group.id,
+                        GraphJson.String(groupData, "name"),
+                        GraphJson.String(groupData, "avatar"),
+                        !participatingGroups.Contains(group.id)),
+                    media));
+                continue;
+            }
+
+            results.Add(new FeedPostDetailResult(
+                post.id,
+                post.otype,
+                content,
+                privacy,
+                create,
+                postAuthor,
+                media));
         }
 
         return results;
@@ -573,101 +659,14 @@ public sealed class ContentGraphService : IContentGraphService
         return group.items.FirstOrDefault()?.id2 ?? 0;
     }
 
-    private async Task<Objects?> GetPublishedGroupObjectAsync(long postId, CancellationToken cancellationToken)
+    private static HashSet<long> RelationTargets(
+        IReadOnlyList<Associations> associations,
+        params short[] associationTypes)
     {
-        var groupId = await GetPublishedGroupIdAsync(postId, cancellationToken);
-        if (groupId <= 0)
-        {
-            return null;
-        }
-
-        return await _dbContext.ObjectsTb
-            .AsNoTracking()
-            .FirstOrDefaultAsync(item => item.id == groupId && item.otype == GraphObjectType.Group, cancellationToken);
-    }
-
-    private async Task<bool> CanViewPostAsync(
-        long userId,
-        long authorId,
-        short postType,
-        int privacy,
-        long groupId,
-        CancellationToken cancellationToken)
-    {
-        if (userId == authorId || privacy == 0)
-        {
-            return true;
-        }
-
-        if (postType == GraphObjectType.FeedPost)
-        {
-            return await AssociationExistsAsync(userId, GraphAssociationType.Friend, authorId, cancellationToken);
-        }
-
-        return postType == GraphObjectType.GroupPost &&
-            groupId > 0 &&
-            await IsGroupParticipantAsync(userId, groupId, cancellationToken);
-    }
-
-    private async Task<PostAuthorResult> BuildPostAuthorAsync(
-        long viewerId,
-        Objects author,
-        CancellationToken cancellationToken)
-    {
-        var canFollow = false;
-        if (viewerId != author.id)
-        {
-            var authorData = GraphJson.ParseObject(author.data);
-            if (GraphJson.Int(authorData, "privacy") == 1)
-            {
-                var alreadyFriend = await AssociationExistsAsync(viewerId, GraphAssociationType.Friend, author.id, cancellationToken);
-                var alreadyFollowed = await AssociationExistsAsync(viewerId, GraphAssociationType.Followed, author.id, cancellationToken);
-                canFollow = !alreadyFriend && !alreadyFollowed;
-            }
-        }
-
-        var data = GraphJson.ParseObject(author.data);
-        return new PostAuthorResult(
-            author.id,
-            GraphJson.String(data, "name"),
-            GraphJson.String(data, "avatar"),
-            IsVerifyActive(data),
-            canFollow);
-    }
-
-    private async Task<PostGroupResult> BuildPostGroupAsync(
-        long viewerId,
-        Objects group,
-        CancellationToken cancellationToken)
-    {
-        var data = GraphJson.ParseObject(group.data);
-        return new PostGroupResult(
-            group.id,
-            GraphJson.String(data, "name"),
-            GraphJson.String(data, "avatar"),
-            !await IsGroupParticipantAsync(viewerId, group.id, cancellationToken));
-    }
-
-    private Task<bool> IsGroupParticipantAsync(long userId, long groupId, CancellationToken cancellationToken)
-    {
-        return _dbContext.AssociationsTb
-            .AsNoTracking()
-            .AnyAsync(
-                item => item.id1 == userId &&
-                    item.id2 == groupId &&
-                    (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin),
-                cancellationToken);
-    }
-
-    private Task<bool> AssociationExistsAsync(
-        long id1,
-        short atype,
-        long id2,
-        CancellationToken cancellationToken)
-    {
-        return _dbContext.AssociationsTb
-            .AsNoTracking()
-            .AnyAsync(item => item.id1 == id1 && item.atype == atype && item.id2 == id2, cancellationToken);
+        return associations
+            .Where(item => associationTypes.Contains(item.atype))
+            .Select(item => item.id2)
+            .ToHashSet();
     }
 
     private async Task<IReadOnlySet<long>> GetVisibleStoryAuthorIdsAsync(long userId, CancellationToken cancellationToken)

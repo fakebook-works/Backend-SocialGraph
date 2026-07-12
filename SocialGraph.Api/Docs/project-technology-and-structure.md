@@ -56,9 +56,9 @@ Bootstrap ung dung:
 - Cau hinh EF Core voi PostgreSQL.
 - Cau hinh Redis connection.
 - Dang ki service layer.
-- Dang ki GraphQL union/object types.
+- Dang ki GraphQL union/object types va `HomePostByIdDataLoader`.
 - Dang ki `StoryCleanupBackgroundService`.
-- Map `/graphql` va REST controllers.
+- Map `/graphql` voi request/variable batching toi da 100 entries va map REST controllers.
 
 ### Contracts/
 
@@ -124,8 +124,10 @@ Business logic va data access layer.
 
 GraphQL resolver layer.
 
-- `Query.cs`: resolver query nhu `profile`, `group`, `homeStories`, `myStories`, `visitedGroups`, `postDetails`, `postDetail`.
+- `Query.cs`: resolver query nhu `profile`, `group`, `homeStories`, `myStories`, `visitedGroups`, `postDetails`, `postDetail` va internal `recommendationItem` lookup.
 - `Mutation.cs`: resolver mutation nhu `createUser`, `createFeedPost`, `createNormalStory`, `deleteStory`, `recordGroupVisit`.
+- `RecommendationItemResolvers.cs`: them `RecommendationItem.post` cho Fusion entity hydration.
+- `HomePostByIdDataLoader.cs`: gom lookup IDs va goi batch post detail voi trusted viewer.
 
 ### Utils/
 
@@ -193,16 +195,17 @@ Object types:
 Association types quan trong:
 
 - `friend(0)`
-- `followed(1)` / `follower(2)`
+- `followed(1)` / `followed_by(2)`
 - `authored(5)` / `authored_by(6)`
 - `published(9)` / `published_in(10)`
-- `member(13)` / `member_of(14)`
-- `admin(15)` / `admin_of(16)`
-- `visited(19)`
+- `member(13)` / `have_member(14)`
+- `admin(15)` / `have_admin(16)`
+- `saved(19)`
 - `contained(20)`
 - `mentioned(21)`
 - `owned(22)`
 - `blocked(23)` / `blocked_by(24)`
+- `visited(25)`
 
 ## Luu Y Tich Hop
 

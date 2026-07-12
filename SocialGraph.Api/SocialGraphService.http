@@ -2,6 +2,9 @@
 @internalSecret = replace-with-at-least-32-bytes
 @userId = 9000000000000001
 @storyId = 9000000000000002
+@postId = 9000000000000003
+@groupPostId = 9000000000000004
+@groupId = 9000000000000005
 
 POST {{host}}/graphql
 Content-Type: application/json
@@ -73,6 +76,74 @@ X-Correlation-ID: manual-delete-story-test
       "authorId": {{userId}},
       "storyId": {{storyId}}
     }
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-create-feed-post-test
+
+{
+  "query": "mutation CreateFeedPost($input: CreateFeedPostInput!) { createFeedPost(input: $input) { id type content privacy create authorId media { id type url } } }",
+  "variables": {
+    "input": {
+      "authorId": {{userId}},
+      "content": "Hello feed",
+      "privacy": 0,
+      "media": []
+    }
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-post-details-test
+
+{
+  "query": "query PostDetails($postIds: [Long!]!) { postDetails(postIds: $postIds) { __typename ... on FeedPostDetail { id content author { id name avatar isVerified canFollow } media { id type url } } ... on GroupPostDetail { id content author { id name avatar isVerified canFollow } group { id name avatar canJoin } media { id type url } } } }",
+  "variables": {
+    "postIds": [{{postId}}, {{groupPostId}}]
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-record-group-visit-test
+
+{
+  "query": "mutation RecordGroupVisit($userId: Long!, $groupId: Long!) { recordGroupVisit(userId: $userId, groupId: $groupId) }",
+  "variables": {
+    "userId": {{userId}},
+    "groupId": {{groupId}}
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-visited-groups-test
+
+{
+  "query": "query VisitedGroups($userId: Long!, $limit: Int!, $cursor: String) { visitedGroups(userId: $userId, limit: $limit, cursor: $cursor) { items { id name avatar } endCursor hasNextPage } }",
+  "variables": {
+    "userId": {{userId}},
+    "limit": 20,
+    "cursor": null
   }
 }
 

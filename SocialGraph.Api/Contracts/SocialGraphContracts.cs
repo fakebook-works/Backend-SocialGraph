@@ -129,6 +129,10 @@ public sealed record GroupPostDetailResult(
     PostGroupResult Group,
     IReadOnlyList<MediaResult> Media) : IHomePostResult;
 
+[GraphQLName("RecommendationItem")]
+public sealed record RecommendationItemResult(
+    [property: GraphQLType(typeof(NonNullType<IdType>))] long PostId);
+
 [GraphQLName("PostAuthor")]
 public sealed record PostAuthorResult(
     long Id,

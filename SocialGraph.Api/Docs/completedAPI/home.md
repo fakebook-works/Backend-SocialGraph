@@ -12,7 +12,8 @@ Home hien chia thanh cac phan:
 4. Feed post:
    - Recommendation service goi REST `post-candidate-ids`.
    - Recommendation rank list id.
-   - Gateway/frontend goi GraphQL resolver `postDetails(postIds)` de dap data hien thi.
+   - Fusion dung internal lookup SocialGraph de batch-hydrate `RecommendationItem.post`.
+   - Frontend nhan ranked ID va post detail trong cung `recommendFeed` response.
 
 ## Trusted Viewer
 
@@ -251,10 +252,11 @@ Input:
 Logic:
 
 1. Validate trusted header va check `userId` khop `X-User-Id`.
-2. Lay association mot chieu `user --visited(19)--> group`.
-3. Sort theo association time moi nhat.
-4. Paging bang cursor.
-5. Tra id/avatar/name cua group.
+2. Lay association mot chieu `user --visited(25)--> group`.
+3. Sort `time DESC, groupId DESC` de tie-break on dinh.
+4. Paging keyset bang opaque Base64 cursor; frontend truyen lai `endCursor` nguyen ven.
+5. An private group neu viewer khong con la member/admin.
+6. Tra id/avatar/name cua group.
 
 Output:
 
@@ -297,7 +299,7 @@ Logic:
 
 1. Validate trusted header va check `userId` khop `X-User-Id`.
 2. Check group ton tai.
-3. Upsert association `visited(19)`.
+3. Upsert association `visited(25)`.
 4. Neu da visited truoc do thi update `time`.
 
 Output:
@@ -410,16 +412,14 @@ Input:
 Logic:
 
 1. Validate trusted Gateway secret va lay viewer id.
-2. Duyet theo thu tu input, bo id trung.
-3. Retrieve object post.
-4. Chi chap nhan feed post type `2` hoac group post type `3`.
-5. Lay author qua `authored_by(6)`.
-6. Lay media qua `contained(20)`.
-7. Neu group post, lay group qua `published_in(10)`.
-8. Check quyen xem.
-9. Omit post invalid/khong co quyen xem.
-10. Feed post tra `FeedPostDetail`.
-11. Group post tra `GroupPostDetail`.
+2. Reject hon 100 IDs voi GraphQL code `BAD_USER_INPUT`.
+3. Giu thu tu ranked input va bo ID trung/khong hop le.
+4. Batch-load post, association, author, media, group va viewer relations.
+5. Chi chap nhan feed post type `2` hoac group post type `3`.
+6. Feed post check privacy cua post; group post check privacy cua group.
+7. Loai author bi viewer block hoac da block viewer.
+8. Omit post invalid, deleted, thieu author/group, hoac khong co quyen xem.
+9. Feed post tra `FeedPostDetail`; group post tra `GroupPostDetail` kem group.
 
 Output type:
 
@@ -536,15 +536,57 @@ Return: `HomePost` hoac `null`.
     "responseToGateway": [789, 790, 777]
   },
   "detailStep": {
-    "caller": "Gateway",
+    "caller": "Fusion Gateway",
     "headers": {
       "X-Gateway-Secret": "<shared secret>",
       "X-User-Id": "123"
     },
-    "operationName": "PostDetails",
-    "variables": {
-      "postIds": [789, 790, 777]
+    "internalLookup": "recommendationItem(postId)",
+    "socialGraphBatch": "postDetails([789, 790, 777])"
+  }
+}
+```
+
+## API Gateway: recommendFeed Hydrated
+
+Frontend nen dung operation nay de Recommendation rank va SocialGraph hydrate trong mot Gateway request:
+
+```graphql
+query RecommendedFeed($userId: ID!, $skip: Int! = 0, $take: Int! = 20) {
+  recommendFeed(userId: $userId, skip: $skip, take: $take) {
+    postId
+    post {
+      __typename
+      ... on FeedPostDetail {
+        id type content privacy create
+        author { id name avatar isVerified canFollow }
+        media { id type url }
+      }
+      ... on GroupPostDetail {
+        id type content privacy create
+        author { id name avatar isVerified canFollow }
+        group { id name avatar canJoin }
+        media { id type url }
+      }
     }
   }
 }
 ```
+
+Variables:
+
+```json
+{
+  "userId": "123",
+  "skip": 0,
+  "take": 20
+}
+```
+
+Flow Fusion:
+
+1. Gateway goi Recommendation `recommendFeed`, nhan `RecommendationItem.postId` theo thu tu rank.
+2. Gateway dung internal lookup `recommendationItem(postId)` cua SocialGraph.
+3. Fusion gui variable-batched lookup; SocialGraph endpoint cho phep toi da 100 batch entries va DataLoader gom database reads qua `postDetails`.
+4. Gateway merge `post` vao tung item va giu thu tu Recommendation.
+5. `post = null` la hop le neu post vua bi xoa, bi block, hoac privacy vua thay doi; frontend bo item do.

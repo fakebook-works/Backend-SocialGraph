@@ -173,9 +173,9 @@ Logic:
 4. Neu source la reel thi chap nhan.
 5. Source type khac bi reject.
 6. Tao story object type `5`, expire = create + 1 day.
-7. Luu shared source id trong data story.
+7. Data story chi luu `content`, `create`, `expire`; khong duplicate source ID.
 8. Tao association `author --authored(5)--> story`.
-9. Tao association den shared source.
+9. Tao association `story --share(8)--> sharedSource`.
 10. Tra union `HomeStory` dung type source.
 
 Output feed post share:
@@ -264,7 +264,7 @@ Output thanh cong:
 ```json
 {
   "success": true,
-  "message": null
+  "message": "Story deleted."
 }
 ```
 
@@ -273,9 +273,11 @@ Output khi khong co quyen hoac story khong hop le:
 ```json
 {
   "success": false,
-  "message": "Story not found or not owned by user."
+  "message": "Story not found."
 }
 ```
+
+Thong bao failure co the la `Story not found.`, `Object is not a story.`, `Only the story author can delete this story.`, hoac `Story delete failed.`.
 
 Goi tin frontend/gateway:
 

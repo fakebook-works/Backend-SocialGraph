@@ -1,5 +1,7 @@
 namespace SocialGraph.Api.Service;
 
+using System.Text;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
@@ -127,35 +129,67 @@ public sealed class GroupGraphService : IGroupGraphService
         string? cursor,
         CancellationToken cancellationToken = default)
     {
-        var page = await _associationService.RetrieveAssociationAsync(
-            userId,
-            GraphAssociationType.Visited,
-            cursor,
-            limit,
-            cancellationToken);
-
-        var items = new List<VisitedGroupResult>(page.items.Count);
-        foreach (var edge in page.items)
+        var take = Math.Clamp(limit, 1, 100);
+        var query = _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == userId && item.atype == GraphAssociationType.Visited);
+        if (TryDecodeVisitedGroupCursor(cursor, out var decodedCursor))
         {
-            var group = await _objectService.RetrieveObjectAsync(edge.id2, cancellationToken);
-            if (group is null || group.otype != GraphObjectType.Group)
-            {
-                continue;
-            }
+            query = query.Where(item => item.time < decodedCursor.VisitTime ||
+                item.time == decodedCursor.VisitTime && item.id2 < decodedCursor.GroupId);
+        }
 
-            if (!await CanViewGroupAsync(userId, group, cancellationToken))
+        var pageEdges = await query
+            .OrderByDescending(item => item.time)
+            .ThenByDescending(item => item.id2)
+            .Take(take + 1)
+            .ToListAsync(cancellationToken);
+        var selectedEdges = pageEdges.Take(take).ToArray();
+        if (selectedEdges.Length == 0)
+        {
+            return new VisitedGroupPageResult(Array.Empty<VisitedGroupResult>(), null, false);
+        }
+
+        var groupIds = selectedEdges.Select(item => item.id2).Distinct().ToArray();
+        var groups = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => groupIds.Contains(item.id) && item.otype == GraphObjectType.Group)
+            .ToDictionaryAsync(item => item.id, cancellationToken);
+        var participatingGroupIds = (await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == userId &&
+                groupIds.Contains(item.id2) &&
+                (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin))
+            .Select(item => item.id2)
+            .Distinct()
+            .ToListAsync(cancellationToken))
+            .ToHashSet();
+        var items = new List<VisitedGroupResult>(selectedEdges.Length);
+
+        foreach (var edge in selectedEdges)
+        {
+            if (!groups.TryGetValue(edge.id2, out var group))
             {
                 continue;
             }
 
             var data = GraphJson.ParseObject(group.data);
+            if (GraphJson.Int(data, "privacy") != 0 && !participatingGroupIds.Contains(group.id))
+            {
+                continue;
+            }
+
             items.Add(new VisitedGroupResult(
                 group.id,
                 GraphJson.String(data, "avatar"),
                 GraphJson.String(data, "name")));
         }
 
-        return new VisitedGroupPageResult(items, page.nextCursor, page.nextCursor is not null);
+        var lastScannedEdge = selectedEdges[^1];
+        return new VisitedGroupPageResult(
+            items,
+            EncodeVisitedGroupCursor(lastScannedEdge.time, lastScannedEdge.id2),
+            pageEdges.Count > take);
     }
 
     public async Task<bool> RecordGroupVisitAsync(
@@ -231,4 +265,42 @@ public sealed class GroupGraphService : IGroupGraphService
                     (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin),
                 cancellationToken);
     }
+
+    private static string EncodeVisitedGroupCursor(long visitTime, long groupId)
+    {
+        var payload = JsonSerializer.Serialize(new VisitedGroupCursor(visitTime, groupId));
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(payload));
+    }
+
+    private static bool TryDecodeVisitedGroupCursor(string? cursor, out VisitedGroupCursor decodedCursor)
+    {
+        decodedCursor = default;
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return false;
+        }
+
+        try
+        {
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+            var parsed = JsonSerializer.Deserialize<VisitedGroupCursor>(json);
+            if (parsed.VisitTime <= 0 || parsed.GroupId <= 0)
+            {
+                return false;
+            }
+
+            decodedCursor = parsed;
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private readonly record struct VisitedGroupCursor(long VisitTime, long GroupId);
 }

@@ -176,10 +176,11 @@ Input:
 Logic:
 
 1. Gateway gan trusted headers va SocialGraph check `userId` khop `X-User-Id`.
-2. Lay association `user --visited(19)--> group`.
-3. Sort theo association time moi nhat truoc.
-4. Paging bang cursor.
-5. Tra id/avatar/name cua group.
+2. Lay association mot chieu `user --visited(25)--> group`.
+3. Sort `time DESC, groupId DESC`.
+4. Paging keyset bang opaque Base64 cursor; frontend chi truyen lai `endCursor`, khong parse.
+5. An private group neu viewer khong con la member/admin.
+6. Tra id/avatar/name cua group.
 
 Output:
 
@@ -296,15 +297,15 @@ query PostDetails($postIds: [Long!]!) {
 Logic:
 
 1. Resolver validate trusted Gateway secret va doc viewer id tu `X-User-Id`.
-2. Duyet `postIds` theo thu tu input, bo id trung.
-3. Chi chap nhan feed post type `2` va group post type `3`.
-4. Lay author, media, va group neu la group post.
-5. Check quyen xem theo privacy cua feed post hoac group.
-6. Omit post khong ton tai/khong co quyen xem/thieu author/group.
-7. Feed post tra `FeedPostDetail`.
-8. Group post tra `GroupPostDetail`.
-9. `author.canFollow` tinh theo viewer voi author.
-10. `group.canJoin` tinh theo viewer voi group.
+2. Reject request co hon 100 IDs voi code `BAD_USER_INPUT`.
+3. Duyet `postIds` theo thu tu input, bo id trung.
+4. Batch-load post, association, author, media, group va viewer relation de tranh N+1.
+5. Chi chap nhan feed post type `2` va group post type `3`.
+6. Lay author, media, va group neu la group post.
+7. Check block hai chieu va quyen xem theo privacy cua feed post hoac group.
+8. Omit post khong ton tai/khong co quyen xem/thieu author/group.
+9. Feed post tra `FeedPostDetail`; group post tra `GroupPostDetail`.
+10. `author.canFollow` va `group.canJoin` tinh theo viewer.
 
 Output type:
 
@@ -370,8 +371,8 @@ Logic:
 
 1. Check `authorId` khop trusted `X-User-Id`.
 2. Chi cho share feed post public hoac reel.
-3. Tao story type `5` co data share source.
-4. Tao association den shared source.
+3. Tao story type `5`; data story chi chua `content`, `create`, `expire`.
+4. Tao association `story --share(8)--> sharedSource`.
 5. Output la `FeedPostShareStory` hoac `ReelShareStory`.
 
 Output: `HomeStory` union.
@@ -401,7 +402,7 @@ Output:
 ```json
 {
   "success": true,
-  "message": null
+  "message": "Story deleted."
 }
 ```
 
@@ -427,11 +428,12 @@ Input:
 
 Logic:
 
-1. Tao feed post type `2`.
-2. Tao media object cho tung URL frontend da upload xong.
-3. Tao association `author --authored(5)--> post`.
-4. Tao association `post --contained(20)--> media`.
-5. Upsert Search index va Recommendation embedding theo best-effort.
+1. Check `input.authorId` khop trusted `X-User-Id`.
+2. Tao feed post type `2`.
+3. Tao media object cho tung URL frontend da upload xong.
+4. Tao association `author --authored(5)--> post`.
+5. Tao association `post --contained(20)--> media`.
+6. Upsert Search index va Recommendation embedding theo best-effort.
 
 Output: `ContentResult`.
 
@@ -457,7 +459,7 @@ Logic:
 
 1. Check `userId` khop trusted `X-User-Id`.
 2. Kiem tra group ton tai.
-3. Upsert association mot chieu `user --visited(19)--> group`.
+3. Upsert association mot chieu `user --visited(25)--> group`.
 4. Neu association da ton tai thi cap nhat `time` de group len dau list visited.
 
 Output:
@@ -496,3 +498,31 @@ REST internal khac:
 - `GET /internal/recommendation/reel-candidates`
 - `PUT /internal/users/{userId}/verify`
 - `DELETE /internal/stories/expired`
+
+## Query Gateway Tong Hop: recommendFeed
+
+Gateway compose Recommendation va SocialGraph bang Fusion entity lookup. Frontend co the lay ranked IDs va post detail trong mot request:
+
+```graphql
+query RecommendedFeed($userId: ID!, $skip: Int!, $take: Int!) {
+  recommendFeed(userId: $userId, skip: $skip, take: $take) {
+    postId
+    post {
+      __typename
+      ... on FeedPostDetail {
+        id content privacy create
+        author { id name avatar isVerified canFollow }
+        media { id type url }
+      }
+      ... on GroupPostDetail {
+        id content privacy create
+        author { id name avatar isVerified canFollow }
+        group { id name avatar canJoin }
+        media { id type url }
+      }
+    }
+  }
+}
+```
+
+`recommendationItem(postId)` la internal lookup, khong public cho frontend. Fusion dung variable batching; SocialGraph cho phep toi da 100 batch entries va DataLoader batch database reads qua `postDetails`, sau do ap dung lai privacy/block filtering. `post` co the la `null` neu candidate bi xoa hoac viewer mat quyen xem sau luc ranking.

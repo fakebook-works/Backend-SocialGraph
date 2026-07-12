@@ -206,8 +206,13 @@ public class Mutation
         return groupGraphService.RemoveAdminAsync(groupId, userId, cancellationToken);
     }
 
-    public Task<ContentResult> CreateFeedPostAsync(CreateFeedPostInput input, [Service] IContentGraphService contentGraphService, CancellationToken cancellationToken)
+    public Task<ContentResult> CreateFeedPostAsync(
+        CreateFeedPostInput input,
+        [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(input.AuthorId);
         return contentGraphService.CreateFeedPostAsync(input, cancellationToken);
     }
 

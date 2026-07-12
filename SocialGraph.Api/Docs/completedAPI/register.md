@@ -142,7 +142,7 @@ Auth fail:
 {
   "success": false,
   "userId": null,
-  "message": "Authentication service rejected user."
+  "message": "Authentication user creation failed."
 }
 ```
 

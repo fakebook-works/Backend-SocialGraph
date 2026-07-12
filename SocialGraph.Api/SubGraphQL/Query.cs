@@ -1,12 +1,19 @@
 ﻿namespace SocialGraph.Api.SubGraphQL;
 
 using HotChocolate;
+using HotChocolate.Types;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
 
 public class Query
 {
+    public RecommendationItemResult? GetRecommendationItem(
+        [GraphQLType(typeof(NonNullType<IdType>))] long postId)
+    {
+        return postId > 0 ? new RecommendationItemResult(postId) : null;
+    }
+
     public Task<SocialGraphObjectResult?> GetObjectAsync(
         long id,
         [Service] IObjectService objectService,
@@ -87,6 +94,15 @@ public class Query
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        if (postIds.Count > ContentGraphService.MaxPostDetailIds)
+        {
+            throw new GraphQLException(
+                ErrorBuilder.New()
+                    .SetCode("BAD_USER_INPUT")
+                    .SetMessage($"At most {ContentGraphService.MaxPostDetailIds} post IDs can be requested.")
+                    .Build());
+        }
+
         var viewerId = trustedCaller.RequireUserId();
         return contentGraphService.GetPostDetailsAsync(viewerId, postIds, cancellationToken);
     }

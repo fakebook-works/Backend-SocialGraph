@@ -3,11 +3,11 @@ using Microsoft.EntityFrameworkCore;
 
 public class MyDbContext : DbContext
 {
-    public MyDbContext(DbContextOptions<MyDbContext> options) : base(options) {}
-    
+    public MyDbContext(DbContextOptions<MyDbContext> options) : base(options) { }
+
     public DbSet<Objects> ObjectsTb { get; set; }
     public DbSet<Associations> AssociationsTb { get; set; }
-    
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -17,7 +17,7 @@ public class MyDbContext : DbContext
         {
             entity.ToTable("objects");
             entity.HasKey(e => e.id);
-            entity.Property(e => e.id).ValueGeneratedNever(); 
+            entity.Property(e => e.id).ValueGeneratedNever();
             entity.Property(e => e.otype).IsRequired();
             entity.Property(e => e.data).HasColumnType("jsonb");
         });
