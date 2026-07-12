@@ -33,6 +33,8 @@ builder.Services
     .AddGraphQLServer()
     .AddQueryType<Query>()
     .AddMutationType<Mutation>()
+    .AddType<NormalStoryResult>()
+    .AddType<ShareStoryResult>()
     .AddType<FeedPostSharedSourceResult>()
     .AddType<GroupPostSharedSourceResult>()
     .AddType<ReelSharedSourceResult>()

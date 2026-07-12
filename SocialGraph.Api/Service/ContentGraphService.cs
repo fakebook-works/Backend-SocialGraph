@@ -214,7 +214,7 @@ public sealed class ContentGraphService : IContentGraphService
                 continue;
             }
 
-            var stories = new List<HomeStoryItemResult>(candidate.Stories.Count);
+            var stories = new List<IHomeStoryResult>(candidate.Stories.Count);
             foreach (var story in candidate.Stories)
             {
                 stories.Add(await BuildHomeStoryItemAsync(story.Story, cancellationToken));
@@ -419,11 +419,10 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var friends = await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 500, cancellationToken);
         var followed = await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 500, cancellationToken);
-        var blocked = await GetBlockedUserIdsAsync(userId, cancellationToken);
 
         return friends
             .Concat(followed)
-            .Where(id => id != userId && !blocked.Contains(id))
+            .Where(id => id != userId)
             .ToHashSet();
     }
 
@@ -443,13 +442,6 @@ public sealed class ContentGraphService : IContentGraphService
         while (cursor is not null && remaining > 0);
 
         return results;
-    }
-
-    private async Task<ISet<long>> GetBlockedUserIdsAsync(long userId, CancellationToken cancellationToken)
-    {
-        var blocked = await GetAssociationIdsAsync(userId, GraphAssociationType.Blocked, 500, cancellationToken);
-        var blockedBy = await GetAssociationIdsAsync(userId, GraphAssociationType.BlockedBy, 500, cancellationToken);
-        return blocked.Concat(blockedBy).ToHashSet();
     }
 
     private async Task DeleteExpiredStoryWithMediaAsync(long storyId, CancellationToken cancellationToken)
@@ -472,18 +464,28 @@ public sealed class ContentGraphService : IContentGraphService
         return media.items.Select(item => item.id2).ToArray();
     }
 
-    private async Task<HomeStoryItemResult> BuildHomeStoryItemAsync(
+    private async Task<IHomeStoryResult> BuildHomeStoryItemAsync(
         SocialGraphObjectResult story,
         CancellationToken cancellationToken)
     {
         var data = GraphJson.ParseObject(story.data);
-        return new HomeStoryItemResult(
+        var sharedSource = await GetSharedSourceAsync(story.id, cancellationToken);
+        if (sharedSource is not null)
+        {
+            return new ShareStoryResult(
+                story.id,
+                GraphJson.String(data, "content"),
+                GraphJson.String(data, "create"),
+                GraphJson.String(data, "expire"),
+                sharedSource);
+        }
+
+        return new NormalStoryResult(
             story.id,
             GraphJson.String(data, "content"),
             GraphJson.String(data, "create"),
             GraphJson.String(data, "expire"),
-            await GetMediaAsync(story.id, cancellationToken),
-            await GetSharedSourceAsync(story.id, cancellationToken));
+            await GetMediaAsync(story.id, cancellationToken));
     }
 
     private async Task<IStorySharedSourceResult?> GetSharedSourceAsync(long storyId, CancellationToken cancellationToken)

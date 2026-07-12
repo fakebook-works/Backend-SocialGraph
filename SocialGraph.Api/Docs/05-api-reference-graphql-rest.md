@@ -155,6 +155,7 @@ Output cua `homeStories`:
       "latestCreate": "2026-07-12T10:00:00.0000000Z",
       "stories": [
         {
+          "__typename": "NormalStory",
           "id": 901,
           "content": "Story text",
           "create": "2026-07-12T09:00:00.0000000Z",
@@ -165,8 +166,7 @@ Output cua `homeStories`:
               "type": 0,
               "url": "https://cdn.local/story.jpg"
             }
-          ],
-          "sharedSource": null
+          ]
         }
       ]
     }
@@ -176,7 +176,16 @@ Output cua `homeStories`:
 }
 ```
 
-`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Story thuong co `sharedSource = null`. Story share co `sharedSource` la GraphQL union `StorySharedSource`.
+`limit` trong `homeStories` la so author bucket, khong phai so story. Moi bucket tra toan bo story con han cua author do. Field `stories` la GraphQL union `HomeStory`.
+
+`HomeStory` co 2 concrete type:
+
+```graphql
+union HomeStory = NormalStory | ShareStory
+```
+
+- `NormalStory`: story thuong, co `media`.
+- `ShareStory`: story dang share post/reel, co `sharedSource`, khong co media rieng cua story.
 
 `StorySharedSource` co 3 concrete type:
 
@@ -190,21 +199,14 @@ union StorySharedSource =
 Frontend phai query bang `__typename` va inline fragment:
 
 ```graphql
-sharedSource {
+stories {
   __typename
 
-  ... on FeedPostSharedSource {
+  ... on NormalStory {
     id
     content
-    privacy
     create
-    author {
-      id
-      name
-      avatar
-      verify
-      isVerified
-    }
+    expire
     media {
       id
       type
@@ -212,49 +214,97 @@ sharedSource {
     }
   }
 
-  ... on GroupPostSharedSource {
+  ... on ShareStory {
     id
     content
-    privacy
     create
-    author {
-      id
-      name
-      avatar
-      verify
-      isVerified
-    }
-    group {
-      id
-      name
-      avatar
-      background
-      privacy
-    }
-    media {
-      id
-      type
-      url
-    }
-  }
+    expire
+    sharedSource {
+      __typename
 
-  ... on ReelSharedSource {
-    id
-    content
-    create
-    author {
-      id
-      name
-      avatar
-      verify
-      isVerified
-    }
-    media {
-      id
-      type
-      url
+      ... on FeedPostSharedSource {
+        id
+        content
+        privacy
+        create
+        author {
+          id
+          name
+          avatar
+          verify
+          isVerified
+        }
+        media {
+          id
+          type
+          url
+        }
+      }
+
+      ... on GroupPostSharedSource {
+        id
+        content
+        privacy
+        create
+        author {
+          id
+          name
+          avatar
+          verify
+          isVerified
+        }
+        group {
+          id
+          name
+          avatar
+          background
+          privacy
+        }
+        media {
+          id
+          type
+          url
+        }
+      }
+
+      ... on ReelSharedSource {
+        id
+        content
+        create
+        author {
+          id
+          name
+          avatar
+          verify
+          isVerified
+        }
+        media {
+          id
+          type
+          url
+        }
+      }
     }
   }
+}
+```
+
+Vi du normal story:
+
+```json
+{
+  "__typename": "NormalStory",
+  "id": 901,
+  "content": "Story text",
+  "create": "2026-07-12T09:00:00.0000000Z",
+  "expire": "2026-07-13T09:00:00.0000000Z",
+  "media": [
+    {
+      "id": 3001,
+      "type": 0,
+      "url": "https://cdn.local/story.jpg"
+    }
+  ]
 }
 ```
 
@@ -262,6 +312,11 @@ Vi du story share feed post:
 
 ```json
 {
+  "__typename": "ShareStory",
+  "id": 902,
+  "content": "Xem bai nay",
+  "create": "2026-07-12T10:00:00.0000000Z",
+  "expire": "2026-07-13T10:00:00.0000000Z",
   "sharedSource": {
     "__typename": "FeedPostSharedSource",
     "id": 789,
@@ -284,6 +339,11 @@ Vi du story share group post:
 
 ```json
 {
+  "__typename": "ShareStory",
+  "id": 903,
+  "content": "Xem bai trong group",
+  "create": "2026-07-12T10:00:00.0000000Z",
+  "expire": "2026-07-13T10:00:00.0000000Z",
   "sharedSource": {
     "__typename": "GroupPostSharedSource",
     "id": 790,
@@ -313,6 +373,11 @@ Vi du story share reel:
 
 ```json
 {
+  "__typename": "ShareStory",
+  "id": 904,
+  "content": "Xem reel nay",
+  "create": "2026-07-12T10:00:00.0000000Z",
+  "expire": "2026-07-13T10:00:00.0000000Z",
   "sharedSource": {
     "__typename": "ReelSharedSource",
     "id": 800,
@@ -511,7 +576,7 @@ Input:
 Logic:
 
 1. Lay author co the xem story tu `friend(0)` va `followed(1)` cua user.
-2. Loai chinh user, `blocked(23)` va `blocked_by(24)`.
+2. Loai chinh user khoi danh sach author.
 3. Query story type `5` cua cac author do qua `authored(5)`.
 4. Voi tung story:
    - neu `expire <= now` hoac expire invalid thi xoa story;
@@ -524,7 +589,7 @@ Logic:
 6. Group story con han theo author.
 7. Sort author bucket theo `latestCreate desc, authorId desc`.
 8. Apply cursor theo author bucket, khong cursor theo tung story.
-9. Voi moi author bucket duoc chon, tra author summary, toan bo story con han, media cua story, va `sharedSource` neu story share post/reel.
+9. Voi moi author bucket duoc chon, tra author summary va toan bo story con han. Moi story tra theo union `NormalStory` hoac `ShareStory`.
 
 External calls: khong co.
 

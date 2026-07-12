@@ -141,18 +141,29 @@ public sealed record ReelSharedSourceResult(
     UserSummaryResult? Author,
     IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
 
-public sealed record HomeStoryItemResult(
+[UnionType("HomeStory")]
+public interface IHomeStoryResult;
+
+[GraphQLName("NormalStory")]
+public sealed record NormalStoryResult(
     long Id,
     string Content,
     string Create,
     string Expire,
-    IReadOnlyList<MediaResult> Media,
-    IStorySharedSourceResult? SharedSource);
+    IReadOnlyList<MediaResult> Media) : IHomeStoryResult;
+
+[GraphQLName("ShareStory")]
+public sealed record ShareStoryResult(
+    long Id,
+    string Content,
+    string Create,
+    string Expire,
+    IStorySharedSourceResult SharedSource) : IHomeStoryResult;
 
 public sealed record HomeStoryBucketResult(
     UserSummaryResult Author,
     string LatestCreate,
-    IReadOnlyList<HomeStoryItemResult> Stories);
+    IReadOnlyList<IHomeStoryResult> Stories);
 
 public sealed record HomeStoryPageResult(
     IReadOnlyList<HomeStoryBucketResult> Items,
