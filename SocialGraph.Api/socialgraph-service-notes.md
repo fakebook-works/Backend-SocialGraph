@@ -34,7 +34,6 @@ Search and Recommendation are deliberately called only after Auth succeeds, prev
 ## Story Boundary
 
 - Subgraph operations: `homeStories`, `myStories`, `createNormalStory`, `createShareStory`, and `deleteStory`.
-- `createStory` remains available only for schema compatibility and is deprecated in favor of `createNormalStory`.
 - Every Story resolver validates `X-Gateway-Secret` and `X-User-Id`; the GraphQL `userId`/`authorId` must equal the trusted user ID.
 - Gateway must strip client-provided trusted headers, validate the session, and generate these headers itself.
 - Shared feed posts must be public at creation and remain public at read time. A deleted/private source causes the share Story to be omitted.
@@ -45,14 +44,14 @@ Search and Recommendation are deliberately called only after Auth succeeds, prev
 
 ## Internal REST
 
-- `GET /internal/recommendation/post-candidates?userId=&limit=`
+- `GET /internal/recommendation/post-candidate-ids?userId=&limit=`
 - `GET /internal/recommendation/reel-candidates?userId=&limit=`
 - `PUT /internal/users/{userId}/verify`
 - `DELETE /internal/stories/expired?limit=100`
 
 Every `/internal/*` request requires `X-Gateway-Secret`. The configured secret must be at least 32 bytes. Missing or invalid credentials return `403`; an unconfigured server returns `503`. `X-Correlation-ID` is preserved or generated and returned in the response.
 
-Candidate responses include `id`, `authorId`, `source`, and `createdAt`. Payment/Billing uses the verify endpoint to set or clear `user.data.verify`; GraphQL user updates cannot change this field.
+Post candidate responses are `long[]` ids. Reel candidate responses include `id`, `authorId`, `source`, and `createdAt`. Payment/Billing uses the verify endpoint to set or clear `user.data.verify`; GraphQL user updates cannot change this field.
 
 Story cleanup uses `StoryCleanup:IntervalMinutes` (default `15`, clamp `1..1440`) and `StoryCleanup:BatchSize` (default `100`, clamp `1..500`). The internal endpoint also clamps `limit` to `1..500`.
 

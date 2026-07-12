@@ -9,13 +9,13 @@ Gateway hien chi public SocialGraph `createUser`. Story authorization da duoc im
 ## 1. Endpoint Tong Quan
 
 - GraphQL: `POST /graphql`
-- REST Recommendation: `GET /internal/recommendation/post-candidates`, `GET /internal/recommendation/reel-candidates`
+- REST Recommendation: `GET /internal/recommendation/post-candidate-ids`, `GET /internal/recommendation/reel-candidates`
 - REST Payment: `PUT /internal/users/{userId}/verify`
 - REST Story maintenance: `DELETE /internal/stories/expired`
 
 ### Trusted caller cho Story
 
-Tat ca `homeStories`, `myStories`, `createStory`, `createNormalStory`, `createShareStory`, `deleteStory` yeu cau:
+Tat ca `homeStories`, `myStories`, `createNormalStory`, `createShareStory`, `deleteStory` yeu cau:
 
 ```http
 X-Gateway-Secret: <shared secret at least 32 bytes>
@@ -567,29 +567,6 @@ Logic:
 External calls: khong co.
 
 Return: `long[]`
-
-### postCandidates(userId, limit)
-
-Input:
-
-- `userId: long`
-- `limit: int`, clamp ve `1..500`
-
-Logic:
-
-1. Lay block list tu `blocked(23)` va `blocked_by(24)`.
-2. Lay feed post type `2` cua friend authors: `user --friend(0)--> author`, sau do author `authored(5)` feed post moi nhat.
-3. Lay feed post type `2` cua followed authors: `user --followed(1)--> author`, sau do author `authored(5)` feed post moi nhat.
-4. Lay group post type `3` tu cac group user la member/admin: `member(13)`, `admin(15)`, group `published(9)` group post.
-5. Lay fallback recent public feed posts: object type `2`, `privacy = 0`.
-6. Khong can check `published_in(10)` de phan biet feed/group post.
-7. Bo candidate cua author bi block/blocked_by.
-8. Deduplicate theo post id.
-9. Sort theo `id` desc va tra top limit.
-
-External calls: khong co.
-
-Return: `CandidateItemResult[]`
 
 ### reelCandidates(userId, limit)
 
@@ -1277,10 +1254,6 @@ External calls:
 
 Return: `ContentResult`
 
-### createStory(input) - deprecated
-
-Compatibility mutation cua schema cu, input `{ authorId, content, media }`, return `ContentResult`. Resolver validate trusted caller roi map sang `createNormalStory`. Client moi khong nen dung field nay.
-
 ### createNormalStory(input)
 
 Input:
@@ -1570,7 +1543,7 @@ X-Correlation-ID: <optional trace id>
 
 Thieu/sai secret tra `403`. Neu server secret chua cau hinh hop le thi tra `503`. Correlation ID inbound duoc preserve; neu thieu, SocialGraph tao ID va tra lai trong response header.
 
-### GET /internal/recommendation/post-candidates
+### GET /internal/recommendation/post-candidate-ids
 
 Caller: Recommendation service.
 
@@ -1579,21 +1552,24 @@ Query:
 - `userId: long`
 - `limit: int = 200`, clamp ve `1..500`
 
-Logic: giong GraphQL query `postCandidates(userId, limit)`.
+Logic:
+
+1. Lay block list tu `blocked(23)` va `blocked_by(24)`.
+2. Lay feed post type `2` cua friend authors.
+3. Lay feed post type `2` cua followed authors.
+4. Lay group post type `3` trong cac group user la member/admin.
+5. Lay fallback recent public feed posts: object type `2`, `privacy = 0`.
+6. Lay fallback public group posts: object type `3`, group privacy `0`.
+7. Bo candidate cua author bi block/blocked_by.
+8. Deduplicate theo post id.
+9. Sort theo `id` desc va tra top limit post id.
 
 External calls: khong co.
 
-Return: `200 OK` voi `CandidateItemResult[]`
+Return: `200 OK` voi `long[]`
 
 ```json
-[
-  {
-    "id": 789,
-    "authorId": 123,
-    "source": "friend",
-    "createdAt": "2026-07-11T00:00:00.0000000Z"
-  }
-]
+[789, 788, 777]
 ```
 
 ### GET /internal/recommendation/reel-candidates

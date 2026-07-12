@@ -687,14 +687,6 @@ Goi tin Recommendation service gui:
 GET /internal/recommendation/post-candidate-ids?userId=123&limit=500
 ```
 
-Endpoint cu van con:
-
-```http
-GET /internal/recommendation/post-candidates?userId=123&limit=500
-```
-
-Endpoint cu tra `CandidateItemResult[]` gom `id`, `authorId`, `source`, `createdAt`. `source` co the la `friend`, `followed`, `group`, `recent_public`, `public_group`.
-
 #### API GraphQL: postDetails(userId, postIds)
 
 API nay danh cho Gateway/frontend sau khi da co list id tu Recommendation.

@@ -127,15 +127,6 @@ public class Query
         return page.items.Select(item => item.id2).ToArray();
     }
 
-    public Task<IReadOnlyList<CandidateItemResult>> GetPostCandidatesAsync(
-        long userId,
-        int limit,
-        [Service] ICandidateService candidateService,
-        CancellationToken cancellationToken)
-    {
-        return candidateService.GetPostCandidatesAsync(userId, limit, cancellationToken);
-    }
-
     public Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
         long userId,
         int limit,

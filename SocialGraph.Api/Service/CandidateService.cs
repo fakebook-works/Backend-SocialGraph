@@ -17,10 +17,19 @@ public sealed class CandidateService : ICandidateService
         _associationService = associationService;
     }
 
-    public async Task<IReadOnlyList<CandidateItemResult>> GetPostCandidatesAsync(
+    public async Task<IReadOnlyList<long>> GetPostCandidateIdsAsync(
         long userId,
         int limit,
         CancellationToken cancellationToken = default)
+    {
+        var candidates = await GetPostCandidateItemsAsync(userId, limit, cancellationToken);
+        return candidates.Select(item => item.Id).ToArray();
+    }
+
+    private async Task<IReadOnlyList<CandidateItemResult>> GetPostCandidateItemsAsync(
+        long userId,
+        int limit,
+        CancellationToken cancellationToken)
     {
         var take = Math.Clamp(limit, 1, 500);
         var blocked = await GetBlockedUserIdsAsync(userId, cancellationToken);
@@ -28,23 +37,14 @@ public sealed class CandidateService : ICandidateService
 
         await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 200, cancellationToken), GraphObjectType.FeedPost, "friend", blocked, take, cancellationToken);
         await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.FeedPost, "followed", blocked, take, cancellationToken);
-        await AddGroupPostCandidatesAsync(candidates, await GetUserGroupIdsAsync(userId, cancellationToken), blocked, take, cancellationToken);
+        await AddGroupPostItemsAsync(candidates, await GetUserGroupIdsAsync(userId, cancellationToken), blocked, take, cancellationToken);
         await AddRecentCandidatesAsync(candidates, GraphObjectType.FeedPost, "recent_public", blocked, take, cancellationToken);
-        await AddPublicGroupPostCandidatesAsync(candidates, blocked, take, cancellationToken);
+        await AddPublicGroupPostItemsAsync(candidates, blocked, take, cancellationToken);
 
         return candidates.Values
             .OrderByDescending(item => item.Id)
             .Take(take)
             .ToArray();
-    }
-
-    public async Task<IReadOnlyList<long>> GetPostCandidateIdsAsync(
-        long userId,
-        int limit,
-        CancellationToken cancellationToken = default)
-    {
-        var candidates = await GetPostCandidatesAsync(userId, limit, cancellationToken);
-        return candidates.Select(item => item.Id).ToArray();
     }
 
     public async Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
@@ -95,7 +95,7 @@ public sealed class CandidateService : ICandidateService
         }
     }
 
-    private async Task AddGroupPostCandidatesAsync(
+    private async Task AddGroupPostItemsAsync(
         Dictionary<long, CandidateItemResult> candidates,
         IReadOnlyList<long> groupIds,
         ISet<long> blocked,
@@ -151,7 +151,7 @@ public sealed class CandidateService : ICandidateService
         }
     }
 
-    private async Task AddPublicGroupPostCandidatesAsync(
+    private async Task AddPublicGroupPostItemsAsync(
         Dictionary<long, CandidateItemResult> candidates,
         ISet<long> blocked,
         int limit,

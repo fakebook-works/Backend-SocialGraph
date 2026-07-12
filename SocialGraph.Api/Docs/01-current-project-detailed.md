@@ -322,14 +322,6 @@ Chi dung cho feed post. Group post khong co privacy rieng.
 - `TargetId: long`
 - `Content: string`
 
-#### CreateStoryInput
-
-- `AuthorId: long`
-- `Content: string`
-- `Media?: MediaInput`
-
-Contract legacy cho mutation `createStory`; field nay da deprecated va map sang `createNormalStory`.
-
 #### CreateNormalStoryInput
 
 - `AuthorId: long`
@@ -952,9 +944,9 @@ Logic:
 
 ### CandidateService
 
-#### GetPostCandidatesAsync(long userId, int limit)
+#### GetPostCandidateIdsAsync(long userId, int limit)
 
-Return: `IReadOnlyList<CandidateItemResult>`.
+Return: `IReadOnlyList<long>`.
 
 Logic:
 
@@ -967,10 +959,12 @@ Logic:
    - followed authors: user `followed(1)` -> author `authored(5)` feed post object type `2`.
    - groups: user `member/admin(13/15)` -> group `published(9)` group post object type `3`.
    - fallback recent public feed posts: object type `2`, privacy `0`.
-4. Group posts chi lay qua groups cua user vi chung la object type `3`, khong phai loc bang `published_in`.
+   - fallback public group posts: object type `3`, group privacy `0`.
+4. Group posts chi lay bang `group --published(9)--> groupPost`, khong dung `published_in` de phan biet feed/group post.
 5. Loai candidate cua author bi block.
-6. Sort tam thoi theo id desc, Snowflake id lon hon gan voi bai moi hon.
-7. Tra top limit.
+6. Deduplicate theo post id.
+7. Sort tam thoi theo id desc, Snowflake id lon hon gan voi bai moi hon.
+8. Tra top limit post id.
 
 Recommendation service moi la noi rank feed cuoi cung.
 
@@ -1061,12 +1055,6 @@ Return:
 
 Lay list id2 theo association.
 
-#### postCandidates(userId, limit)
-
-Return:
-
-- `CandidateItemResult[]`.
-
 #### reelCandidates(userId, limit)
 
 Return:
@@ -1136,7 +1124,6 @@ Content:
 - `createNormalStory(input)`
 - `createShareStory(input)`
 - `deleteStory(input)`
-- `createStory(input)` (legacy, deprecated; map sang `createNormalStory`)
 - `createReel(input)`
 - `sharePost(input)`
 - `like(userId, targetId)`
@@ -1161,7 +1148,7 @@ Files:
 
 Route prefix recommendation: `/internal/recommendation`.
 
-### GET /internal/recommendation/post-candidates
+### GET /internal/recommendation/post-candidate-ids
 
 Query:
 
@@ -1171,14 +1158,7 @@ Query:
 Return:
 
 ```json
-[
-  {
-    "id": 123,
-    "authorId": 456,
-    "source": "friend",
-    "createdAt": "2026-07-09T00:00:00.0000000Z"
-  }
-]
+[123, 122, 121]
 ```
 
 ### GET /internal/recommendation/reel-candidates

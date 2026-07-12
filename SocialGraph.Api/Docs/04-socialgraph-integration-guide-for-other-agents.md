@@ -21,7 +21,7 @@ GraphQL endpoint:
 
 REST internal:
 
-- `/internal/recommendation/post-candidates`
+- `/internal/recommendation/post-candidate-ids`
 - `/internal/recommendation/reel-candidates`
 - `/internal/users/{userId}/verify`
 - `DELETE /internal/stories/expired`
@@ -135,7 +135,6 @@ Query `profile(userId)` return:
 - `createNormalStory(input)`
 - `createShareStory(input)`
 - `deleteStory(input)`
-- `createStory(input)` chi la compatibility mutation da deprecated
 - `createReel(input)`
 - `sharePost(input)`
 - `like(userId, targetId)`
@@ -296,7 +295,7 @@ DELETE /internal/recommendation/posts/{postId}/embedding
 Recommendation service nen lay candidates tu SocialGraph:
 
 ```http
-GET /internal/recommendation/post-candidates?userId=123&limit=200
+GET /internal/recommendation/post-candidate-ids?userId=123&limit=200
 GET /internal/recommendation/reel-candidates?userId=123&limit=200
 X-Gateway-Secret: <shared secret>
 X-Correlation-ID: <trace id>
@@ -305,21 +304,13 @@ X-Correlation-ID: <trace id>
 Response:
 
 ```json
-[
-  {
-    "id": 456,
-    "authorId": 123,
-    "source": "friend",
-    "createdAt": "2026-07-09T00:00:00Z"
-  }
-]
+[456, 455, 454]
 ```
 
 Recommendation nen:
 
-- Dung `id` lam post/reel id.
-- Dung `authorId` neu can author embedding.
-- Dung `source` lam feature.
+- Dung `post-candidate-ids` lam pool id bai viet, sau do rank o Recommendation service.
+- Dung `reel-candidates` neu can pool reel kem `authorId`, `source`, `createdAt`.
 - Tu tinh ranking score rieng; SocialGraph chi tra candidate pool va khong tra multiplier tra phi.
 
 ## 9. Endpoints ma Notification service can co
@@ -416,7 +407,7 @@ Background flow:
 - Candidate endpoint la candidate pool, khong phai final feed.
 - Verify/tich xanh chi duoc cap nhat qua REST internal cua SocialGraph; service khac khong doc hay ghi truc tiep DB SocialGraph.
 - Story reads side-effect free; operational cleanup phai dung background worker hoac authenticated maintenance endpoint.
-- Khi compose Story vao Gateway, khong public legacy `createStory`; uu tien `createNormalStory`, `createShareStory`, `deleteStory`, `homeStories`, `myStories` va forward trusted identity headers.
+- Khi compose Story vao Gateway, public `createNormalStory`, `createShareStory`, `deleteStory`, `homeStories`, `myStories` va forward trusted identity headers.
 
 ## 13. Checklist khi code service khac
 

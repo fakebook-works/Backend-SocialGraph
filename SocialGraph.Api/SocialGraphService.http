@@ -78,7 +78,7 @@ X-Correlation-ID: manual-delete-story-test
 
 ###
 
-GET {{host}}/internal/recommendation/post-candidates?userId={{userId}}&limit=20
+GET {{host}}/internal/recommendation/post-candidate-ids?userId={{userId}}&limit=20
 X-Gateway-Secret: {{internalSecret}}
 X-Correlation-ID: manual-candidate-test
 
