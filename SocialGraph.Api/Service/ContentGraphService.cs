@@ -91,8 +91,8 @@ public sealed class ContentGraphService : IContentGraphService
         return await BuildContentResultAsync(item, authorId, media, cancellationToken);
     }
 
-    public async Task<PostDetailResult?> GetPostDetailAsync(
-        long userId,
+    public async Task<IHomePostResult?> GetPostDetailAsync(
+        long viewerId,
         long postId,
         CancellationToken cancellationToken = default)
     {
@@ -112,53 +112,64 @@ public sealed class ContentGraphService : IContentGraphService
             return null;
         }
 
-        GroupSummaryResult? group = null;
+        Objects? groupObject = null;
         long groupId = 0;
         int privacy;
         if (item.otype == GraphObjectType.GroupPost)
         {
-            var groupObject = await GetPublishedGroupObjectAsync(postId, cancellationToken);
+            groupObject = await GetPublishedGroupObjectAsync(postId, cancellationToken);
             if (groupObject is null)
             {
                 return null;
             }
 
             groupId = groupObject.id;
-            var groupData = GraphJson.ParseObject(groupObject.data);
-            privacy = GraphJson.Int(groupData, "privacy");
-            group = new GroupSummaryResult(
-                groupObject.id,
-                GraphJson.String(groupData, "name"),
-                GraphJson.String(groupData, "avatar"));
+            privacy = GraphJson.Int(GraphJson.ParseObject(groupObject.data), "privacy");
         }
         else
         {
             privacy = GraphJson.Int(data, "privacy");
         }
 
-        if (!await CanViewPostAsync(userId, authorId, item.otype, privacy, groupId, cancellationToken))
+        if (!await CanViewPostAsync(viewerId, authorId, item.otype, privacy, groupId, cancellationToken))
         {
             return null;
         }
 
-        return new PostDetailResult(
+        var content = GraphJson.String(data, "content");
+        var create = GraphJson.String(data, "create");
+        var author = await BuildPostAuthorAsync(viewerId, authorObject, cancellationToken);
+        var media = await GetMediaAsync(postId, cancellationToken);
+
+        if (item.otype == GraphObjectType.GroupPost && groupObject is not null)
+        {
+            return new GroupPostDetailResult(
+                item.id,
+                item.otype,
+                content,
+                privacy,
+                create,
+                author,
+                await BuildPostGroupAsync(viewerId, groupObject, cancellationToken),
+                media);
+        }
+
+        return new FeedPostDetailResult(
             item.id,
             item.otype,
-            GraphJson.String(data, "content"),
+            content,
             privacy,
-            GraphJson.String(data, "create"),
-            BuildUserSummary(authorObject),
-            group,
-            await BuildPostViewerRelationAsync(userId, authorObject, groupId, cancellationToken),
-            await GetMediaAsync(postId, cancellationToken));
+            create,
+            author,
+            media);
     }
 
-    public async Task<IReadOnlyList<PostDetailResult>> GetPostDetailsAsync(
-        long userId,
+    public async Task<IReadOnlyList<IHomePostResult>> GetPostDetailsAsync(
+        long viewerId,
         IReadOnlyList<long> postIds,
         CancellationToken cancellationToken = default)
     {
-        var results = new List<PostDetailResult>(postIds.Count);
+        var results = new List<IHomePostResult>(postIds.Count);
         var seen = new HashSet<long>();
         foreach (var postId in postIds)
         {
@@ -167,7 +178,7 @@ public sealed class ContentGraphService : IContentGraphService
                 continue;
             }
 
-            var detail = await GetPostDetailAsync(userId, postId, cancellationToken);
+            var detail = await GetPostDetailAsync(viewerId, postId, cancellationToken);
             if (detail is not null)
             {
                 results.Add(detail);
@@ -598,33 +609,43 @@ public sealed class ContentGraphService : IContentGraphService
             await IsGroupParticipantAsync(userId, groupId, cancellationToken);
     }
 
-    private async Task<PostViewerRelationResult> BuildPostViewerRelationAsync(
-        long userId,
+    private async Task<PostAuthorResult> BuildPostAuthorAsync(
+        long viewerId,
         Objects author,
-        long groupId,
         CancellationToken cancellationToken)
     {
         var canFollow = false;
-        if (userId != author.id)
+        if (viewerId != author.id)
         {
             var authorData = GraphJson.ParseObject(author.data);
             if (GraphJson.Int(authorData, "privacy") == 1)
             {
-                var alreadyFriend = await AssociationExistsAsync(userId, GraphAssociationType.Friend, author.id, cancellationToken);
-                var alreadyFollowed = await AssociationExistsAsync(userId, GraphAssociationType.Followed, author.id, cancellationToken);
+                var alreadyFriend = await AssociationExistsAsync(viewerId, GraphAssociationType.Friend, author.id, cancellationToken);
+                var alreadyFollowed = await AssociationExistsAsync(viewerId, GraphAssociationType.Followed, author.id, cancellationToken);
                 canFollow = !alreadyFriend && !alreadyFollowed;
             }
         }
 
-        bool? canJoin = null;
-        if (groupId > 0)
-        {
-            canJoin = !await IsGroupParticipantAsync(userId, groupId, cancellationToken);
-        }
+        var data = GraphJson.ParseObject(author.data);
+        return new PostAuthorResult(
+            author.id,
+            GraphJson.String(data, "name"),
+            GraphJson.String(data, "avatar"),
+            IsVerifyActive(data),
+            canFollow);
+    }
 
-        return new PostViewerRelationResult(
-            canFollow,
-            canJoin);
+    private async Task<PostGroupResult> BuildPostGroupAsync(
+        long viewerId,
+        Objects group,
+        CancellationToken cancellationToken)
+    {
+        var data = GraphJson.ParseObject(group.data);
+        return new PostGroupResult(
+            group.id,
+            GraphJson.String(data, "name"),
+            GraphJson.String(data, "avatar"),
+            !await IsGroupParticipantAsync(viewerId, group.id, cancellationToken));
     }
 
     private Task<bool> IsGroupParticipantAsync(long userId, long groupId, CancellationToken cancellationToken)
@@ -1048,13 +1069,11 @@ public sealed class ContentGraphService : IContentGraphService
     private static UserSummaryResult BuildUserSummary(Objects user)
     {
         var data = GraphJson.ParseObject(user.data);
-        var verify = GraphJson.String(data, "verify");
         return new UserSummaryResult(
             user.id,
             GraphJson.String(data, "name"),
             GraphJson.String(data, "avatar"),
-            DateTimeOffset.TryParse(verify, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var expiresAt) &&
-                expiresAt > DateTimeOffset.UtcNow);
+            IsVerifyActive(data));
     }
 
     private static MediaResult? BuildMediaResult(Objects media)
@@ -1077,13 +1096,18 @@ public sealed class ContentGraphService : IContentGraphService
         }
 
         var data = GraphJson.ParseObject(user.data);
-        var verify = GraphJson.String(data, "verify");
         return new UserSummaryResult(
             user.id,
             GraphJson.String(data, "name"),
             GraphJson.String(data, "avatar"),
-            DateTimeOffset.TryParse(verify, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var expiresAt) &&
-                expiresAt > DateTimeOffset.UtcNow);
+            IsVerifyActive(data));
+    }
+
+    private static bool IsVerifyActive(System.Text.Json.Nodes.JsonObject data)
+    {
+        var verify = GraphJson.String(data, "verify");
+        return DateTimeOffset.TryParse(verify, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var expiresAt) &&
+            expiresAt > DateTimeOffset.UtcNow;
     }
 
     private async Task<MediaResult?> GetFirstMediaAsync(long contentId, CancellationToken cancellationToken)

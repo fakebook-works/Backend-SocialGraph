@@ -687,39 +687,70 @@ Goi tin Recommendation service gui:
 GET /internal/recommendation/post-candidate-ids?userId=123&limit=500
 ```
 
-#### API GraphQL: postDetails(userId, postIds)
+#### Cong nghe resolver va trusted viewerId
+
+`postDetail` va `postDetails` la HotChocolate top-level GraphQL resolver trong SocialGraph, khong phai Federation entity `_entities` key resolver. Key dau vao cua resolver la `postId` hoac list `postIds`; resolver lay viewer hien tai bang trusted header:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-User-Id: 123
+```
+
+Frontend khong duoc tu gui hai header nay den SocialGraph. Frontend gui token/session den Gateway; Gateway verify voi Auth, xac dinh viewer thật, strip header client tu gui, roi tu gan `X-User-Id` va `X-Gateway-Secret` khi goi SocialGraph. Trong code SocialGraph goi `trustedCaller.RequireUserId()` de lay trusted viewerId. ViewerId nay dung de check quyen xem, `author.canFollow`, va `group.canJoin`.
+
+#### API GraphQL: postDetails(postIds)
 
 API nay danh cho Gateway/frontend sau khi da co list id tu Recommendation.
 
 GraphQL query:
 
 ```graphql
-query PostDetails($userId: Long!, $postIds: [Long!]!) {
-  postDetails(userId: $userId, postIds: $postIds) {
-    id
-    type
-    content
-    privacy
-    create
-    author {
-      id
-      name
-      avatar
-      isVerified
-    }
-    group {
-      id
-      name
-      avatar
-    }
-    viewerRelation {
-      canFollow
-      canJoin
-    }
-    media {
+query PostDetails($postIds: [Long!]!) {
+  postDetails(postIds: $postIds) {
+    __typename
+    ... on FeedPostDetail {
       id
       type
-      url
+      content
+      privacy
+      create
+      author {
+        id
+        name
+        avatar
+        isVerified
+        canFollow
+      }
+      media {
+        id
+        type
+        url
+      }
+    }
+    ... on GroupPostDetail {
+      id
+      type
+      content
+      privacy
+      create
+      author {
+        id
+        name
+        avatar
+        isVerified
+        canFollow
+      }
+      group {
+        id
+        name
+        avatar
+        canJoin
+      }
+      media {
+        id
+        type
+        url
+      }
     }
   }
 }
@@ -727,17 +758,17 @@ query PostDetails($userId: Long!, $postIds: [Long!]!) {
 
 Input:
 
-- `userId`: ID cua viewer dang dang nhap.
 - `postIds`: list id do Recommendation tra ve, da sap xep theo ranking.
+- Viewer khong nam trong GraphQL variables; SocialGraph lay viewer tu trusted `X-User-Id`.
 
 Logic ben trong:
 
-1. Gateway phai forward trusted header; service check `userId` request khop `X-User-Id`.
+1. Resolver validate trusted Gateway secret va doc `viewerId` tu `X-User-Id`.
 2. Duyet `postIds` theo dung thu tu input, bo id trung.
-3. Retrieve object post.
+3. Retrieve object post theo tung `postId`.
 4. Chi chap nhan:
-   - feed post type `2`
-   - group post type `3`
+   - feed post type `2`;
+   - group post type `3`.
 5. Lay author qua `post --authored_by(6)--> user`.
 6. Lay media qua `post --contained(20)--> media`.
 7. Neu la group post, lay group qua `post --published_in(10)--> group`.
@@ -747,11 +778,13 @@ Logic ben trong:
    - group post public: group `privacy = 0` xem duoc;
    - group post private: viewer phai la member/admin cua group.
 9. Post khong ton tai, sai type, thieu author, thieu group, hoac viewer khong co quyen xem se bi omit khoi output.
-10. Build `viewerRelation`:
-   - `canFollow = true` chi khi author co `privacy = 1` va viewer chua la friend, chua follow author;
-   - author `privacy = 0`, viewer la author, viewer da friend, hoac viewer da follow thi `canFollow = false`;
-   - voi group post: `canJoin = false` neu viewer la `member(13)` hoac `admin(15)` cua group, nguoc lai `canJoin = true`;
-   - voi feed post: `canJoin = null`.
+10. Build output union:
+   - feed post tra `FeedPostDetail`, chi co `author` va `media`;
+   - group post tra `GroupPostDetail`, co ca `author`, `group`, `media`.
+11. Build action field:
+   - `author.canFollow = true` chi khi author co `privacy = 1` va viewer chua la friend, chua follow author;
+   - author `privacy = 0`, viewer la author, viewer da friend, hoac viewer da follow thi `author.canFollow = false`;
+   - `group.canJoin = false` neu viewer la `member(13)` hoac `admin(15)` cua group, nguoc lai `true`.
 
 External calls: khong co.
 
@@ -760,6 +793,7 @@ Output:
 ```json
 [
   {
+    "__typename": "FeedPostDetail",
     "id": 789,
     "type": 2,
     "content": "Hello feed",
@@ -769,12 +803,8 @@ Output:
       "id": 456,
       "name": "Tran Van B",
       "avatar": "https://cdn.local/b.jpg",
-      "isVerified": true
-    },
-    "group": null,
-    "viewerRelation": {
-      "canFollow": false,
-      "canJoin": null
+      "isVerified": true,
+      "canFollow": false
     },
     "media": [
       {
@@ -785,6 +815,7 @@ Output:
     ]
   },
   {
+    "__typename": "GroupPostDetail",
     "id": 790,
     "type": 3,
     "content": "Hello group",
@@ -794,15 +825,13 @@ Output:
       "id": 457,
       "name": "Le Van C",
       "avatar": "https://cdn.local/c.jpg",
-      "isVerified": false
+      "isVerified": false,
+      "canFollow": false
     },
     "group": {
       "id": 88,
       "name": "Public Group",
-      "avatar": "https://cdn.local/g.jpg"
-    },
-    "viewerRelation": {
-      "canFollow": false,
+      "avatar": "https://cdn.local/g.jpg",
       "canJoin": true
     },
     "media": []
@@ -815,75 +844,133 @@ Goi tin frontend/gateway gui:
 ```json
 {
   "operationName": "PostDetails",
-  "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { canFollow canJoin } media { id type url } } }",
+  "query": "query PostDetails($postIds: [Long!]!) { postDetails(postIds: $postIds) { __typename ... on FeedPostDetail { id type content privacy create author { id name avatar isVerified canFollow } media { id type url } } ... on GroupPostDetail { id type content privacy create author { id name avatar isVerified canFollow } group { id name avatar canJoin } media { id type url } } } }",
   "variables": {
-    "userId": 123,
     "postIds": [789, 790, 777]
   }
 }
 ```
 
-#### API GraphQL: postDetail(userId, postId)
+Gateway phai goi SocialGraph kem trusted headers:
 
-Ban single-post cua `postDetails`, dung khi frontend can refresh/moi mot bai.
+```http
+X-Gateway-Secret: <shared secret>
+X-User-Id: 123
+```
+
+#### API GraphQL: postDetail(postId)
+
+Ban single-post cua `postDetails`, dung khi frontend can refresh/moi mot bai hoac mo detail.
 
 GraphQL query:
 
 ```graphql
-query PostDetail($userId: Long!, $postId: Long!) {
-  postDetail(userId: $userId, postId: $postId) {
-    id
-    type
-    content
-    privacy
-    create
-    author {
-      id
-      name
-      avatar
-      isVerified
-    }
-    group {
-      id
-      name
-      avatar
-    }
-    viewerRelation {
-      canFollow
-      canJoin
-    }
-    media {
+query PostDetail($postId: Long!) {
+  postDetail(postId: $postId) {
+    __typename
+    ... on FeedPostDetail {
       id
       type
-      url
+      content
+      privacy
+      create
+      author {
+        id
+        name
+        avatar
+        isVerified
+        canFollow
+      }
+      media {
+        id
+        type
+        url
+      }
+    }
+    ... on GroupPostDetail {
+      id
+      type
+      content
+      privacy
+      create
+      author {
+        id
+        name
+        avatar
+        isVerified
+        canFollow
+      }
+      group {
+        id
+        name
+        avatar
+        canJoin
+      }
+      media {
+        id
+        type
+        url
+      }
     }
   }
 }
 ```
 
-Return: `PostDetailResult?`. Neu post khong ton tai hoac viewer khong co quyen xem thi tra `null`.
+Input:
 
-Goi tin de thuc hien chuc nang feed post:
+- `postId`: id bai viet can lay data.
+- Viewer lay tu trusted `X-User-Id`, khong nam trong GraphQL variables.
+
+Logic: giong `postDetails`, nhung chi resolve mot post.
+
+Return: `HomePost`. Neu post khong ton tai, sai type, thieu author/group, hoac viewer khong co quyen xem thi tra `null`.
+
+Goi tin frontend/gateway gui:
 
 ```json
 {
-  "recommendationStep": {
-    "service": "Recommendation",
-    "internalCallToSocialGraph": "GET /internal/recommendation/post-candidate-ids?userId=123&limit=500",
-    "returnToGateway": [789, 790, 777]
+  "operationName": "PostDetail",
+  "query": "query PostDetail($postId: Long!) { postDetail(postId: $postId) { __typename ... on FeedPostDetail { id type content privacy create author { id name avatar isVerified canFollow } media { id type url } } ... on GroupPostDetail { id type content privacy create author { id name avatar isVerified canFollow } group { id name avatar canJoin } media { id type url } } } }",
+  "variables": {
+    "postId": 789
+  }
+}
+```
+
+#### Goi tin de thuc hien toan bo phan Home Feed post
+
+```json
+{
+  "candidateStep": {
+    "caller": "Recommendation service",
+    "requestToSocialGraph": "GET /internal/recommendation/post-candidate-ids?userId=123&limit=500",
+    "responseFromSocialGraph": [789, 788, 777]
   },
-  "socialGraphDetailStep": {
-    "operationName": "PostDetails",
-    "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { canFollow canJoin } media { id type url } } }",
-    "variables": {
-      "userId": 123,
-      "postIds": [789, 790, 777]
+  "rankingStep": {
+    "caller": "Recommendation service",
+    "logic": "rank/sort candidate ids bang model rieng",
+    "responseToGateway": [789, 790, 777]
+  },
+  "detailStep": {
+    "caller": "Gateway",
+    "requestToSocialGraph": {
+      "headers": {
+        "X-Gateway-Secret": "<shared secret>",
+        "X-User-Id": "123"
+      },
+      "body": {
+        "operationName": "PostDetails",
+        "query": "query PostDetails($postIds: [Long!]!) { postDetails(postIds: $postIds) { __typename ... on FeedPostDetail { id type content privacy create author { id name avatar isVerified canFollow } media { id type url } } ... on GroupPostDetail { id type content privacy create author { id name avatar isVerified canFollow } group { id name avatar canJoin } media { id type url } } } }",
+        "variables": {
+          "postIds": [789, 790, 777]
+        }
+      }
     }
   }
 }
 ```
 
-Frontend/gateway khong gui ca object wrapper `recommendationStep/socialGraphDetailStep`; day chi la mo ta pipe. Thuc te Recommendation service goi REST truoc, sau do Gateway/frontend goi GraphQL `postDetails` voi list id da duoc rank.
+Frontend/gateway khong gui ca object wrapper `candidateStep/rankingStep/detailStep`; day chi la mo ta pipe. Thuc te Recommendation service goi REST lay id truoc, Recommendation tra list id da rank, sau do Gateway/frontend goi GraphQL `postDetails` voi list id da duoc rank. Frontend khong truyen `userId` vao GraphQL post detail; Gateway dung token/session de lay viewer va forward trusted viewerId qua header noi bo.
 
 ### Chuc nang: Them story
 

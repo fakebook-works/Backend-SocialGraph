@@ -71,26 +71,24 @@ public class Query
         return contentGraphService.GetContentAsync(contentId, cancellationToken);
     }
 
-    public Task<PostDetailResult?> GetPostDetailAsync(
-        long userId,
+    public Task<IHomePostResult?> GetPostDetailAsync(
         long postId,
         [Service] IContentGraphService contentGraphService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(userId);
-        return contentGraphService.GetPostDetailAsync(userId, postId, cancellationToken);
+        var viewerId = trustedCaller.RequireUserId();
+        return contentGraphService.GetPostDetailAsync(viewerId, postId, cancellationToken);
     }
 
-    public Task<IReadOnlyList<PostDetailResult>> GetPostDetailsAsync(
-        long userId,
+    public Task<IReadOnlyList<IHomePostResult>> GetPostDetailsAsync(
         IReadOnlyList<long> postIds,
         [Service] IContentGraphService contentGraphService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(userId);
-        return contentGraphService.GetPostDetailsAsync(userId, postIds, cancellationToken);
+        var viewerId = trustedCaller.RequireUserId();
+        return contentGraphService.GetPostDetailsAsync(viewerId, postIds, cancellationToken);
     }
 
     public Task<HomeStoryPageResult> GetHomeStoriesAsync(

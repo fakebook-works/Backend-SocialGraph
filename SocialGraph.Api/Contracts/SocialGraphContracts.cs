@@ -105,20 +105,44 @@ public sealed record ContentResult(
     long AuthorId,
     IReadOnlyList<MediaResult> Media);
 
-public sealed record PostViewerRelationResult(
-    bool CanFollow,
-    bool? CanJoin);
+[UnionType("HomePost")]
+public interface IHomePostResult;
 
-public sealed record PostDetailResult(
+[GraphQLName("FeedPostDetail")]
+public sealed record FeedPostDetailResult(
     long Id,
     short Type,
     string Content,
     int Privacy,
     string Create,
-    UserSummaryResult Author,
-    GroupSummaryResult? Group,
-    PostViewerRelationResult ViewerRelation,
-    IReadOnlyList<MediaResult> Media);
+    PostAuthorResult Author,
+    IReadOnlyList<MediaResult> Media) : IHomePostResult;
+
+[GraphQLName("GroupPostDetail")]
+public sealed record GroupPostDetailResult(
+    long Id,
+    short Type,
+    string Content,
+    int Privacy,
+    string Create,
+    PostAuthorResult Author,
+    PostGroupResult Group,
+    IReadOnlyList<MediaResult> Media) : IHomePostResult;
+
+[GraphQLName("PostAuthor")]
+public sealed record PostAuthorResult(
+    long Id,
+    string Name,
+    string Avatar,
+    bool IsVerified,
+    bool CanFollow);
+
+[GraphQLName("PostGroup")]
+public sealed record PostGroupResult(
+    long Id,
+    string Name,
+    string Avatar,
+    bool CanJoin);
 
 public sealed record UserSummaryResult(
     long Id,

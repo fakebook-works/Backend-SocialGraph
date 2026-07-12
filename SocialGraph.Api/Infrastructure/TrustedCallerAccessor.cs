@@ -7,6 +7,7 @@ using HotChocolate;
 
 public interface ITrustedCallerAccessor
 {
+    long RequireUserId();
     long RequireUserId(long requestedUserId);
 }
 
@@ -25,7 +26,7 @@ public sealed class TrustedCallerAccessor : ITrustedCallerAccessor
         _configuration = configuration;
     }
 
-    public long RequireUserId(long requestedUserId)
+    public long RequireUserId()
     {
         var context = _httpContextAccessor.HttpContext ??
             throw Error("UNAUTHENTICATED", "Trusted caller context is unavailable.");
@@ -52,6 +53,12 @@ public sealed class TrustedCallerAccessor : ITrustedCallerAccessor
             throw Error("UNAUTHENTICATED", "A valid trusted user ID is required.");
         }
 
+        return userId;
+    }
+
+    public long RequireUserId(long requestedUserId)
+    {
+        var userId = RequireUserId();
         if (requestedUserId != userId)
         {
             throw Error("FORBIDDEN", "The requested user does not match the authenticated user.");
