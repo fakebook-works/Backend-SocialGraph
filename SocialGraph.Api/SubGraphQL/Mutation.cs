@@ -2,6 +2,7 @@
 
 using HotChocolate;
 using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
 
 public class Mutation
@@ -219,27 +220,54 @@ public class Mutation
         return contentGraphService.CreateCommentAsync(input, cancellationToken);
     }
 
+    [GraphQLDeprecated("Use createNormalStory.")]
+    public async Task<ContentResult> CreateStoryAsync(
+        CreateStoryInput input,
+        [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(input.AuthorId);
+        var story = await contentGraphService.CreateNormalStoryAsync(
+            new CreateNormalStoryInput(input.AuthorId, input.Content, input.Media),
+            cancellationToken);
+        return new ContentResult(
+            story.Id,
+            GraphObjectType.Story,
+            story.Content,
+            0,
+            story.Create,
+            input.AuthorId,
+            story.Media);
+    }
+
     public Task<NormalStoryResult> CreateNormalStoryAsync(
         CreateNormalStoryInput input,
         [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(input.AuthorId);
         return contentGraphService.CreateNormalStoryAsync(input, cancellationToken);
     }
 
     public Task<IHomeStoryResult> CreateShareStoryAsync(
         CreateShareStoryInput input,
         [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(input.AuthorId);
         return contentGraphService.CreateShareStoryAsync(input, cancellationToken);
     }
 
     public Task<DeleteStoryPayload> DeleteStoryAsync(
         DeleteStoryInput input,
         [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(input.AuthorId);
         return contentGraphService.DeleteStoryAsync(input, cancellationToken);
     }
 

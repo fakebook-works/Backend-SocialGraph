@@ -4,13 +4,25 @@ File nay liet ke tat ca API hien co cua SocialGraph, gom GraphQL va REST interna
 
 Luu y ve ten GraphQL: HotChocolate thuong bo tien to `Get` va hau to `Async`, sau do camelCase ten field. Vi du `GetProfileAsync` thanh `profile`, `CreateUserAsync` thanh `createUser`. Khi schema thay doi, export SDL tu runtime HotChocolate va compose lai `gateway.far`; khong viet schema Gateway bang tay.
 
-Gateway hien chi public SocialGraph `createUser`. Cac query va mutation SocialGraph con lai dang `@internal` cho den khi authorization duoc implement.
+Gateway hien chi public SocialGraph `createUser`. Story authorization da duoc implement trong subgraph, nhung Gateway source schema/extensions va `gateway.far` hien tai chua duoc refresh de public cac Story field. Cac business field con lai van `@internal` cho den khi co authorization rieng.
 
 ## 1. Endpoint Tong Quan
 
 - GraphQL: `POST /graphql`
 - REST Recommendation: `GET /internal/recommendation/post-candidates`, `GET /internal/recommendation/reel-candidates`
 - REST Payment: `PUT /internal/users/{userId}/verify`
+- REST Story maintenance: `DELETE /internal/stories/expired`
+
+### Trusted caller cho Story
+
+Tat ca `homeStories`, `myStories`, `createStory`, `createNormalStory`, `createShareStory`, `deleteStory` yeu cau:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-User-Id: <authenticated user id>
+```
+
+`userId`/`authorId` trong GraphQL phai trung `X-User-Id`. Gateway phai strip header client tu gui, validate session, sau do generate trusted headers. Missing/invalid user ID tra GraphQL code `UNAUTHENTICATED`; sai secret hoac ID mismatch tra `FORBIDDEN`; secret server chua cau hinh hop le tra `INTERNAL_AUTH_NOT_CONFIGURED`.
 
 ## 2. Common Types
 
@@ -139,7 +151,7 @@ Feed post co type `2`; group post co type `3`. Voi group post, `privacy` trong r
 
 ### HomeStoryPageResult
 
-Output cua `homeStories` va `myStories`:
+Output page cua `homeStories` (`myStories` tra truc tiep mot bucket trong `items`):
 
 ```json
 {
@@ -189,7 +201,7 @@ union HomeStory =
 - `FeedPostShareStory`: story share feed post public.
 - `ReelShareStory`: story share reel.
 
-Story share group post da bi chan, ke ca group public. Neu can share group post sau nay thi phai them type moi va can than voi privacy group.
+Story share group post da bi chan, ke ca group public. Feed-post source phai public luc tao va van public luc doc; source bi private/xoa thi share Story bi omit. Neu can share group post sau nay thi phai them type moi va can than voi privacy group.
 
 Frontend phai query bang `__typename` va inline fragment:
 
@@ -505,21 +517,14 @@ Input:
 
 Logic:
 
-1. Lay author co the xem story tu `friend(0)` va `followed(1)` cua user.
-2. Loai chinh user khoi danh sach author.
-3. Query story type `5` cua cac author do qua `authored(5)`.
-4. Voi tung story:
-   - neu `expire <= now` hoac expire invalid thi xoa story;
-   - neu con han thi dua vao bucket cua author.
-5. Khi xoa story het han:
-   - lay media qua `story --contained(20)--> media`;
-   - xoa moi association lien quan story;
-   - xoa story object;
-   - xoa moi media object gan truc tiep vao story va association lien quan media.
-6. Group story con han theo author.
-7. Sort author bucket theo `latestCreate desc, authorId desc`.
-8. Apply cursor theo author bucket, khong cursor theo tung story.
-9. Voi moi author bucket duoc chon, tra author summary va toan bo story con han. Moi story tra theo union `NormalStory`, `FeedPostShareStory`, hoac `ReelShareStory`.
+1. Validate trusted Gateway secret/user ID va bat buoc argument `userId` match authenticated user.
+2. Lay author co the xem story tu `friend(0)` va `followed(1)` cua user; loai chinh user.
+3. Query trong DB de lay latest active Story ID theo author, sort bucket `latestCreate desc, authorId desc`, sau do apply cursor.
+4. Chi load toan bo story cua cac author nam trong page da chon; story `expire <= now` hoac expire invalid bi filter, khong bi xoa.
+5. Batch load share/contained associations, source object, source author/media va bucket author; khong retrieve tung object theo N+1.
+6. Voi story share, recheck source hien tai: feed post phai van public, reel phai ton tai. Source bi xoa/private thi omit story share.
+7. Tra author summary va cac story visible theo union `NormalStory`, `FeedPostShareStory`, hoac `ReelShareStory`.
+8. Cursor la author bucket, khong cursor theo tung story. Query nay side-effect free.
 
 External calls: khong co.
 
@@ -533,14 +538,13 @@ Input:
 
 Logic:
 
-1. Lay user summary cua chinh `userId`.
-2. Query story type `5` do user nay tao qua `user --authored(5)--> story`.
-3. Voi tung story:
-   - neu `expire <= now` hoac expire invalid thi xoa story va media temporary gan truc tiep vao story;
-   - neu con han thi dua vao bucket cua user.
-4. Sort story con han theo `create asc`.
-5. `latestCreate` la `create` lon nhat trong bucket.
-6. Neu user khong ton tai hoac khong con story hop le thi tra `null`.
+1. Validate trusted Gateway secret/user ID va bat buoc argument `userId` match authenticated user.
+2. Lay user summary cua chinh `userId`.
+3. Query story type `5` do user nay tao qua `user --authored(5)--> story`.
+4. Filter story het han/expire invalid ma khong xoa data; batch build normal/share result.
+5. Recheck source cua story share; source bi xoa/private thi omit story share.
+6. Sort story con han theo `create asc`; `latestCreate` la create lon nhat.
+7. Neu user khong ton tai hoac khong con story visible thi tra `null`. Query nay side-effect free.
 
 External calls: khong co.
 
@@ -1273,6 +1277,10 @@ External calls:
 
 Return: `ContentResult`
 
+### createStory(input) - deprecated
+
+Compatibility mutation cua schema cu, input `{ authorId, content, media }`, return `ContentResult`. Resolver validate trusted caller roi map sang `createNormalStory`. Client moi khong nen dung field nay.
+
 ### createNormalStory(input)
 
 Input:
@@ -1292,13 +1300,14 @@ Input:
 
 Logic:
 
-1. Tao story object type `5` voi `{ content, create, expire }`.
-2. `expire = create + 1 day`.
-3. Neu input co `media`, tao media object tu `{ type, url }`.
-4. Attach toi da mot media bang `story --contained(20)--> media`.
-5. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
-6. Tao `author --authored(5)--> story`.
-7. Return story thuong theo type `NormalStory`.
+1. Validate trusted Gateway secret/user ID; `input.authorId` phai match authenticated user.
+2. Tao story object type `5` voi `{ content, create, expire }`.
+3. `expire = create + 1 day`.
+4. Neu input co `media`, tao media object tu `{ type, url }`.
+5. Attach toi da mot media bang `story --contained(20)--> media`.
+6. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
+7. Tao `author --authored(5)--> story`.
+8. Return story thuong theo type `NormalStory`.
 
 External calls: khong co.
 
@@ -1320,18 +1329,21 @@ Input:
 
 Logic:
 
-1. Validate `sharedSourceId`:
+1. Validate trusted Gateway secret/user ID; `input.authorId` phai match authenticated user.
+2. Validate `sharedSourceId` truoc khi tao bat ky story object nao:
    - feed post type `2` phai co `privacy = 0`;
    - reel type `4` duoc phep share;
    - group post type `3` va cac object khac bi reject.
-2. Tao story object type `5` voi `{ content, create, expire }`.
-3. `expire = create + 1 day`.
-4. Tao `author --authored(5)--> story`.
-5. Tao `story --share(8)--> sharedSource`.
-6. Return story share theo union `HomeStory`:
+3. Tao story object type `5` voi `{ content, create, expire }`.
+4. `expire = create + 1 day`.
+5. Tao `author --authored(5)--> story`.
+6. Tao `story --share(8)--> sharedSource`.
+7. Return story share theo union `HomeStory`:
    - `FeedPostShareStory` neu source la feed post public;
    - `ReelShareStory` neu source la reel.
-7. Story share khong tao media rieng. Preview media lay tu source goc va chi lay media dau tien.
+8. Story share khong tao media rieng. Preview media lay tu source goc va chi lay media dau tien.
+
+Khi doc sau nay, source duoc recheck. Feed post chuyen private hoac source bi xoa thi story share bi omit khoi `homeStories`/`myStories`.
 
 External calls: khong co.
 
@@ -1352,14 +1364,14 @@ Input:
 
 Logic:
 
-1. Retrieve `storyId`.
-2. Neu object khong ton tai hoac khong phai type `5` thi tra payload `success = false`.
-3. Lay author cua story qua `story --authored_by(7)--> author`.
-4. Neu author khac `authorId` thi tra payload `success = false`.
-5. Lay media temporary qua `story --contained(20)--> media`.
-6. Xoa moi association lien quan story.
-7. Xoa story object.
-8. Xoa moi media temporary gan truc tiep vao story va association lien quan media.
+1. Validate trusted Gateway secret/user ID; `input.authorId` phai match authenticated user.
+2. Retrieve `storyId`.
+3. Neu object khong ton tai hoac khong phai type `5` thi tra payload `success = false`.
+4. Lay author cua story qua `story --authored_by(6)--> author`.
+5. Neu author khac `authorId` thi tra payload `success = false`.
+6. Lay media qua `story --contained(20)--> media`.
+7. Bao ve media co `owned(22)` hoac dang duoc content khac `contained(20)` reference.
+8. Trong mot relational DB transaction, xoa association cua story, story object va chi cac temporary media khong duoc bao ve.
 9. Khong xoa source goc neu story la story share.
 
 External calls: khong co.
@@ -1638,6 +1650,31 @@ Return:
 - `200 OK` voi `UserProfileResult`
 - `404 Not Found` neu user khong ton tai
 
+### DELETE /internal/stories/expired
+
+Caller: operator/scheduler noi bo. Background worker cua SocialGraph cung goi cung service logic.
+
+Query:
+
+- `limit: int = 100`, clamp ve `1..500`.
+
+Logic:
+
+1. Lay batch Story cu nhat theo Snowflake ID.
+2. Xoa Story co `expire <= now` hoac expire invalid; dung khi gap Story dau tien con han vi Snowflake ID tang theo thoi gian tao.
+3. Xoa associations va temporary media trong transaction.
+4. Giu media co owner hoac dang duoc content khac reference.
+
+Return: `200 OK`
+
+```json
+{
+  "deleted": 12
+}
+```
+
+Background worker doc `StoryCleanup:IntervalMinutes` (default `15`, clamp `1..1440`) va `StoryCleanup:BatchSize` (default `100`, clamp `1..500`). Query Story khong trigger endpoint/logic cleanup.
+
 ## 7. API Khong Nen Dung Truc Tiep Tu Frontend
 
 Nhung API sau nen coi la debug/internal cho service owner:
@@ -1650,5 +1687,6 @@ Nhung API sau nen coi la debug/internal cho service owner:
 - `deleteAllAssociation`
 - REST `/internal/recommendation/*`
 - REST `/internal/users/{userId}/verify`
+- REST `/internal/stories/expired`
 
-Frontend phai di qua Gateway GraphQL. Hien frontend chi dung duoc `createUser` cua SocialGraph; cac API business user/group/content/relation khac chua duoc public qua Gateway va khong duoc goi truc tiep tu Internet. Payment/Billing chi goi REST verify sau khi thanh toan thanh cong.
+Frontend phai di qua Gateway GraphQL. Hien frontend chi dung duoc `createUser` cua SocialGraph; Story fields da co authorization o subgraph nhung van can export/compose Gateway truoc khi public. Cac API business user/group/content/relation khac chua duoc public qua Gateway va khong duoc goi truc tiep tu Internet. Payment/Billing chi goi REST verify sau khi thanh toan thanh cong.

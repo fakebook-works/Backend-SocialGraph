@@ -2,6 +2,7 @@
 
 using HotChocolate;
 using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
 
 public class Query
@@ -63,16 +64,20 @@ public class Query
         int limit,
         string? cursor,
         [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(userId);
         return contentGraphService.GetHomeStoriesAsync(userId, limit, cursor, cancellationToken);
     }
 
     public Task<HomeStoryBucketResult?> GetMyStoriesAsync(
         long userId,
         [Service] IContentGraphService contentGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        trustedCaller.RequireUserId(userId);
         return contentGraphService.GetMyStoriesAsync(userId, cancellationToken);
     }
 

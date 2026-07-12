@@ -129,8 +129,11 @@ gọi `PUT /internal/search/indexes/{postId}` và `PUT /internal/recommendation/
 gọi `PUT /internal/search/indexes/{postId}` và `PUT /internal/recommendation/posts/{postId}/embedding`
 - sửa post (privacy) 
 - xoá post (xoá post kèm asso, sau đó gọi DELETE embedding và Search index theo path chứa post id)
-- tạo story
-- xoá story
+- tạo normal story (tối đa một media temporary, chỉ tạo `contained(20)`, không tạo `owned(22)`)
+- tạo share story từ feed post public hoặc reel; kiểm tra source trước khi tạo và kiểm tra lại privacy/source existence mỗi lần đọc
+- xoá story chỉ khi `authorId` khớp authenticated user và đúng author; xoá trong transaction, giữ media owned hoặc đang được content khác reference
+- mọi query/mutation story yêu cầu trusted `X-Gateway-Secret` + `X-User-Id`; `userId`/`authorId` GraphQL phải khớp header
+- query story chỉ filter expired/invalid story, không xoá dữ liệu; background worker và `DELETE /internal/stories/expired` chịu trách nhiệm cleanup theo batch
 - tạo reel
 - xoá reel
 - xem story, reel
@@ -145,7 +148,7 @@ gọi `PUT /internal/search/indexes/{postId}` và `PUT /internal/recommendation/
 
 
 Query
-- lấy Story
+- lấy Story theo author bucket bằng `homeStories` (friend/followed, cursor theo bucket) và `myStories`; load source/author/media theo batch, không N+1
 - lấy profile
 
 - lấy list reel đã lưu

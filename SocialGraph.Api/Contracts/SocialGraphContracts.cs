@@ -50,6 +50,8 @@ public sealed record UpdatePostInput(long Id, int Privacy);
 
 public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
 
+public sealed record CreateStoryInput(long AuthorId, string Content, MediaInput? Media);
+
 public sealed record CreateNormalStoryInput(long AuthorId, string Content, MediaInput? Media);
 
 public sealed record CreateShareStoryInput(long AuthorId, string Content, long SharedSourceId);
@@ -57,6 +59,8 @@ public sealed record CreateShareStoryInput(long AuthorId, string Content, long S
 public sealed record DeleteStoryInput(long AuthorId, long StoryId);
 
 public sealed record DeleteStoryPayload(bool Success, string? Message = null);
+
+public sealed record StoryCleanupPayload(int Deleted);
 
 public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media);
 

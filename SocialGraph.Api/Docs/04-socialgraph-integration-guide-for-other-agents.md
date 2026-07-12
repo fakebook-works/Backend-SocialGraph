@@ -24,6 +24,7 @@ REST internal:
 - `/internal/recommendation/post-candidates`
 - `/internal/recommendation/reel-candidates`
 - `/internal/users/{userId}/verify`
+- `DELETE /internal/stories/expired`
 
 ## 2. Service boundary
 
@@ -61,9 +62,11 @@ Search/Recommendation/Messenger/Notification khong tu tao object ID cho cac obje
 
 Feed post la object type `2` va co `privacy` rieng trong post data. Group post la object type `3`, khong co `privacy` rieng; khi doc/hien thi thi privacy lay tu group chua post qua `published_in(10)`. Service khac nen khong gop 2 loai post thanh mot type.
 
+Story chi share feed post public hoac reel. SocialGraph kiem tra privacy feed post luc tao va moi lan doc; neu source bi chuyen sang private hoac bi xoa thi story share khong duoc return.
+
 ## 4. GraphQL operation chinh cho Gateway
 
-Gateway hien compose SocialGraph nhung chi expose public mutation `createUser`. Cac query va mutation SocialGraph khac dang duoc mark `@internal` trong Gateway cho den khi authorization duoc implement.
+Gateway hien compose SocialGraph nhung chi expose public mutation `createUser`. Story authorization da co trong subgraph, nhung source schema/extensions va `gateway.far` hien tai chua duoc refresh de public Story. Cac field business khac van `@internal` cho den khi co authorization rieng.
 
 Ten GraphQL field co the duoc HotChocolate camelCase tu method C#:
 
@@ -127,7 +130,12 @@ Query `profile(userId)` return:
 - `createFeedPost(input)`
 - `createGroupPost(input)` khong nhan `privacy`; group post dung privacy cua group.
 - `createComment(input)`
-- `createStory(input)`
+- `homeStories(userId, limit, cursor)`
+- `myStories(userId)`
+- `createNormalStory(input)`
+- `createShareStory(input)`
+- `deleteStory(input)`
+- `createStory(input)` chi la compatibility mutation da deprecated
 - `createReel(input)`
 - `sharePost(input)`
 - `like(userId, targetId)`
@@ -136,6 +144,17 @@ Query `profile(userId)` return:
 - `tag(postId, userId)`
 - `mention(sourceId, userId)`
 - `content(contentId)`
+
+Story query/mutation bat buoc co hai header do Gateway tao sau khi validate session:
+
+```http
+X-Gateway-Secret: <shared secret at least 32 bytes>
+X-User-Id: <authenticated user id>
+```
+
+Gateway phai xoa header cung ten do client gui len. `userId`/`authorId` trong GraphQL phai trung `X-User-Id`; SocialGraph fail closed neu secret/user header thieu, sai hoac mismatch.
+
+`homeStories` page theo author bucket (`limit` clamp `1..50`), con `myStories` tra mot bucket. Ca hai chi filter story het han, khong xoa data. Cleanup chay qua background worker hoac `DELETE /internal/stories/expired?limit=100` voi `X-Gateway-Secret`.
 
 ### Relations
 
@@ -365,11 +384,13 @@ Post/story/reel flow:
 
 1. Client upload file sang media storage/service ben ngoai.
 2. Gateway goi `createFeedPost`/`createGroupPost` voi list `MediaInput { type, url }`. Caller khong truyen media id.
-3. Gateway goi `createStory`/`createReel` voi toi da mot `MediaInput { type, url }`.
+3. Gateway goi `createNormalStory`/`createReel` voi toi da mot `MediaInput { type, url }`; story share dung `createShareStory` va khong tao media rieng.
 4. SocialGraph tao media object type `7` cho tung URL.
 5. SocialGraph tao association:
    - `authorId --owned(22)--> mediaId`
    - `contentId --contained(20)--> mediaId`
+
+Ngoai le Story: media tao rieng cho normal story chi co `storyId --contained(20)--> mediaId` va duoc coi la temporary; khong tao `owned(22)`. Khi story bi xoa/cleanup, media temporary cung bi xoa, nhung media owned hoac dang duoc content khac reference se duoc giu lai.
 
 Avatar flow:
 
@@ -394,6 +415,8 @@ Background flow:
 - Friend request pending hien nam o Notification domain, khong co table pending trong SocialGraph.
 - Candidate endpoint la candidate pool, khong phai final feed.
 - Verify/tich xanh chi duoc cap nhat qua REST internal cua SocialGraph; service khac khong doc hay ghi truc tiep DB SocialGraph.
+- Story reads side-effect free; operational cleanup phai dung background worker hoac authenticated maintenance endpoint.
+- Khi compose Story vao Gateway, khong public legacy `createStory`; uu tien `createNormalStory`, `createShareStory`, `deleteStory`, `homeStories`, `myStories` va forward trusted identity headers.
 
 ## 13. Checklist khi code service khac
 

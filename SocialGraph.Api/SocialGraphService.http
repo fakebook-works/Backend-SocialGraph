@@ -1,6 +1,7 @@
 @host = http://localhost:5223
 @internalSecret = replace-with-at-least-32-bytes
 @userId = 9000000000000001
+@storyId = 9000000000000002
 
 POST {{host}}/graphql
 Content-Type: application/json
@@ -22,6 +23,61 @@ X-Correlation-ID: manual-register-test
 
 ###
 
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-create-story-test
+
+{
+  "query": "mutation CreateNormalStory($input: CreateNormalStoryInput!) { createNormalStory(input: $input) { id content create media { id type url } } }",
+  "variables": {
+    "input": {
+      "authorId": {{userId}},
+      "content": "Story text",
+      "media": {
+        "type": 0,
+        "url": "https://cdn.local/story.jpg"
+      }
+    }
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-my-stories-test
+
+{
+  "query": "query MyStories($userId: Long!) { myStories(userId: $userId) { author { id name avatar isVerified } latestCreate stories { __typename ... on NormalStory { id content create media { id type url } } ... on FeedPostShareStory { id content create sharedSource { id content } } ... on ReelShareStory { id content create sharedSource { id content } } } } }",
+  "variables": {
+    "userId": {{userId}}
+  }
+}
+
+###
+
+POST {{host}}/graphql
+Content-Type: application/json
+X-Gateway-Secret: {{internalSecret}}
+X-User-Id: {{userId}}
+X-Correlation-ID: manual-delete-story-test
+
+{
+  "query": "mutation DeleteStory($input: DeleteStoryInput!) { deleteStory(input: $input) { success message } }",
+  "variables": {
+    "input": {
+      "authorId": {{userId}},
+      "storyId": {{storyId}}
+    }
+  }
+}
+
+###
+
 GET {{host}}/internal/recommendation/post-candidates?userId={{userId}}&limit=20
 X-Gateway-Secret: {{internalSecret}}
 X-Correlation-ID: manual-candidate-test
@@ -36,3 +92,9 @@ X-Correlation-ID: manual-verify-test
 {
   "expiresAt": "2026-08-10T00:00:00Z"
 }
+
+###
+
+DELETE {{host}}/internal/stories/expired?limit=100
+X-Gateway-Secret: {{internalSecret}}
+X-Correlation-ID: manual-story-cleanup-test

@@ -47,9 +47,11 @@ SocialGraph.Api/
   Infrastructure/
     CorrelationIdMiddleware.cs
     InternalApiAuthenticationMiddleware.cs
+    TrustedCallerAccessor.cs
   RestAPI/
     RecommendationController.cs
     PaymentController.cs
+    StoryMaintenanceController.cs
   Service/
     GraphConstants.cs
     GraphJson.cs
@@ -65,6 +67,7 @@ SocialGraph.Api/
     GroupGraphService.cs
     IContentGraphService.cs
     ContentGraphService.cs
+    StoryCleanupBackgroundService.cs
     ICandidateService.cs
     CandidateService.cs
     IExternalServiceClient.cs
@@ -95,6 +98,8 @@ Dang ky dependency injection va endpoint:
   - `IGroupGraphService -> GroupGraphService`
   - `IContentGraphService -> ContentGraphService`
   - `ICandidateService -> CandidateService`
+  - `ITrustedCallerAccessor -> TrustedCallerAccessor`
+- `StoryCleanupBackgroundService`: cleanup story het han theo batch, doc interval/batch size tu config.
 - GraphQL endpoint: `/graphql`
 - REST controller endpoint: map qua `MapControllers()`.
 - `CorrelationIdMiddleware`: preserve/tao `X-Correlation-ID`.
@@ -123,6 +128,8 @@ Dang co:
 - `InternalServices:Search:BaseUrl`: Search base URL, mac dinh local `http://localhost:5191`.
 - `InternalServices:Recommendation:BaseUrl`: Recommendation base URL, mac dinh local `http://localhost:8000`.
 - `InternalServices:TimeoutSeconds`: timeout outbound call, mac dinh 10 giay va clamp trong khoang 1..60.
+- `StoryCleanup:IntervalMinutes`: chu ky cleanup story, mac dinh 15 phut, clamp `1..1440`.
+- `StoryCleanup:BatchSize`: so story toi da moi lan cleanup, mac dinh 100, clamp `1..500`.
 - `ExternalServices:*`: URL cac service legacy/khac nhu Auth delete, Notification va Messenger.
 
 Search va Recommendation khong cau hinh tung operation URL. Client ghep canonical path tu base URL. Secret phai trung voi Auth, Search, Recommendation va caller cua REST internal SocialGraph.
@@ -321,7 +328,28 @@ Chi dung cho feed post. Group post khong co privacy rieng.
 - `Content: string`
 - `Media?: MediaInput`
 
+Contract legacy cho mutation `createStory`; field nay da deprecated va map sang `createNormalStory`.
+
+#### CreateNormalStoryInput
+
+- `AuthorId: long`
+- `Content: string`
+- `Media?: MediaInput`
+
 Story expire tu tinh bang `create + 1 day`, frontend khong truyen expire. Story chi cho toi da 1 media.
+
+#### CreateShareStoryInput
+
+- `AuthorId: long`
+- `Content: string`
+- `SharedSourceId: long`
+
+Chi cho share feed post public type `2` hoac reel type `4`; group post bi reject.
+
+#### DeleteStoryInput
+
+- `AuthorId: long`
+- `StoryId: long`
 
 #### CreateReelInput
 
@@ -396,6 +424,14 @@ Dung cho association pagination.
 - `Create`
 - `AuthorId`
 - `Media`
+
+#### HomeStory results
+
+- `HomeStory` la union gom `NormalStory`, `FeedPostShareStory`, `ReelShareStory`.
+- `HomeStoryBucketResult`: `{ author, latestCreate, stories }`, group cac story con han theo author.
+- `HomeStoryPageResult`: `{ items, endCursor, hasNextPage }`; `limit` la so author bucket.
+- `DeleteStoryPayload`: `{ success, message }`.
+- `StoryCleanupPayload`: `{ deleted }`, dung cho REST maintenance.
 
 #### CandidateItemResult
 
@@ -845,14 +881,35 @@ Logic:
 5. Neu target author ton tai va khac commenter thi goi Notification action `comment`.
 6. Tra `ContentResult`.
 
-#### CreateStoryAsync(CreateStoryInput input)
+#### CreateNormalStoryAsync(CreateNormalStoryInput input)
 
 Logic:
 
 1. Tao story object type `5`: `{content, create, expire}` voi `expire = create + 1 day`.
-2. Attach toi da 1 media neu co.
-3. Tao authored association.
-4. Tra result.
+2. Attach toi da 1 temporary media bang `contained(20)` neu co; khong tao `owned(22)`.
+3. Tao `author --authored(5)--> story` va inverse `authored_by(6)`.
+4. Tra `NormalStory`.
+
+#### CreateShareStoryAsync(CreateShareStoryInput input)
+
+1. Validate source truoc khi tao story: feed post phai public, reel duoc phep, group post/object khac bi reject.
+2. Tao story va authored association.
+3. Tao `story --share(8)--> source`.
+4. Tra `FeedPostShareStory` hoac `ReelShareStory`.
+
+#### GetHomeStoriesAsync / GetMyStoriesAsync
+
+- Chi lay story con han; query doc khong xoa object hay media.
+- Home lay author tu friend/followed, group theo author, sort bucket bang `latestCreate desc, authorId desc` va cursor theo bucket.
+- Data story, share source, author va media duoc load theo batch cho page author da chon, tranh N+1.
+- Privacy cua source share duoc kiem tra lai moi lan doc. Source bi xoa/private thi story share khong duoc return.
+
+#### DeleteStoryAsync / CleanupExpiredStoriesAsync
+
+- Delete chi cho dung author va chi nhan object type `5`.
+- Cleanup clamp batch `1..500`; background service goi dinh ky, REST internal co the trigger thu cong.
+- Xoa associations, story va temporary media trong mot transaction tren relational provider.
+- Media co `owned(22)` hoac dang duoc content khac `contained(20)` se duoc giu lai.
 
 #### CreateReelAsync(CreateReelInput input)
 
@@ -1016,6 +1073,19 @@ Return:
 
 - `CandidateItemResult[]`.
 
+#### homeStories(userId, limit, cursor)
+
+- Return `HomeStoryPageResult`.
+- `limit` clamp `1..50` va tinh theo author bucket, khong theo tung story.
+- Cursor la base64 JSON cua `(latestCreate, authorId)`.
+
+#### myStories(userId)
+
+- Return `HomeStoryBucketResult?` cua user hien tai.
+- Story con han sort theo `create asc`.
+
+Hai query Story bat buoc co trusted `X-Gateway-Secret`, `X-User-Id`, va argument `userId` phai trung voi header.
+
 ### Mutation
 
 Core/debug:
@@ -1063,7 +1133,10 @@ Content:
 - `updatePost(input)`
 - `deleteContent(contentId)`
 - `createComment(input)`
-- `createStory(input)`
+- `createNormalStory(input)`
+- `createShareStory(input)`
+- `deleteStory(input)`
+- `createStory(input)` (legacy, deprecated; map sang `createNormalStory`)
 - `createReel(input)`
 - `sharePost(input)`
 - `like(userId, targetId)`
@@ -1074,6 +1147,8 @@ Content:
 - `tag(postId, userId)`
 - `mention(sourceId, userId)`
 
+Tat ca query/mutation Story kiem tra `X-Gateway-Secret` va `X-User-Id` tai resolver. `authorId`/`userId` trong input phai trung authenticated user ID; missing user tra `UNAUTHENTICATED`, sai secret hoac mismatch tra `FORBIDDEN`. Gateway phai strip trusted header do client gui va tu tao header sau khi validate session.
+
 ## 9. REST internal API
 
 Moi endpoint `/internal/*` yeu cau `X-Gateway-Secret`. Secret server phai co it nhat 32 byte; missing/wrong secret tra `403`, chua cau hinh hop le tra `503`. Middleware preserve hoac tao `X-Correlation-ID` va tra ID trong response.
@@ -1082,6 +1157,7 @@ Files:
 
 - `RestAPI/RecommendationController.cs`
 - `RestAPI/PaymentController.cs`
+- `RestAPI/StoryMaintenanceController.cs`
 
 Route prefix recommendation: `/internal/recommendation`.
 
@@ -1129,6 +1205,24 @@ Logic:
 
 Field `verify` khong sua duoc qua GraphQL `updateUser` hay raw `updateObject`.
 
+### DELETE /internal/stories/expired
+
+Endpoint maintenance de cleanup story het han/expire invalid, dung chung logic voi background worker.
+
+Query:
+
+- `limit: int = 100`, clamp `1..500`.
+
+Return:
+
+```json
+{
+  "deleted": 12
+}
+```
+
+Query `homeStories`/`myStories` khong goi cleanup nay va khong co write side effect.
+
 ## 10. Redis cache
 
 ### Object cache
@@ -1161,6 +1255,8 @@ Marker can thiet vi Redis khong giu sorted set rong. Khong co marker thi coi nhu
 - SocialGraph external calls khong dam bao transaction distributed. Neu Auth/Search/Recommend loi, graph local van co the da ghi thanh cong.
 - Friend request hien chi tao notification, chua co pending table trong SocialGraph.
 - Privacy rule hien moi luu field `privacy`, chua enforce day du tren query/candidate ngoai fallback recent public.
+- Story la phan da enforce caller identity: Gateway phai forward trusted secret/user header va argument user phai match header. Cac business field khac van can authorization rieng truoc khi public.
+- Story share source privacy duoc recheck khi doc; cleanup expired chay nen, khong nam trong query path.
 - Payment/Billing service khong ghi DB SocialGraph truc tiep; khi thanh toan tich xanh thanh cong thi goi REST internal `PUT /internal/users/{userId}/verify`.
 - Recommendation service nen coi candidate cua SocialGraph la input pool, khong phai final feed.
 - Notification service phai hieu action type giong `ExternalNotificationAction`.
