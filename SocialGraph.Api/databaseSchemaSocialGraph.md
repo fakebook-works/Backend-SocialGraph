@@ -58,6 +58,8 @@ những trường đánh dấu 1 là có thể sửa đổi, còn lại thì ko,
 -- 23 blocked (user->user) -- 23 24
 -- 24 blocked_by (user<-user)
 
+-- 25 visited (user->group)
+
 -- ** Social Graph table ** --
 ------------------------------
 CREATE TABLE Objects (

@@ -456,6 +456,157 @@ Frontend render:
 2. Render tiep `homeStories.items`.
 3. Khi can load more story nguoi khac, goi lai `homeStories` voi `cursor = endCursor`; khong bat buoc goi lai `myStories`.
 
+## Chuc nang: Lay loi tat group / group vua truy cap
+
+Chuc nang nay dung association mot chieu:
+
+```text
+user --visited(25)--> group
+```
+
+Association `visited(25)` khong co inverse. Moi lan user vao group, frontend/gateway goi `recordGroupVisit`; service se upsert association va cap nhat `time`. Khi lay loi tat, service doc association theo `time desc`, nen group vua truy cap gan nhat nam dau list.
+
+### API: visitedGroups(userId, limit, cursor)
+
+GraphQL query:
+
+```graphql
+query VisitedGroups($userId: Long!, $limit: Int!, $cursor: String) {
+  visitedGroups(userId: $userId, limit: $limit, cursor: $cursor) {
+    items {
+      id
+      avatar
+      name
+    }
+    endCursor
+    hasNextPage
+  }
+}
+```
+
+Input:
+
+- `userId`: ID cua user dang dang nhap.
+- `limit`: so group can lay, service clamp theo `RetrieveAssociationAsync`, toi da `100`.
+- `cursor`: `null` cho page dau; page sau dung `endCursor` cua response page truoc.
+
+Logic ben trong:
+
+1. Gateway phai forward trusted header; service check `userId` request khop `X-User-Id`.
+2. Doc association `user --visited(25)--> group` bang `RetrieveAssociationAsync`.
+3. Association service tra item theo `time desc`, nen group moi truy cap nhat dung truoc.
+4. Voi tung `groupId`, retrieve object group type `1`.
+5. Bo qua group da bi xoa hoac object khong phai group.
+6. Neu group public `privacy = 0`, cho hien thi.
+7. Neu group private, chi hien thi khi user la `member(13)` hoac `admin(15)` cua group.
+8. Tra moi group voi 3 field toi thieu: `id`, `avatar`, `name`.
+9. Tra `endCursor` va `hasNextPage` theo cursor cua association page.
+
+External calls: khong co.
+
+Output:
+
+```json
+{
+  "items": [
+    {
+      "id": 456,
+      "avatar": "https://cdn.local/group-avatar.jpg",
+      "name": "Group name"
+    }
+  ],
+  "endCursor": "20",
+  "hasNextPage": true
+}
+```
+
+Goi tin frontend gui:
+
+```json
+{
+  "operationName": "VisitedGroups",
+  "query": "query VisitedGroups($userId: Long!, $limit: Int!, $cursor: String) { visitedGroups(userId: $userId, limit: $limit, cursor: $cursor) { items { id avatar name } endCursor hasNextPage } }",
+  "variables": {
+    "userId": 123,
+    "limit": 20,
+    "cursor": null
+  }
+}
+```
+
+### API: recordGroupVisit(userId, groupId)
+
+GraphQL mutation:
+
+```graphql
+mutation RecordGroupVisit($userId: Long!, $groupId: Long!) {
+  recordGroupVisit(userId: $userId, groupId: $groupId)
+}
+```
+
+Input:
+
+- `userId`: ID cua user dang dang nhap.
+- `groupId`: ID group user vua truy cap.
+
+Logic ben trong:
+
+1. Gateway phai forward trusted header; service check `userId` request khop `X-User-Id`.
+2. Retrieve `groupId`.
+3. Neu group khong ton tai hoac object khong phai type `1`, return `false`.
+4. Neu group public `privacy = 0`, cho ghi visited.
+5. Neu group private, chi cho ghi khi user la `member(13)` hoac `admin(15)`.
+6. Goi `AddAssociationAsync(userId, Visited(25), groupId)`.
+7. `AddAssociationAsync` dang upsert DB bang `ON CONFLICT DO UPDATE SET time = EXCLUDED.time`, nen neu association da ton tai thi chi cap nhat `time` moi.
+8. Vi `visited(25)` mot chieu va khong co inverse trong dictionary, service khong tao association nguoc.
+
+External calls: khong co.
+
+Output:
+
+```json
+true
+```
+
+Goi tin frontend gui:
+
+```json
+{
+  "operationName": "RecordGroupVisit",
+  "query": "mutation RecordGroupVisit($userId: Long!, $groupId: Long!) { recordGroupVisit(userId: $userId, groupId: $groupId) }",
+  "variables": {
+    "userId": 123,
+    "groupId": 456
+  }
+}
+```
+
+Goi tin de thuc hien chuc nang group vua truy cap:
+
+```json
+{
+  "whenOpenGroup": {
+    "operationName": "RecordGroupVisit",
+    "query": "mutation RecordGroupVisit($userId: Long!, $groupId: Long!) { recordGroupVisit(userId: $userId, groupId: $groupId) }",
+    "variables": {
+      "userId": 123,
+      "groupId": 456
+    }
+  },
+  "whenRenderShortcutList": {
+    "operationName": "VisitedGroups",
+    "query": "query VisitedGroups($userId: Long!, $limit: Int!, $cursor: String) { visitedGroups(userId: $userId, limit: $limit, cursor: $cursor) { items { id avatar name } endCursor hasNextPage } }",
+    "variables": {
+      "userId": 123,
+      "limit": 20,
+      "cursor": null
+    }
+  }
+}
+```
+
+Frontend khong gui ca object wrapper `whenOpenGroup/whenRenderShortcutList`; day chi la mo ta 2 thoi diem goi API. Khi user scroll/load more loi tat group, goi lai `visitedGroups` voi `cursor = endCursor`.
+
 ## Chuc nang: Them story
 
 Them story co 2 mode rieng:

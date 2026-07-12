@@ -1,18 +1,23 @@
 namespace SocialGraph.Api.Service;
 
+using Microsoft.EntityFrameworkCore;
 using SocialGraph.Api.Contracts;
+using SocialGraph.Api.Database;
 
 public sealed class GroupGraphService : IGroupGraphService
 {
+    private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
 
     public GroupGraphService(
+        MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient)
     {
+        _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
@@ -116,6 +121,66 @@ public sealed class GroupGraphService : IGroupGraphService
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
     }
 
+    public async Task<VisitedGroupPageResult> GetVisitedGroupsAsync(
+        long userId,
+        int limit,
+        string? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        var page = await _associationService.RetrieveAssociationAsync(
+            userId,
+            GraphAssociationType.Visited,
+            cursor,
+            limit,
+            cancellationToken);
+
+        var items = new List<VisitedGroupResult>(page.items.Count);
+        foreach (var edge in page.items)
+        {
+            var group = await _objectService.RetrieveObjectAsync(edge.id2, cancellationToken);
+            if (group is null || group.otype != GraphObjectType.Group)
+            {
+                continue;
+            }
+
+            if (!await CanViewGroupAsync(userId, group, cancellationToken))
+            {
+                continue;
+            }
+
+            var data = GraphJson.ParseObject(group.data);
+            items.Add(new VisitedGroupResult(
+                group.id,
+                GraphJson.String(data, "avatar"),
+                GraphJson.String(data, "name")));
+        }
+
+        return new VisitedGroupPageResult(items, page.nextCursor, page.nextCursor is not null);
+    }
+
+    public async Task<bool> RecordGroupVisitAsync(
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken = default)
+    {
+        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        if (group is null || group.otype != GraphObjectType.Group)
+        {
+            return false;
+        }
+
+        if (!await CanViewGroupAsync(userId, group, cancellationToken))
+        {
+            return false;
+        }
+
+        return await _associationService.AddAssociationAsync(
+            userId,
+            GraphAssociationType.Visited,
+            groupId,
+            cancellationToken);
+    }
+
     public Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
         return _associationService.AddAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken);
@@ -145,5 +210,25 @@ public sealed class GroupGraphService : IGroupGraphService
             cancellationToken);
 
         await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, media.id, cancellationToken);
+    }
+
+    private async Task<bool> CanViewGroupAsync(
+        long userId,
+        SocialGraphObjectResult group,
+        CancellationToken cancellationToken)
+    {
+        var data = GraphJson.ParseObject(group.data);
+        if (GraphJson.Int(data, "privacy") == 0)
+        {
+            return true;
+        }
+
+        return await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .AnyAsync(
+                item => item.id1 == userId &&
+                    item.id2 == group.id &&
+                    (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin),
+                cancellationToken);
     }
 }

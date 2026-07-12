@@ -118,6 +118,16 @@ public sealed record GroupSummaryResult(
     string Name,
     string Avatar);
 
+public sealed record VisitedGroupResult(
+    long Id,
+    string Avatar,
+    string Name);
+
+public sealed record VisitedGroupPageResult(
+    IReadOnlyList<VisitedGroupResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
 public interface IStorySharedSourceResult;
 
 [GraphQLName("FeedPostSharedSource")]

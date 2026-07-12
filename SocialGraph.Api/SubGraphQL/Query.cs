@@ -51,6 +51,18 @@ public class Query
         return groupGraphService.GetGroupAsync(groupId, cancellationToken);
     }
 
+    public Task<VisitedGroupPageResult> GetVisitedGroupsAsync(
+        long userId,
+        int limit,
+        string? cursor,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return groupGraphService.GetVisitedGroupsAsync(userId, limit, cursor, cancellationToken);
+    }
+
     public Task<ContentResult?> GetContentAsync(
         long contentId,
         [Service] IContentGraphService contentGraphService,

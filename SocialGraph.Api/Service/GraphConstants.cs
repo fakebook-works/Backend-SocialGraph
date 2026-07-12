@@ -48,6 +48,7 @@ public static class GraphAssociationType
     public const short Owned = 22;
     public const short Blocked = 23;
     public const short BlockedBy = 24;
+    public const short Visited = 25;
 }
 
 public static class ExternalNotificationAction

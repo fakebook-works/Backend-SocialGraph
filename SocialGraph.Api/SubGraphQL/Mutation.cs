@@ -175,6 +175,17 @@ public class Mutation
         return groupGraphService.ChangeGroupBackgroundAsync(groupId, backgroundUrl, originalUrl, cancellationToken);
     }
 
+    public Task<bool> RecordGroupVisitAsync(
+        long userId,
+        long groupId,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return groupGraphService.RecordGroupVisitAsync(userId, groupId, cancellationToken);
+    }
+
     public Task<bool> AddGroupMemberAsync(long groupId, long userId, [Service] IGroupGraphService groupGraphService, CancellationToken cancellationToken)
     {
         return groupGraphService.AddMemberAsync(groupId, userId, cancellationToken);
