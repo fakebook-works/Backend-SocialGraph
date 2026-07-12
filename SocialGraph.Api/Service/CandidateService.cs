@@ -30,11 +30,21 @@ public sealed class CandidateService : ICandidateService
         await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.FeedPost, "followed", blocked, take, cancellationToken);
         await AddGroupPostCandidatesAsync(candidates, await GetUserGroupIdsAsync(userId, cancellationToken), blocked, take, cancellationToken);
         await AddRecentCandidatesAsync(candidates, GraphObjectType.FeedPost, "recent_public", blocked, take, cancellationToken);
+        await AddPublicGroupPostCandidatesAsync(candidates, blocked, take, cancellationToken);
 
         return candidates.Values
             .OrderByDescending(item => item.Id)
             .Take(take)
             .ToArray();
+    }
+
+    public async Task<IReadOnlyList<long>> GetPostCandidateIdsAsync(
+        long userId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var candidates = await GetPostCandidatesAsync(userId, limit, cancellationToken);
+        return candidates.Select(item => item.Id).ToArray();
     }
 
     public async Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
@@ -138,6 +148,36 @@ public sealed class CandidateService : ICandidateService
 
             var authorId = await GetAuthorIdAsync(row.id, cancellationToken);
             AddCandidate(candidates, row.id, authorId, row.data, source, blocked);
+        }
+    }
+
+    private async Task AddPublicGroupPostCandidatesAsync(
+        Dictionary<long, CandidateItemResult> candidates,
+        ISet<long> blocked,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var rows = await (
+            from association in _dbContext.AssociationsTb.AsNoTracking()
+            join post in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals post.id
+            join groupObject in _dbContext.ObjectsTb.AsNoTracking() on association.id1 equals groupObject.id
+            where association.atype == GraphAssociationType.Published &&
+                post.otype == GraphObjectType.GroupPost &&
+                groupObject.otype == GraphObjectType.Group
+            orderby association.time descending
+            select new { post.id, post.data, GroupData = groupObject.data })
+            .Take(limit * 6)
+            .ToListAsync(cancellationToken);
+
+        foreach (var row in rows)
+        {
+            if (GraphJson.Int(GraphJson.ParseObject(row.GroupData), "privacy") != 0)
+            {
+                continue;
+            }
+
+            var authorId = await GetAuthorIdAsync(row.id, cancellationToken);
+            AddCandidate(candidates, row.id, authorId, row.data, "public_group", blocked);
         }
     }
 

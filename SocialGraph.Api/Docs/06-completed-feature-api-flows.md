@@ -19,7 +19,18 @@ Body frontend gui theo form:
 
 Field name trong GraphQL response la camelCase. ID trong schema la `Long`; frontend co the gui JSON number neu ID con trong safe integer, hoac de gateway chuan hoa neu can.
 
-## Type dung chung cho story
+## Tong quan nhom chuc nang
+
+File hien dang chia theo cac nhom lon:
+
+- `Dang ki`: flow tao user sau khi Authentication xac thuc email/OTP xong.
+- `Feed`: cac API phuc vu man hinh feed hien tai, gom story, loi tat group, feed post, them story va xoa story.
+
+Trang thai hien tai: tam thoi phan feed da chot den muc story + group shortcut + feed post detail/candidate. Cac phan con lai nhu comment tree, like list, share list, saved list se bo sung sau khi chot flow.
+
+## Ghi chu chung
+
+### Type dung chung cho story
 
 Story trong feed tra ve theo union `HomeStory`:
 
@@ -119,7 +130,9 @@ Media type convention:
 
 SocialGraph khong tao upload URL va khong nhan binary file. Frontend/media service upload file truoc, sau do truyen URL da co vao SocialGraph.
 
-## Chuc nang: Dang ki
+## Nhom chuc nang: Dang ki
+
+### Chuc nang: Dang ki
 
 Frontend flow:
 
@@ -128,7 +141,7 @@ Frontend flow:
 3. Sau khi xac nhan thanh cong, frontend goi SocialGraph `createUser`.
 4. SocialGraph tao user graph object va goi Authentication internal create user bang `userId` vua sinh.
 
-### API: createUser(input)
+#### API: createUser(input)
 
 GraphQL mutation:
 
@@ -262,14 +275,24 @@ Goi tin de thuc hien chuc nang dang ki:
 }
 ```
 
-## Chuc nang: Lay feed story
+## Nhom chuc nang: Feed
+
+Muc feed gom cac phan da hoan thien:
+
+- Story cua chinh user va story cua friend/follow.
+- Loi tat group / group vua truy cap.
+- Feed post candidate pipe qua Recommendation.
+- Feed post detail theo list id da duoc Recommendation rank.
+- Them story va xoa story cua chinh user.
+
+### Chuc nang: Lay feed story
 
 Phan story tren home feed nen tach 2 nhom:
 
 - Story cua chinh user: goi `myStories`, frontend ghim dau danh sach de user xem/xoa nhanh.
 - Story cua friend/follow: goi `homeStories`, co paging theo author bucket.
 
-### API: myStories(userId)
+#### API: myStories(userId)
 
 GraphQL query:
 
@@ -340,7 +363,7 @@ Goi tin frontend gui:
 }
 ```
 
-### API: homeStories(userId, limit, cursor)
+#### API: homeStories(userId, limit, cursor)
 
 GraphQL query:
 
@@ -456,7 +479,7 @@ Frontend render:
 2. Render tiep `homeStories.items`.
 3. Khi can load more story nguoi khac, goi lai `homeStories` voi `cursor = endCursor`; khong bat buoc goi lai `myStories`.
 
-## Chuc nang: Lay loi tat group / group vua truy cap
+### Chuc nang: Lay loi tat group / group vua truy cap
 
 Chuc nang nay dung association mot chieu:
 
@@ -466,7 +489,7 @@ user --visited(25)--> group
 
 Association `visited(25)` khong co inverse. Moi lan user vao group, frontend/gateway goi `recordGroupVisit`; service se upsert association va cap nhat `time`. Khi lay loi tat, service doc association theo `time desc`, nen group vua truy cap gan nhat nam dau list.
 
-### API: visitedGroups(userId, limit, cursor)
+#### API: visitedGroups(userId, limit, cursor)
 
 GraphQL query:
 
@@ -534,7 +557,7 @@ Goi tin frontend gui:
 }
 ```
 
-### API: recordGroupVisit(userId, groupId)
+#### API: recordGroupVisit(userId, groupId)
 
 GraphQL mutation:
 
@@ -607,7 +630,274 @@ Goi tin de thuc hien chuc nang group vua truy cap:
 
 Frontend khong gui ca object wrapper `whenOpenGroup/whenRenderShortcutList`; day chi la mo ta 2 thoi diem goi API. Khi user scroll/load more loi tat group, goi lai `visitedGroups` voi `cursor = endCursor`.
 
-## Chuc nang: Them story
+### Chuc nang: Lay feed post
+
+Feed post di theo pipeline 3 buoc:
+
+1. Recommendation service goi SocialGraph REST de lay candidate post id.
+2. Recommendation service tu rank/sort bang model rieng va tra list post id da sap xep ve Gateway/frontend.
+3. Gateway/frontend goi SocialGraph GraphQL `postDetails` de lay data hien thi cua cac post do.
+
+Ly do tach nhu vay: Recommendation chi can id de rank, con SocialGraph la noi resolve graph data nhu author, group, media va quan he cua viewer voi author/group.
+
+#### API REST: GET /internal/recommendation/post-candidate-ids
+
+Endpoint nay danh cho Recommendation service.
+
+Input query:
+
+- `userId: long`
+- `limit: int`, service clamp ve `1..500`
+
+Logic ben trong:
+
+1. Lay block list cua user tu `blocked(23)` va `blocked_by(24)`.
+2. Lay feed post cua friend authors:
+   - `user --friend(0)--> author`
+   - `author --authored(5)--> feedPost`
+3. Lay feed post cua followed authors:
+   - `user --followed(1)--> author`
+   - `author --authored(5)--> feedPost`
+4. Lay group post trong cac group user dang tham gia/quan tri:
+   - `user --member(13)--> group`
+   - `user --admin(15)--> group`
+   - `group --published(9)--> groupPost`
+5. Lay public feed post fallback:
+   - object type `2`
+   - `privacy = 0`
+6. Lay public group post fallback:
+   - object type `3`
+   - group chua post co `privacy = 0`
+7. Bo candidate co author nam trong block list.
+8. Deduplicate theo post id.
+9. Sort tam thoi theo `id desc`, vi Snowflake id lon hon gan voi bai moi hon.
+10. Tra top `limit` post id.
+
+External calls: khong co.
+
+Output:
+
+```json
+[789, 788, 777]
+```
+
+Goi tin Recommendation service gui:
+
+```http
+GET /internal/recommendation/post-candidate-ids?userId=123&limit=500
+```
+
+Endpoint cu van con:
+
+```http
+GET /internal/recommendation/post-candidates?userId=123&limit=500
+```
+
+Endpoint cu tra `CandidateItemResult[]` gom `id`, `authorId`, `source`, `createdAt`. `source` co the la `friend`, `followed`, `group`, `recent_public`, `public_group`.
+
+#### API GraphQL: postDetails(userId, postIds)
+
+API nay danh cho Gateway/frontend sau khi da co list id tu Recommendation.
+
+GraphQL query:
+
+```graphql
+query PostDetails($userId: Long!, $postIds: [Long!]!) {
+  postDetails(userId: $userId, postIds: $postIds) {
+    id
+    type
+    content
+    privacy
+    create
+    author {
+      id
+      name
+      avatar
+      isVerified
+    }
+    group {
+      id
+      name
+      avatar
+    }
+    viewerRelation {
+      isFriend
+      isFollow
+      isParticipant
+    }
+    media {
+      id
+      type
+      url
+    }
+  }
+}
+```
+
+Input:
+
+- `userId`: ID cua viewer dang dang nhap.
+- `postIds`: list id do Recommendation tra ve, da sap xep theo ranking.
+
+Logic ben trong:
+
+1. Gateway phai forward trusted header; service check `userId` request khop `X-User-Id`.
+2. Duyet `postIds` theo dung thu tu input, bo id trung.
+3. Retrieve object post.
+4. Chi chap nhan:
+   - feed post type `2`
+   - group post type `3`
+5. Lay author qua `post --authored_by(6)--> user`.
+6. Lay media qua `post --contained(20)--> media`.
+7. Neu la group post, lay group qua `post --published_in(10)--> group`.
+8. Kiem tra quyen xem:
+   - feed post `privacy = 0`: xem duoc;
+   - feed post private: viewer phai la author hoac friend cua author;
+   - group post public: group `privacy = 0` xem duoc;
+   - group post private: viewer phai la member/admin cua group.
+9. Post khong ton tai, sai type, thieu author, thieu group, hoac viewer khong co quyen xem se bi omit khoi output.
+10. Build `viewerRelation`:
+   - voi author co `privacy = 1`: set `isFollow` theo `viewer --followed(1)--> author`, `isFriend = null`;
+   - voi author co `privacy = 0`: set `isFriend` theo `viewer --friend(0)--> author`, `isFollow = null`;
+   - voi group post: set `isParticipant` theo viewer la `member(13)` hoac `admin(15)` cua group;
+   - voi feed post: `isParticipant = null`.
+
+External calls: khong co.
+
+Output:
+
+```json
+[
+  {
+    "id": 789,
+    "type": 2,
+    "content": "Hello feed",
+    "privacy": 0,
+    "create": "2026-07-12T10:00:00.0000000Z",
+    "author": {
+      "id": 456,
+      "name": "Tran Van B",
+      "avatar": "https://cdn.local/b.jpg",
+      "isVerified": true
+    },
+    "group": null,
+    "viewerRelation": {
+      "isFriend": true,
+      "isFollow": null,
+      "isParticipant": null
+    },
+    "media": [
+      {
+        "id": 3001,
+        "type": 0,
+        "url": "https://cdn.local/post.jpg"
+      }
+    ]
+  },
+  {
+    "id": 790,
+    "type": 3,
+    "content": "Hello group",
+    "privacy": 0,
+    "create": "2026-07-12T10:05:00.0000000Z",
+    "author": {
+      "id": 457,
+      "name": "Le Van C",
+      "avatar": "https://cdn.local/c.jpg",
+      "isVerified": false
+    },
+    "group": {
+      "id": 88,
+      "name": "Public Group",
+      "avatar": "https://cdn.local/g.jpg"
+    },
+    "viewerRelation": {
+      "isFriend": null,
+      "isFollow": false,
+      "isParticipant": false
+    },
+    "media": []
+  }
+]
+```
+
+Goi tin frontend/gateway gui:
+
+```json
+{
+  "operationName": "PostDetails",
+  "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { isFriend isFollow isParticipant } media { id type url } } }",
+  "variables": {
+    "userId": 123,
+    "postIds": [789, 790, 777]
+  }
+}
+```
+
+#### API GraphQL: postDetail(userId, postId)
+
+Ban single-post cua `postDetails`, dung khi frontend can refresh/moi mot bai.
+
+GraphQL query:
+
+```graphql
+query PostDetail($userId: Long!, $postId: Long!) {
+  postDetail(userId: $userId, postId: $postId) {
+    id
+    type
+    content
+    privacy
+    create
+    author {
+      id
+      name
+      avatar
+      isVerified
+    }
+    group {
+      id
+      name
+      avatar
+    }
+    viewerRelation {
+      isFriend
+      isFollow
+      isParticipant
+    }
+    media {
+      id
+      type
+      url
+    }
+  }
+}
+```
+
+Return: `PostDetailResult?`. Neu post khong ton tai hoac viewer khong co quyen xem thi tra `null`.
+
+Goi tin de thuc hien chuc nang feed post:
+
+```json
+{
+  "recommendationStep": {
+    "service": "Recommendation",
+    "internalCallToSocialGraph": "GET /internal/recommendation/post-candidate-ids?userId=123&limit=500",
+    "returnToGateway": [789, 790, 777]
+  },
+  "socialGraphDetailStep": {
+    "operationName": "PostDetails",
+    "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { isFriend isFollow isParticipant } media { id type url } } }",
+    "variables": {
+      "userId": 123,
+      "postIds": [789, 790, 777]
+    }
+  }
+}
+```
+
+Frontend/gateway khong gui ca object wrapper `recommendationStep/socialGraphDetailStep`; day chi la mo ta pipe. Thuc te Recommendation service goi REST truoc, sau do Gateway/frontend goi GraphQL `postDetails` voi list id da duoc rank.
+
+### Chuc nang: Them story
 
 Them story co 2 mode rieng:
 
@@ -616,7 +906,7 @@ Them story co 2 mode rieng:
 
 Frontend khong gui ca media va shared source trong cung mot request. Neu user dang share bai/reel thi goi `createShareStory`; neu user dang dang story anh/video/text thi goi `createNormalStory`.
 
-### API: createNormalStory(input)
+#### API: createNormalStory(input)
 
 GraphQL mutation:
 
@@ -720,7 +1010,7 @@ Neu story text-only:
 }
 ```
 
-### API: createShareStory(input)
+#### API: createShareStory(input)
 
 GraphQL mutation:
 
@@ -869,11 +1159,11 @@ Goi tin de thuc hien chuc nang them story:
 
 Frontend chi chon mot trong hai mode tren de gui len `/graphql`, khong gui ca object wrapper `normalStoryMode/shareStoryMode`.
 
-## Chuc nang: Xoa story cua chinh user
+### Chuc nang: Xoa story cua chinh user
 
 Chuc nang nay dung cho story cua user dang dang nhap, thuong render trong bucket `myStories` duoc ghim dau feed.
 
-### API: deleteStory(input)
+#### API: deleteStory(input)
 
 GraphQL mutation:
 

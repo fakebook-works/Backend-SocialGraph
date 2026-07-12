@@ -107,6 +107,22 @@ public sealed record ContentResult(
     long AuthorId,
     IReadOnlyList<MediaResult> Media);
 
+public sealed record PostViewerRelationResult(
+    bool? IsFriend,
+    bool? IsFollow,
+    bool? IsParticipant);
+
+public sealed record PostDetailResult(
+    long Id,
+    short Type,
+    string Content,
+    int Privacy,
+    string Create,
+    UserSummaryResult Author,
+    GroupSummaryResult? Group,
+    PostViewerRelationResult ViewerRelation,
+    IReadOnlyList<MediaResult> Media);
+
 public sealed record UserSummaryResult(
     long Id,
     string Name,

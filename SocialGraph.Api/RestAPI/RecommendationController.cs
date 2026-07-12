@@ -24,6 +24,15 @@ public sealed class RecommendationController : ControllerBase
         return _candidateService.GetPostCandidatesAsync(userId, limit, cancellationToken);
     }
 
+    [HttpGet("post-candidate-ids")]
+    public Task<IReadOnlyList<long>> GetPostCandidateIdsAsync(
+        [FromQuery] long userId,
+        [FromQuery] int limit = 200,
+        CancellationToken cancellationToken = default)
+    {
+        return _candidateService.GetPostCandidateIdsAsync(userId, limit, cancellationToken);
+    }
+
     [HttpGet("reel-candidates")]
     public Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
         [FromQuery] long userId,

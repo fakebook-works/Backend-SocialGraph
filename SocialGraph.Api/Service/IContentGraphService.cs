@@ -9,6 +9,8 @@ public interface IContentGraphService
     Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default);
     Task<bool> DeleteContentAsync(long contentId, CancellationToken cancellationToken = default);
     Task<ContentResult?> GetContentAsync(long contentId, CancellationToken cancellationToken = default);
+    Task<PostDetailResult?> GetPostDetailAsync(long userId, long postId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PostDetailResult>> GetPostDetailsAsync(long userId, IReadOnlyList<long> postIds, CancellationToken cancellationToken = default);
     Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default);
     Task<NormalStoryResult> CreateNormalStoryAsync(CreateNormalStoryInput input, CancellationToken cancellationToken = default);
     Task<IHomeStoryResult> CreateShareStoryAsync(CreateShareStoryInput input, CancellationToken cancellationToken = default);
