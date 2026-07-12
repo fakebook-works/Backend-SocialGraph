@@ -106,9 +106,8 @@ public sealed record ContentResult(
     IReadOnlyList<MediaResult> Media);
 
 public sealed record PostViewerRelationResult(
-    bool? IsFriend,
-    bool? IsFollow,
-    bool? IsParticipant);
+    bool CanFollow,
+    bool? CanJoin);
 
 public sealed record PostDetailResult(
     long Id,

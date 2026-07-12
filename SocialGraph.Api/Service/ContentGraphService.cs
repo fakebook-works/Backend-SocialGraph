@@ -604,25 +604,27 @@ public sealed class ContentGraphService : IContentGraphService
         long groupId,
         CancellationToken cancellationToken)
     {
-        bool? isFriend = null;
-        bool? isFollow = null;
+        var canFollow = false;
         if (userId != author.id)
         {
             var authorData = GraphJson.ParseObject(author.data);
             if (GraphJson.Int(authorData, "privacy") == 1)
             {
-                isFollow = await AssociationExistsAsync(userId, GraphAssociationType.Followed, author.id, cancellationToken);
-            }
-            else
-            {
-                isFriend = await AssociationExistsAsync(userId, GraphAssociationType.Friend, author.id, cancellationToken);
+                var alreadyFriend = await AssociationExistsAsync(userId, GraphAssociationType.Friend, author.id, cancellationToken);
+                var alreadyFollowed = await AssociationExistsAsync(userId, GraphAssociationType.Followed, author.id, cancellationToken);
+                canFollow = !alreadyFriend && !alreadyFollowed;
             }
         }
 
+        bool? canJoin = null;
+        if (groupId > 0)
+        {
+            canJoin = !await IsGroupParticipantAsync(userId, groupId, cancellationToken);
+        }
+
         return new PostViewerRelationResult(
-            isFriend,
-            isFollow,
-            groupId > 0 ? await IsGroupParticipantAsync(userId, groupId, cancellationToken) : null);
+            canFollow,
+            canJoin);
     }
 
     private Task<bool> IsGroupParticipantAsync(long userId, long groupId, CancellationToken cancellationToken)

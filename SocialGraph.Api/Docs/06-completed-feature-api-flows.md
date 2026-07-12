@@ -713,9 +713,8 @@ query PostDetails($userId: Long!, $postIds: [Long!]!) {
       avatar
     }
     viewerRelation {
-      isFriend
-      isFollow
-      isParticipant
+      canFollow
+      canJoin
     }
     media {
       id
@@ -749,10 +748,10 @@ Logic ben trong:
    - group post private: viewer phai la member/admin cua group.
 9. Post khong ton tai, sai type, thieu author, thieu group, hoac viewer khong co quyen xem se bi omit khoi output.
 10. Build `viewerRelation`:
-   - voi author co `privacy = 1`: set `isFollow` theo `viewer --followed(1)--> author`, `isFriend = null`;
-   - voi author co `privacy = 0`: set `isFriend` theo `viewer --friend(0)--> author`, `isFollow = null`;
-   - voi group post: set `isParticipant` theo viewer la `member(13)` hoac `admin(15)` cua group;
-   - voi feed post: `isParticipant = null`.
+   - `canFollow = true` chi khi author co `privacy = 1` va viewer chua la friend, chua follow author;
+   - author `privacy = 0`, viewer la author, viewer da friend, hoac viewer da follow thi `canFollow = false`;
+   - voi group post: `canJoin = false` neu viewer la `member(13)` hoac `admin(15)` cua group, nguoc lai `canJoin = true`;
+   - voi feed post: `canJoin = null`.
 
 External calls: khong co.
 
@@ -774,9 +773,8 @@ Output:
     },
     "group": null,
     "viewerRelation": {
-      "isFriend": true,
-      "isFollow": null,
-      "isParticipant": null
+      "canFollow": false,
+      "canJoin": null
     },
     "media": [
       {
@@ -804,9 +802,8 @@ Output:
       "avatar": "https://cdn.local/g.jpg"
     },
     "viewerRelation": {
-      "isFriend": null,
-      "isFollow": false,
-      "isParticipant": false
+      "canFollow": false,
+      "canJoin": true
     },
     "media": []
   }
@@ -818,7 +815,7 @@ Goi tin frontend/gateway gui:
 ```json
 {
   "operationName": "PostDetails",
-  "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { isFriend isFollow isParticipant } media { id type url } } }",
+  "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { canFollow canJoin } media { id type url } } }",
   "variables": {
     "userId": 123,
     "postIds": [789, 790, 777]
@@ -852,9 +849,8 @@ query PostDetail($userId: Long!, $postId: Long!) {
       avatar
     }
     viewerRelation {
-      isFriend
-      isFollow
-      isParticipant
+      canFollow
+      canJoin
     }
     media {
       id
@@ -878,7 +874,7 @@ Goi tin de thuc hien chuc nang feed post:
   },
   "socialGraphDetailStep": {
     "operationName": "PostDetails",
-    "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { isFriend isFollow isParticipant } media { id type url } } }",
+    "query": "query PostDetails($userId: Long!, $postIds: [Long!]!) { postDetails(userId: $userId, postIds: $postIds) { id type content privacy create author { id name avatar isVerified } group { id name avatar } viewerRelation { canFollow canJoin } media { id type url } } }",
     "variables": {
       "userId": 123,
       "postIds": [789, 790, 777]
