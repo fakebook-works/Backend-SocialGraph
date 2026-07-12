@@ -107,6 +107,11 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateStoryAsync(CreateStoryInput input, CancellationToken cancellationToken = default)
     {
+        if (input.Media is not null && input.SharedSourceId is not null)
+        {
+            throw new ArgumentException("Story can attach media or share a source, not both.", nameof(input));
+        }
+
         if (input.SharedSourceId is long sharedSourceId)
         {
             await ValidateStoryShareSourceAsync(sharedSourceId, cancellationToken);

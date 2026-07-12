@@ -1278,16 +1278,17 @@ Logic:
 
 1. Tao story object type `5` voi `{ content, create, expire }`.
 2. `expire = create + 1 day`.
-3. Neu co `sharedSourceId`, validate source:
+3. `media` va `sharedSourceId` la 2 mode loai tru nhau. Neu gui ca 2 thi API reject.
+4. Neu co `sharedSourceId`, validate source:
    - feed post type `2` phai co `privacy = 0`;
    - group post type `3` phai nam trong group public `privacy = 0`;
    - reel type `4` duoc phep share;
    - source khac bi reject.
-4. Attach toi da mot media neu co bang `story --contained(20)--> media`.
-5. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
-6. Tao `author --authored(5)--> story`.
-7. Neu co `sharedSourceId`, tao `story --share(8)--> sharedSource`.
-8. Return content result.
+5. Attach toi da mot media neu co bang `story --contained(20)--> media`.
+6. Media tao rieng cho story la temporary media, khong tao `owned(22)`.
+7. Tao `author --authored(5)--> story`.
+8. Neu co `sharedSourceId`, tao `story --share(8)--> sharedSource`.
+9. Return content result.
 
 External calls: khong co.
 
