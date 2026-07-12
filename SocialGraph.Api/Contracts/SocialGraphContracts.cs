@@ -50,7 +50,13 @@ public sealed record UpdatePostInput(long Id, int Privacy);
 
 public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
 
-public sealed record CreateStoryInput(long AuthorId, string Content, MediaInput? Media, long? SharedSourceId = null);
+public sealed record CreateNormalStoryInput(long AuthorId, string Content, MediaInput? Media);
+
+public sealed record CreateShareStoryInput(long AuthorId, string Content, long SharedSourceId);
+
+public sealed record DeleteStoryInput(long AuthorId, long StoryId);
+
+public sealed record DeleteStoryPayload(bool Success, string? Message = null);
 
 public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media);
 
@@ -101,15 +107,12 @@ public sealed record UserSummaryResult(
     long Id,
     string Name,
     string Avatar,
-    string Verify,
     bool IsVerified);
 
 public sealed record GroupSummaryResult(
     long Id,
     string Name,
-    string Avatar,
-    string Background,
-    int Privacy);
+    string Avatar);
 
 public interface IStorySharedSourceResult;
 
@@ -117,28 +120,15 @@ public interface IStorySharedSourceResult;
 public sealed record FeedPostSharedSourceResult(
     long Id,
     string Content,
-    int Privacy,
-    string Create,
-    UserSummaryResult? Author,
-    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
-
-[GraphQLName("GroupPostSharedSource")]
-public sealed record GroupPostSharedSourceResult(
-    long Id,
-    string Content,
-    int Privacy,
-    string Create,
-    UserSummaryResult? Author,
-    GroupSummaryResult? Group,
-    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
+    MediaResult? Media,
+    UserSummaryResult? Author) : IStorySharedSourceResult;
 
 [GraphQLName("ReelSharedSource")]
 public sealed record ReelSharedSourceResult(
     long Id,
     string Content,
-    string Create,
-    UserSummaryResult? Author,
-    IReadOnlyList<MediaResult> Media) : IStorySharedSourceResult;
+    MediaResult? Media,
+    UserSummaryResult? Author) : IStorySharedSourceResult;
 
 [UnionType("HomeStory")]
 public interface IHomeStoryResult;
@@ -148,7 +138,6 @@ public sealed record NormalStoryResult(
     long Id,
     string Content,
     string Create,
-    string Expire,
     IReadOnlyList<MediaResult> Media) : IHomeStoryResult;
 
 [GraphQLName("FeedPostShareStory")]
@@ -156,23 +145,13 @@ public sealed record FeedPostShareStoryResult(
     long Id,
     string Content,
     string Create,
-    string Expire,
     FeedPostSharedSourceResult SharedSource) : IHomeStoryResult;
-
-[GraphQLName("GroupPostShareStory")]
-public sealed record GroupPostShareStoryResult(
-    long Id,
-    string Content,
-    string Create,
-    string Expire,
-    GroupPostSharedSourceResult SharedSource) : IHomeStoryResult;
 
 [GraphQLName("ReelShareStory")]
 public sealed record ReelShareStoryResult(
     long Id,
     string Content,
     string Create,
-    string Expire,
     ReelSharedSourceResult SharedSource) : IHomeStoryResult;
 
 public sealed record HomeStoryBucketResult(

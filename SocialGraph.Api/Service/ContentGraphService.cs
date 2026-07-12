@@ -105,28 +105,60 @@ public sealed class ContentGraphService : IContentGraphService
         return await BuildContentResultAsync(comment, input.AuthorId, Array.Empty<MediaResult>(), cancellationToken);
     }
 
-    public async Task<ContentResult> CreateStoryAsync(CreateStoryInput input, CancellationToken cancellationToken = default)
+    public async Task<NormalStoryResult> CreateNormalStoryAsync(
+        CreateNormalStoryInput input,
+        CancellationToken cancellationToken = default)
     {
-        if (input.Media is not null && input.SharedSourceId is not null)
-        {
-            throw new ArgumentException("Story can attach media or share a source, not both.", nameof(input));
-        }
-
-        if (input.SharedSourceId is long sharedSourceId)
-        {
-            await ValidateStoryShareSourceAsync(sharedSourceId, cancellationToken);
-        }
-
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
         var media = await AttachTemporarySingleMediaAsync(story.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
 
-        if (input.SharedSourceId is long sourceId)
+        var data = GraphJson.ParseObject(story.data);
+        return new NormalStoryResult(
+            story.id,
+            GraphJson.String(data, "content"),
+            GraphJson.String(data, "create"),
+            media);
+    }
+
+    public async Task<IHomeStoryResult> CreateShareStoryAsync(
+        CreateShareStoryInput input,
+        CancellationToken cancellationToken = default)
+    {
+        await ValidateStoryShareSourceAsync(input.SharedSourceId, cancellationToken);
+
+        var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
+        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
+        await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, input.SharedSourceId, cancellationToken);
+
+        return await BuildHomeStoryItemAsync(story, cancellationToken);
+    }
+
+    public async Task<DeleteStoryPayload> DeleteStoryAsync(
+        DeleteStoryInput input,
+        CancellationToken cancellationToken = default)
+    {
+        var story = await _objectService.RetrieveObjectAsync(input.StoryId, cancellationToken);
+        if (story is null)
         {
-            await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, sourceId, cancellationToken);
+            return new DeleteStoryPayload(false, "Story not found.");
         }
 
-        return await BuildContentResultAsync(story, input.AuthorId, media, cancellationToken);
+        if (story.otype != GraphObjectType.Story)
+        {
+            return new DeleteStoryPayload(false, "Object is not a story.");
+        }
+
+        var authorId = await GetAuthorIdAsync(input.StoryId, cancellationToken);
+        if (authorId != input.AuthorId)
+        {
+            return new DeleteStoryPayload(false, "Only the story author can delete this story.");
+        }
+
+        var deleted = await DeleteStoryWithTemporaryMediaAsync(input.StoryId, cancellationToken);
+        return deleted
+            ? new DeleteStoryPayload(true, "Story deleted.")
+            : new DeleteStoryPayload(false, "Story delete failed.");
     }
 
     public async Task<HomeStoryPageResult> GetHomeStoriesAsync(
@@ -182,7 +214,7 @@ public sealed class ContentGraphService : IContentGraphService
 
         foreach (var expiredStoryId in expiredStoryIds)
         {
-            await DeleteExpiredStoryWithMediaAsync(expiredStoryId, cancellationToken);
+            await DeleteStoryWithTemporaryMediaAsync(expiredStoryId, cancellationToken);
         }
 
         var buckets = activeStoriesByAuthor
@@ -231,6 +263,74 @@ public sealed class ContentGraphService : IContentGraphService
             : EncodeStoryCursor(selectedCandidates[^1].LatestCreate, selectedCandidates[^1].AuthorId);
 
         return new HomeStoryPageResult(resultItems, endCursor, pageCandidates.Length > take);
+    }
+
+    public async Task<HomeStoryBucketResult?> GetMyStoriesAsync(
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        var author = await BuildUserSummaryAsync(userId, cancellationToken);
+        if (author is null)
+        {
+            return null;
+        }
+
+        var storyRows = await (
+            from association in _dbContext.AssociationsTb.AsNoTracking()
+            join obj in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals obj.id
+            where association.id1 == userId &&
+                association.atype == GraphAssociationType.Authored &&
+                obj.otype == GraphObjectType.Story
+            select new StoryRow(association.id1, obj.id, obj.data))
+            .ToListAsync(cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var activeStories = new List<ActiveStoryRow>();
+        var expiredStoryIds = new List<long>();
+
+        foreach (var row in storyRows)
+        {
+            var data = GraphJson.ParseObject(row.Data);
+            if (!TryGetDateTimeOffset(data, "expire", out var expiresAt) || expiresAt <= now)
+            {
+                expiredStoryIds.Add(row.StoryId);
+                continue;
+            }
+
+            var createdAt = TryGetDateTimeOffset(data, "create", out var parsedCreatedAt)
+                ? parsedCreatedAt
+                : DateTimeOffset.UnixEpoch;
+
+            activeStories.Add(new ActiveStoryRow(
+                row.AuthorId,
+                new SocialGraphObjectResult(row.StoryId, GraphObjectType.Story, row.Data),
+                createdAt));
+        }
+
+        foreach (var expiredStoryId in expiredStoryIds)
+        {
+            await DeleteStoryWithTemporaryMediaAsync(expiredStoryId, cancellationToken);
+        }
+
+        if (activeStories.Count == 0)
+        {
+            return null;
+        }
+
+        var orderedStories = activeStories
+            .OrderBy(story => story.CreatedAt)
+            .ToArray();
+
+        var stories = new List<IHomeStoryResult>(orderedStories.Length);
+        foreach (var story in orderedStories)
+        {
+            stories.Add(await BuildHomeStoryItemAsync(story.Story, cancellationToken));
+        }
+
+        return new HomeStoryBucketResult(
+            author,
+            orderedStories.Max(story => story.CreatedAt).ToString("O", CultureInfo.InvariantCulture),
+            stories);
     }
 
     public async Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default)
@@ -444,18 +544,20 @@ public sealed class ContentGraphService : IContentGraphService
         return results;
     }
 
-    private async Task DeleteExpiredStoryWithMediaAsync(long storyId, CancellationToken cancellationToken)
+    private async Task<bool> DeleteStoryWithTemporaryMediaAsync(long storyId, CancellationToken cancellationToken)
     {
         var mediaIds = await GetContainedMediaIdsAsync(storyId, cancellationToken);
 
         await _associationService.DeleteObjectAssociationsAsync(storyId, cancellationToken);
-        await _objectService.DeleteObjectAsync(storyId, cancellationToken);
+        var deleted = await _objectService.DeleteObjectAsync(storyId, cancellationToken);
 
         foreach (var mediaId in mediaIds)
         {
             await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
             await _objectService.DeleteObjectAsync(mediaId, cancellationToken);
         }
+
+        return deleted;
     }
 
     private async Task<IReadOnlyList<long>> GetContainedMediaIdsAsync(long contentId, CancellationToken cancellationToken)
@@ -476,18 +578,7 @@ public sealed class ContentGraphService : IContentGraphService
                 story.id,
                 GraphJson.String(data, "content"),
                 GraphJson.String(data, "create"),
-                GraphJson.String(data, "expire"),
                 feedPostSource);
-        }
-
-        if (sharedSource is GroupPostSharedSourceResult groupPostSource)
-        {
-            return new GroupPostShareStoryResult(
-                story.id,
-                GraphJson.String(data, "content"),
-                GraphJson.String(data, "create"),
-                GraphJson.String(data, "expire"),
-                groupPostSource);
         }
 
         if (sharedSource is ReelSharedSourceResult reelSource)
@@ -496,7 +587,6 @@ public sealed class ContentGraphService : IContentGraphService
                 story.id,
                 GraphJson.String(data, "content"),
                 GraphJson.String(data, "create"),
-                GraphJson.String(data, "expire"),
                 reelSource);
         }
 
@@ -504,7 +594,6 @@ public sealed class ContentGraphService : IContentGraphService
             story.id,
             GraphJson.String(data, "content"),
             GraphJson.String(data, "create"),
-            GraphJson.String(data, "expire"),
             await GetMediaAsync(story.id, cancellationToken));
     }
 
@@ -531,37 +620,24 @@ public sealed class ContentGraphService : IContentGraphService
         CancellationToken cancellationToken)
     {
         var data = GraphJson.ParseObject(source.data);
+        var content = GraphJson.String(data, "content");
         var authorId = await GetAuthorIdAsync(source.id, cancellationToken);
         var author = authorId > 0 ? await BuildUserSummaryAsync(authorId, cancellationToken) : null;
-        var media = await GetMediaAsync(source.id, cancellationToken);
-        var content = GraphJson.String(data, "content");
-        var createdAt = GraphJson.String(data, "create");
+        var media = await GetFirstMediaAsync(source.id, cancellationToken);
 
         return source.otype switch
         {
             GraphObjectType.FeedPost => new FeedPostSharedSourceResult(
                 source.id,
                 content,
-                await GetContentPrivacyAsync(source, data, cancellationToken),
-                createdAt,
-                author,
-                media),
-
-            GraphObjectType.GroupPost => new GroupPostSharedSourceResult(
-                source.id,
-                content,
-                await GetContentPrivacyAsync(source, data, cancellationToken),
-                createdAt,
-                author,
-                await BuildPublishedGroupSummaryAsync(source.id, cancellationToken),
-                media),
+                media,
+                author),
 
             GraphObjectType.Reel => new ReelSharedSourceResult(
                 source.id,
                 content,
-                createdAt,
-                author,
-                media),
+                media,
+                author),
 
             _ => throw new InvalidOperationException("Unsupported story shared source type.")
         };
@@ -581,27 +657,27 @@ public sealed class ContentGraphService : IContentGraphService
             user.id,
             GraphJson.String(data, "name"),
             GraphJson.String(data, "avatar"),
-            verify,
             DateTimeOffset.TryParse(verify, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var expiresAt) &&
                 expiresAt > DateTimeOffset.UtcNow);
     }
 
-    private async Task<GroupSummaryResult?> BuildPublishedGroupSummaryAsync(long postId, CancellationToken cancellationToken)
+    private async Task<MediaResult?> GetFirstMediaAsync(long contentId, CancellationToken cancellationToken)
     {
-        var groupId = await GetPublishedGroupIdAsync(postId, cancellationToken);
-        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-        if (group is null || group.otype != GraphObjectType.Group)
+        var mediaIds = await _associationService.RetrieveAssociationAsync(contentId, GraphAssociationType.Contained, null, 1, cancellationToken);
+        var mediaId = mediaIds.items.FirstOrDefault()?.id2 ?? 0;
+        if (mediaId <= 0)
         {
             return null;
         }
 
-        var data = GraphJson.ParseObject(group.data);
-        return new GroupSummaryResult(
-            group.id,
-            GraphJson.String(data, "name"),
-            GraphJson.String(data, "avatar"),
-            GraphJson.String(data, "background"),
-            GraphJson.Int(data, "privacy"));
+        var item = await _objectService.RetrieveObjectAsync(mediaId, cancellationToken);
+        if (item is null || item.otype != GraphObjectType.Media)
+        {
+            return null;
+        }
+
+        var data = GraphJson.ParseObject(item.data);
+        return new MediaResult(item.id, GraphJson.Int(data, "type"), GraphJson.String(data, "url"));
     }
 
     private async Task ValidateStoryShareSourceAsync(long sourceId, CancellationToken cancellationToken)
@@ -620,26 +696,11 @@ public sealed class ContentGraphService : IContentGraphService
 
                 return;
 
-            case GraphObjectType.GroupPost:
-                var groupId = await GetPublishedGroupIdAsync(source.id, cancellationToken);
-                var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-                if (group is null || group.otype != GraphObjectType.Group)
-                {
-                    throw new ArgumentException("Group post source is missing its group.", nameof(sourceId));
-                }
-
-                if (GraphJson.Int(GraphJson.ParseObject(group.data), "privacy") != 0)
-                {
-                    throw new ArgumentException("Only posts in public groups can be shared to story.", nameof(sourceId));
-                }
-
-                return;
-
             case GraphObjectType.Reel:
                 return;
 
             default:
-                throw new ArgumentException("Stories can only share public feed posts, public group posts, or reels.", nameof(sourceId));
+                throw new ArgumentException("Stories can only share public feed posts or reels.", nameof(sourceId));
         }
     }
 

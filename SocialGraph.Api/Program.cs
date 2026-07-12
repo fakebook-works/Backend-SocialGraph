@@ -35,10 +35,8 @@ builder.Services
     .AddMutationType<Mutation>()
     .AddType<NormalStoryResult>()
     .AddType<FeedPostShareStoryResult>()
-    .AddType<GroupPostShareStoryResult>()
     .AddType<ReelShareStoryResult>()
     .AddType<FeedPostSharedSourceResult>()
-    .AddType<GroupPostSharedSourceResult>()
     .AddType<ReelSharedSourceResult>()
     .AddApolloFederation();
 
