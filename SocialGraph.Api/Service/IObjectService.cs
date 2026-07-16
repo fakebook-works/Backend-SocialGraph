@@ -7,4 +7,5 @@ public interface IObjectService
     Task<SocialGraphObjectResult?> UpdateSystemObjectAsync(long id, short otype, string patchJson, CancellationToken cancellationToken = default);
     Task<bool> DeleteObjectAsync(long id, CancellationToken cancellationToken = default);
     Task<SocialGraphObjectResult?> RetrieveObjectAsync(long id, CancellationToken cancellationToken = default);
+    Task InvalidateObjectCacheAsync(long id);
 }

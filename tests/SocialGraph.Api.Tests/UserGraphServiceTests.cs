@@ -23,6 +23,7 @@ public sealed class UserGraphServiceTests
                 "secret",
                 "Nguyen Van A",
                 "2000-01-01",
+                true,
                 It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var service = new UserGraphService(
@@ -56,6 +57,7 @@ public sealed class UserGraphServiceTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<string>(),
+                It.IsAny<bool>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new ExternalServiceCallException("AuthenticationServiceCreateUser", "HTTP 409"));
         var service = new UserGraphService(

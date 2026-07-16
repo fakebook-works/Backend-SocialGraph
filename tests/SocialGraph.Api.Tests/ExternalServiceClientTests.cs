@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using SocialGraph.Api.Infrastructure.Outbox;
 using SocialGraph.Api.Service;
 
 public sealed class ExternalServiceClientTests
@@ -41,7 +42,8 @@ public sealed class ExternalServiceClientTests
             "a@example.com",
             "secret",
             "Nguyen Van A",
-            "2000-01-01").WaitAsync(TimeSpan.FromSeconds(3));
+            "2000-01-01",
+            true).WaitAsync(TimeSpan.FromSeconds(3));
 
         var requests = handler.Requests.ToArray();
         Assert.Equal(3, requests.Length);
@@ -57,6 +59,7 @@ public sealed class ExternalServiceClientTests
             Assert.Equal("secret", body.RootElement.GetProperty("password").GetString());
             Assert.Equal("Nguyen Van A", body.RootElement.GetProperty("displayName").GetString());
             Assert.Equal("2000-01-01", body.RootElement.GetProperty("dob").GetString());
+            Assert.True(body.RootElement.GetProperty("gender").GetBoolean());
         }
 
         var search = requests.Single(request => request.Uri.Host == "search");
@@ -84,7 +87,7 @@ public sealed class ExternalServiceClientTests
         var client = CreateClient(handler);
 
         var exception = await Assert.ThrowsAsync<ExternalServiceCallException>(() =>
-            client.CreateUserAsync(UserId, "a@example.com", "secret", "Nguyen Van A", "2000-01-01"));
+            client.CreateUserAsync(UserId, "a@example.com", "secret", "Nguyen Van A", "2000-01-01", true));
 
         Assert.Equal("AuthenticationServiceCreateUser", exception.EndpointKey);
         var request = Assert.Single(handler.Requests);
@@ -100,7 +103,7 @@ public sealed class ExternalServiceClientTests
                 : HttpStatusCode.ServiceUnavailable)));
         var client = CreateClient(handler);
 
-        await client.CreateUserAsync(UserId, "a@example.com", "secret", "Nguyen Van A", "2000-01-01");
+        await client.CreateUserAsync(UserId, "a@example.com", "secret", "Nguyen Van A", "2000-01-01", true);
 
         Assert.Equal(3, handler.Requests.Count);
     }
@@ -139,15 +142,38 @@ public sealed class ExternalServiceClientTests
         Assert.All(requests, AssertInternalHeaders);
     }
 
+    [Fact]
+    public async Task Notify_UsesCanonicalActionAndIdempotencyContract()
+    {
+        var handler = new CapturingHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created)));
+        var client = CreateClient(handler);
+
+        await client.NotifyAsync(UserId, UserId + 1, ExternalNotificationAction.FriendRequest, UserId, null);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, request.Method);
+        Assert.Equal("/internal/notifications", request.Uri.AbsolutePath);
+        Assert.Equal(SharedSecret, Assert.Single(request.Headers["X-Internal-NotificationService-Secret"]));
+        Assert.StartsWith("socialgraph-", Assert.Single(request.Headers["Idempotency-Key"]));
+        using var body = JsonDocument.Parse(request.Body!);
+        Assert.Equal(4, body.RootElement.GetProperty("actionType").GetInt16());
+    }
+
     private static ExternalServiceClient CreateClient(CapturingHandler handler)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Gateway:InternalSharedSecret"] = SharedSecret,
-                ["ExternalServices:AuthenticationServiceCreateUser"] = "http://auth/internal/users",
+                ["InternalServices:Authentication:BaseUrl"] = "http://auth",
+                ["InternalServices:Authentication:SharedSecret"] = SharedSecret,
                 ["InternalServices:Search:BaseUrl"] = "http://search",
-                ["InternalServices:Recommendation:BaseUrl"] = "http://recommendation"
+                ["InternalServices:Search:SharedSecret"] = SharedSecret,
+                ["InternalServices:Recommendation:BaseUrl"] = "http://recommendation",
+                ["InternalServices:Recommendation:SharedSecret"] = SharedSecret,
+                ["InternalServices:Notification:BaseUrl"] = "http://notification",
+                ["InternalServices:Notification:SharedSecret"] = SharedSecret
             })
             .Build();
         var context = new DefaultHttpContext();
@@ -157,12 +183,21 @@ public sealed class ExternalServiceClientTests
             new SingleClientFactory(new HttpClient(handler)),
             configuration,
             new HttpContextAccessor { HttpContext = context },
-            NullLogger<ExternalServiceClient>.Instance);
+            NullLogger<ExternalServiceClient>.Instance,
+            new OutboxPayloadProtector(configuration));
     }
 
     private static void AssertInternalHeaders(CapturedRequest request)
     {
-        Assert.Equal(SharedSecret, Assert.Single(request.Headers["X-Gateway-Secret"]));
+        var expectedSecretHeader = request.Uri.Host switch
+        {
+            "auth" => "X-Internal-AuthenticationService-Secret",
+            "search" => "X-Internal-SearchService-Secret",
+            "recommendation" => "X-Internal-RecommendationService-Secret",
+            "notification" => "X-Internal-NotificationService-Secret",
+            _ => throw new Xunit.Sdk.XunitException($"Unexpected internal service host: {request.Uri.Host}")
+        };
+        Assert.Equal(SharedSecret, Assert.Single(request.Headers[expectedSecretHeader]));
         Assert.Equal(CorrelationId, Assert.Single(request.Headers["X-Correlation-ID"]));
     }
 

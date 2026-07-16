@@ -46,7 +46,11 @@ public sealed record CreateFeedPostInput(long AuthorId, string Content, int Priv
 
 public sealed record CreateGroupPostInput(long AuthorId, long GroupId, string Content, IReadOnlyList<MediaInput>? Media);
 
-public sealed record UpdatePostInput(long Id, int Privacy);
+public sealed record UpdatePostInput(
+    long Id,
+    int? Privacy = null,
+    string? Content = null,
+    IReadOnlyList<MediaInput>? Media = null);
 
 public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
 
@@ -224,3 +228,89 @@ public sealed record CandidateItemResult(
     long AuthorId,
     string Source,
     string CreatedAt);
+
+public sealed record ProfilePostPageResult(
+    IReadOnlyList<IHomePostResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record ProfileReelPageResult(
+    IReadOnlyList<ContentResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record MediaPageResult(
+    IReadOnlyList<MediaResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record GroupMembershipPageResult(
+    IReadOnlyList<GroupResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record UserRelationshipStateResult(
+    long UserId,
+    bool IsSelf,
+    bool IsFriend,
+    bool IsFollowing,
+    bool FollowsViewer,
+    bool FriendRequestSent,
+    bool FriendRequestReceived,
+    bool IsBlocked,
+    bool IsBlockedBy);
+
+public sealed record GroupViewerStateResult(
+    long GroupId,
+    bool IsMember,
+    bool IsAdmin,
+    bool JoinRequestPending,
+    bool CanViewPosts);
+
+public sealed record UserSummaryPageResult(
+    IReadOnlyList<UserSummaryResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record GroupPostPageResult(
+    IReadOnlyList<GroupPostDetailResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record CommentThreadItemResult(
+    long Id,
+    string Content,
+    string Create,
+    UserSummaryResult Author,
+    long LikeCount,
+    long ReplyCount,
+    bool ViewerHasLiked);
+
+public sealed record CommentPageResult(
+    IReadOnlyList<CommentThreadItemResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record ContentEngagementResult(
+    long TargetId,
+    long LikeCount,
+    long CommentCount,
+    long ShareCount,
+    bool ViewerHasLiked,
+    bool ViewerHasSaved,
+    bool ViewerHasWatched);
+
+public sealed record SavedContentItemResult(
+    long Id,
+    short Type,
+    IHomePostResult? Post,
+    ContentResult? Reel);
+
+public sealed record SavedContentPageResult(
+    IReadOnlyList<SavedContentItemResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+[GraphQLName("ReelRecommendationItem")]
+public sealed record ReelRecommendationItemResult(
+    [property: GraphQLType(typeof(NonNullType<IdType>))] long ReelId);

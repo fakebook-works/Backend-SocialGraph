@@ -84,6 +84,87 @@ public sealed class GroupShortcutServiceTests
         associations.VerifyAll();
     }
 
+    [Fact]
+    public async Task PrivateGroupJoin_CreatesPendingEdgeAndNotifiesAdministrators()
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>();
+        objects.Setup(item => item.RetrieveObjectAsync(UserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, "{}"));
+        objects.Setup(item => item.RetrieveObjectAsync(330, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(330, GraphObjectType.Group, GroupJson("Private", 1)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 330, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.RetrieveAssociationAsync(330, GraphAssociationType.HaveAdmin, null, 100, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(200, 1) }, null));
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new GroupGraphService(context, objects.Object, associations.Object, external.Object);
+
+        var result = await service.RequestJoinAsync(UserId, 330);
+
+        Assert.True(result);
+        associations.Verify(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 330, It.IsAny<CancellationToken>()), Times.Once);
+        external.Verify(item => item.NotifyAsync(UserId, 200, ExternalNotificationAction.GroupJoin, 330, null, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PublicGroupJoin_AddsMemberWithoutPendingApproval()
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>();
+        objects.Setup(item => item.RetrieveObjectAsync(UserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, "{}"));
+        objects.Setup(item => item.RetrieveObjectAsync(331, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(331, GraphObjectType.Group, GroupJson("Public", 0)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.ApplyMutationsAsync(It.IsAny<IReadOnlyCollection<AssociationMutation>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new GroupGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        var result = await service.RequestJoinAsync(UserId, 331);
+
+        Assert.True(result);
+        associations.Verify(item => item.ApplyMutationsAsync(
+            It.Is<IReadOnlyCollection<AssociationMutation>>(items =>
+                items.Contains(new AssociationMutation(UserId, GraphAssociationType.Member, 331, true))),
+            It.IsAny<CancellationToken>()), Times.Once);
+        associations.Verify(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 331, It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GroupInvite_RequiresAdminAndQueuesCanonicalNotification()
+    {
+        await using var context = CreateContext();
+        const long adminId = 200;
+        const long groupId = 340;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(UserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, "{}"));
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson("Invite", 1)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.HasAssociationAsync(adminId, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new GroupGraphService(context, objects.Object, associations.Object, external.Object);
+
+        var invited = await service.InviteUserAsync(adminId, groupId, UserId);
+
+        Assert.True(invited);
+        external.Verify(item => item.NotifyAsync(
+            adminId,
+            UserId,
+            ExternalNotificationAction.GroupInvite,
+            groupId,
+            null,
+            It.IsAny<CancellationToken>()), Times.Once);
+
+        associations.Setup(item => item.HasAssociationAsync(201, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        Assert.False(await service.InviteUserAsync(201, groupId, UserId));
+    }
+
     private static GroupGraphService CreateService(
         MyDbContext context,
         Mock<IObjectService>? objects = null,

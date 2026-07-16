@@ -8,27 +8,20 @@ using StackExchange.Redis;
 
 public sealed class AssociationService : IAssociationService
 {
-    private static readonly IReadOnlyDictionary<short, short> InverseAssociationTypes = new Dictionary<short, short>
-    {
-        [0] = 0,
-        [1] = 2,
-        [3] = 4,
-        [5] = 6,
-        [9] = 10,
-        [11] = 12,
-        [13] = 14,
-        [15] = 16,
-        [17] = 18,
-        [23] = 24
-    };
+    private const string CacheKeyPrefix = "socialgraph:v2:association";
 
     private readonly MyDbContext _dbContext;
     private readonly IDatabase _redis;
+    private readonly ILogger<AssociationService> _logger;
 
-    public AssociationService(MyDbContext dbContext, IConnectionMultiplexer redis)
+    public AssociationService(
+        MyDbContext dbContext,
+        IConnectionMultiplexer redis,
+        ILogger<AssociationService> logger)
     {
         _dbContext = dbContext;
         _redis = redis.GetDatabase();
+        _logger = logger;
     }
 
     public async Task<bool> AddAssociationAsync(
@@ -37,6 +30,7 @@ public sealed class AssociationService : IAssociationService
         long id2,
         CancellationToken cancellationToken = default)
     {
+        await ValidateAssociationAsync(id1, atype, id2, cancellationToken);
         var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -49,13 +43,88 @@ public sealed class AssociationService : IAssociationService
 
         await transaction.CommitAsync(cancellationToken);
 
-        await AddToCacheOrHydrateAsync(id1, atype, id2, time, cancellationToken);
-        if (TryGetInverseAssociationType(atype, out inverseAtype))
+        await TryRedisWriteAsync(async () =>
         {
-            await AddToCacheOrHydrateAsync(id2, inverseAtype, id1, time, cancellationToken);
-        }
+            await AddToCacheOrHydrateAsync(id1, atype, id2, time, cancellationToken);
+            if (TryGetInverseAssociationType(atype, out var cacheInverseAtype))
+            {
+                await AddToCacheOrHydrateAsync(id2, cacheInverseAtype, id1, time, cancellationToken);
+            }
+        });
 
         return true;
+    }
+
+    public async Task<bool> ApplyMutationsAsync(
+        IReadOnlyCollection<AssociationMutation> mutations,
+        CancellationToken cancellationToken = default)
+    {
+        if (mutations.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var mutation in mutations.Where(item => item.add))
+        {
+            await ValidateAssociationAsync(mutation.id1, mutation.atype, mutation.id2, cancellationToken);
+        }
+
+        var expanded = new Dictionary<(long id1, short atype, long id2), bool>();
+        foreach (var mutation in mutations)
+        {
+            expanded[(mutation.id1, mutation.atype, mutation.id2)] = mutation.add;
+            if (TryGetInverseAssociationType(mutation.atype, out var inverseAtype))
+            {
+                expanded[(mutation.id2, inverseAtype, mutation.id1)] = mutation.add;
+            }
+        }
+
+        var affected = 0;
+        var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        foreach (var mutation in expanded)
+        {
+            affected += mutation.Value
+                ? await UpsertAssociationAsync(
+                    mutation.Key.id1,
+                    mutation.Key.atype,
+                    mutation.Key.id2,
+                    time,
+                    cancellationToken)
+                : await DeleteAssociationRowAsync(
+                    mutation.Key.id1,
+                    mutation.Key.atype,
+                    mutation.Key.id2,
+                    cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+
+        await TryRedisWriteAsync(async () =>
+        {
+            foreach (var key in expanded.Keys.Select(item => (item.id1, item.atype)).Distinct())
+            {
+                await DeleteAssociationCacheAsync(key.id1, key.atype);
+            }
+        });
+
+        return affected > 0;
+    }
+
+    public Task<bool> HasAssociationAsync(
+        long id1,
+        short atype,
+        long id2,
+        CancellationToken cancellationToken = default)
+    {
+        if (!GraphAssociationRules.IsKnown(atype))
+        {
+            return Task.FromResult(false);
+        }
+
+        return _dbContext.AssociationsTb
+            .AsNoTracking()
+            .AnyAsync(item => item.id1 == id1 && item.atype == atype && item.id2 == id2, cancellationToken);
     }
 
     public async Task<bool> DeleteOneAssociationAsync(
@@ -74,11 +143,14 @@ public sealed class AssociationService : IAssociationService
 
         await transaction.CommitAsync(cancellationToken);
 
-        await RemoveFromCacheIfLoadedAsync(id1, atype, id2);
-        if (TryGetInverseAssociationType(atype, out inverseAtype))
+        await TryRedisWriteAsync(async () =>
         {
-            await RemoveFromCacheIfLoadedAsync(id2, inverseAtype, id1);
-        }
+            await RemoveFromCacheIfLoadedAsync(id1, atype, id2);
+            if (TryGetInverseAssociationType(atype, out var cacheInverseAtype))
+            {
+                await RemoveFromCacheIfLoadedAsync(id2, cacheInverseAtype, id1);
+            }
+        });
 
         return rows > 0;
     }
@@ -122,14 +194,17 @@ public sealed class AssociationService : IAssociationService
 
         await transaction.CommitAsync(cancellationToken);
 
-        await DeleteAssociationCacheAsync(id1, atype);
-        if (TryGetInverseAssociationType(atype, out inverseAtype))
+        await TryRedisWriteAsync(async () =>
         {
-            foreach (var inverseId in inverseIds)
+            await DeleteAssociationCacheAsync(id1, atype);
+            if (TryGetInverseAssociationType(atype, out var cacheInverseAtype))
             {
-                await RemoveFromCacheIfLoadedAsync(inverseId, inverseAtype, id1);
+                foreach (var inverseId in inverseIds)
+                {
+                    await RemoveFromCacheIfLoadedAsync(inverseId, cacheInverseAtype, id1);
+                }
             }
-        }
+        });
 
         return rows > 0;
     }
@@ -148,10 +223,13 @@ public sealed class AssociationService : IAssociationService
             new object[] { new NpgsqlParameter("id", objectId) },
             cancellationToken);
 
-        foreach (var key in affectedKeys)
+        await TryRedisWriteAsync(async () =>
         {
-            await DeleteAssociationCacheAsync(key.id1, key.atype);
-        }
+            foreach (var key in affectedKeys)
+            {
+                await DeleteAssociationCacheAsync(key.id1, key.atype);
+            }
+        });
 
         return rows;
     }
@@ -161,8 +239,18 @@ public sealed class AssociationService : IAssociationService
         short atype,
         CancellationToken cancellationToken = default)
     {
-        await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
-        return await _redis.SortedSetLengthAsync(AssociationKey(id1, atype));
+        try
+        {
+            await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
+            return await _redis.SortedSetLengthAsync(AssociationKey(id1, atype));
+        }
+        catch (RedisException exception)
+        {
+            LogRedisFallback(exception);
+            return await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .LongCountAsync(item => item.id1 == id1 && item.atype == atype, cancellationToken);
+        }
     }
 
     public async Task<AssociationPageResult> RetrieveAssociationAsync(
@@ -175,36 +263,58 @@ public sealed class AssociationService : IAssociationService
         var skip = ParseCursor(cursor);
         var take = Math.Clamp(limit, 1, 100);
 
-        await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
+        try
+        {
+            await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
 
-        var key = AssociationKey(id1, atype);
-        var entries = await _redis.SortedSetRangeByRankWithScoresAsync(
-            key,
-            skip,
-            skip + take - 1,
-            Order.Descending);
+            var key = AssociationKey(id1, atype);
+            var entries = await _redis.SortedSetRangeByRankWithScoresAsync(
+                key,
+                skip,
+                skip + take - 1,
+                Order.Descending);
 
-        var items = entries
-            .Select(entry => new AssociationEdgeResult(ParseId(entry.Element), (long)entry.Score))
-            .ToArray();
+            var items = entries
+                .Select(entry => new AssociationEdgeResult(ParseId(entry.Element), (long)entry.Score))
+                .ToArray();
 
-        var total = await _redis.SortedSetLengthAsync(key);
-        var nextOffset = skip + items.Length;
-        var nextCursor = nextOffset < total
-            ? nextOffset.ToString(CultureInfo.InvariantCulture)
-            : null;
+            var total = await _redis.SortedSetLengthAsync(key);
+            var nextOffset = skip + items.Length;
+            var nextCursor = nextOffset < total
+                ? nextOffset.ToString(CultureInfo.InvariantCulture)
+                : null;
 
-        return new AssociationPageResult(items, nextCursor);
+            return new AssociationPageResult(items, nextCursor);
+        }
+        catch (RedisException exception)
+        {
+            LogRedisFallback(exception);
+            var rows = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == id1 && item.atype == atype)
+                .OrderByDescending(item => item.time)
+                .ThenByDescending(item => item.id2)
+                .Skip((int)Math.Min(skip, int.MaxValue))
+                .Take(take + 1)
+                .ToListAsync(cancellationToken);
+            var hasNext = rows.Count > take;
+            var items = rows.Take(take)
+                .Select(item => new AssociationEdgeResult(item.id2, item.time))
+                .ToArray();
+            return new AssociationPageResult(
+                items,
+                hasNext ? (skip + items.Length).ToString(CultureInfo.InvariantCulture) : null);
+        }
     }
 
-    private async Task UpsertAssociationAsync(
+    private async Task<int> UpsertAssociationAsync(
         long id1,
         short atype,
         long id2,
         long time,
         CancellationToken cancellationToken)
     {
-        await _dbContext.Database.ExecuteSqlRawAsync(
+        return await _dbContext.Database.ExecuteSqlRawAsync(
             """
             INSERT INTO social_graph.associations (id1, atype, id2, time)
             VALUES (@id1, @atype, @id2, @time)
@@ -307,7 +417,42 @@ public sealed class AssociationService : IAssociationService
 
     private static bool TryGetInverseAssociationType(short atype, out short inverseAtype)
     {
-        return InverseAssociationTypes.TryGetValue(atype, out inverseAtype);
+        return GraphAssociationRules.TryGetInverse(atype, out inverseAtype);
+    }
+
+    private async Task ValidateAssociationAsync(
+        long id1,
+        short atype,
+        long id2,
+        CancellationToken cancellationToken)
+    {
+        if (!GraphAssociationRules.IsKnown(atype))
+        {
+            throw new ArgumentOutOfRangeException(nameof(atype), $"Unsupported association type: {atype}.");
+        }
+
+        if (id1 <= 0 || id2 <= 0 || id1 == id2)
+        {
+            throw new ArgumentException("Association endpoints must be different positive object IDs.");
+        }
+
+        var endpointTypes = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => item.id == id1 || item.id == id2)
+            .Select(item => new { item.id, item.otype })
+            .ToDictionaryAsync(item => item.id, item => item.otype, cancellationToken);
+
+        if (!endpointTypes.TryGetValue(id1, out var sourceType) ||
+            !endpointTypes.TryGetValue(id2, out var targetType))
+        {
+            throw new InvalidOperationException("Both association endpoints must exist.");
+        }
+
+        if (!GraphAssociationRules.IsValidForObjectTypes(atype, sourceType, targetType))
+        {
+            throw new InvalidOperationException(
+                $"Association type {atype} is invalid between object types {sourceType} and {targetType}.");
+        }
     }
 
     private static bool IsSameAssociation(long id1, short atype, long id2, long otherId1, short otherAtype, long otherId2)
@@ -334,11 +479,28 @@ public sealed class AssociationService : IAssociationService
 
     private static RedisKey AssociationKey(long id1, short atype)
     {
-        return $"{id1.ToString(CultureInfo.InvariantCulture)}:{atype.ToString(CultureInfo.InvariantCulture)}";
+        return $"{CacheKeyPrefix}:{id1.ToString(CultureInfo.InvariantCulture)}:{atype.ToString(CultureInfo.InvariantCulture)}";
     }
 
     private static RedisKey AssociationMarkerKey(long id1, short atype)
     {
         return $"{AssociationKey(id1, atype)}:cached";
+    }
+
+    private async Task TryRedisWriteAsync(Func<Task> operation)
+    {
+        try
+        {
+            await operation();
+        }
+        catch (RedisException exception)
+        {
+            LogRedisFallback(exception);
+        }
+    }
+
+    private void LogRedisFallback(RedisException exception)
+    {
+        _logger.LogWarning(exception, "Redis is unavailable; SocialGraph association access is using PostgreSQL only.");
     }
 }

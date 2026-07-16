@@ -12,7 +12,10 @@ public interface IUserGraphService
     Task<UserProfileResult?> ChangeUserBackgroundAsync(long userId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> SetUserVerifyAsync(long userId, DateTimeOffset? expiresAt, CancellationToken cancellationToken = default);
     Task<bool> SendFriendRequestAsync(long requesterId, long receiverId, CancellationToken cancellationToken = default);
+    Task<bool> CancelFriendRequestAsync(long requesterId, long receiverId, CancellationToken cancellationToken = default);
     Task<bool> AcceptFriendRequestAsync(long requesterId, long receiverId, CancellationToken cancellationToken = default);
+    Task<bool> RejectFriendRequestAsync(long requesterId, long receiverId, CancellationToken cancellationToken = default);
+    Task<bool> UnfriendAsync(long userId, long friendId, CancellationToken cancellationToken = default);
     Task<bool> FollowUserAsync(long followerId, long targetUserId, CancellationToken cancellationToken = default);
     Task<bool> UnfollowUserAsync(long followerId, long targetUserId, CancellationToken cancellationToken = default);
     Task<bool> BlockUserAsync(long blockerId, long blockedUserId, CancellationToken cancellationToken = default);

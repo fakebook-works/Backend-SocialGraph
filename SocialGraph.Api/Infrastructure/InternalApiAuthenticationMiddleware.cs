@@ -1,7 +1,5 @@
 namespace SocialGraph.Api.Infrastructure;
 
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 public sealed class InternalApiAuthenticationMiddleware
@@ -25,10 +23,8 @@ public sealed class InternalApiAuthenticationMiddleware
             return;
         }
 
-        var expectedSecret = _configuration["Gateway:InternalSharedSecret"] ??
-                             _configuration["InternalServices:SharedSecret"] ??
-                             string.Empty;
-        if (Encoding.UTF8.GetByteCount(expectedSecret) < 32)
+        var authentication = InternalCallerAuthentication.Validate(_configuration, context.Request.Headers);
+        if (authentication == InternalAuthenticationResult.NotConfigured)
         {
             await WriteErrorAsync(
                 context,
@@ -38,10 +34,7 @@ public sealed class InternalApiAuthenticationMiddleware
             return;
         }
 
-        var providedSecret = context.Request.Headers[SecretHeaderName].ToString();
-        var expectedBytes = Encoding.UTF8.GetBytes(expectedSecret);
-        var providedBytes = Encoding.UTF8.GetBytes(providedSecret);
-        if (!CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes))
+        if (authentication != InternalAuthenticationResult.Valid)
         {
             await WriteErrorAsync(
                 context,

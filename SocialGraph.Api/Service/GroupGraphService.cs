@@ -215,9 +215,183 @@ public sealed class GroupGraphService : IGroupGraphService
             cancellationToken);
     }
 
+    public Task<bool> IsAdminAsync(long userId, long groupId, CancellationToken cancellationToken = default)
+    {
+        return _associationService.HasAssociationAsync(
+            userId,
+            GraphAssociationType.Admin,
+            groupId,
+            cancellationToken);
+    }
+
+    public async Task<bool> RequestJoinAsync(long userId, long groupId, CancellationToken cancellationToken = default)
+    {
+        if (!await AreUserAndGroupAsync(userId, groupId, cancellationToken) ||
+            await IsParticipantAsync(userId, groupId, cancellationToken) ||
+            await _associationService.HasAssociationAsync(userId, GraphAssociationType.GroupJoinRequest, groupId, cancellationToken))
+        {
+            return false;
+        }
+
+        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        var groupData = GraphJson.ParseObject(group!.data);
+        if (GraphJson.Int(groupData, "privacy") == 0)
+        {
+            return await AddMemberAsync(groupId, userId, cancellationToken);
+        }
+
+        await _associationService.AddAssociationAsync(
+            userId,
+            GraphAssociationType.GroupJoinRequest,
+            groupId,
+            cancellationToken);
+
+        var admins = await _associationService.RetrieveAssociationAsync(
+            groupId,
+            GraphAssociationType.HaveAdmin,
+            null,
+            100,
+            cancellationToken);
+        foreach (var admin in admins.items)
+        {
+            await _externalServiceClient.NotifyAsync(
+                userId,
+                admin.id2,
+                ExternalNotificationAction.GroupJoin,
+                groupId,
+                null,
+                cancellationToken);
+        }
+
+        return true;
+    }
+
+    public Task<bool> CancelJoinRequestAsync(long userId, long groupId, CancellationToken cancellationToken = default)
+    {
+        return _associationService.DeleteOneAssociationAsync(
+            userId,
+            GraphAssociationType.GroupJoinRequest,
+            groupId,
+            cancellationToken);
+    }
+
+    public async Task<bool> ApproveJoinRequestAsync(
+        long adminId,
+        long groupId,
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await IsAdminAsync(adminId, groupId, cancellationToken) ||
+            !await _associationService.HasAssociationAsync(userId, GraphAssociationType.GroupJoinRequest, groupId, cancellationToken))
+        {
+            return false;
+        }
+
+        var added = await _associationService.ApplyMutationsAsync(
+            new AssociationMutation[]
+            {
+                new(userId, GraphAssociationType.GroupJoinRequest, groupId, false),
+                new(userId, GraphAssociationType.Member, groupId, true)
+            },
+            cancellationToken);
+        if (added)
+        {
+            await _externalServiceClient.NotifyAsync(
+                adminId,
+                userId,
+                ExternalNotificationAction.GroupAccept,
+                groupId,
+                null,
+                cancellationToken);
+        }
+
+        return added;
+    }
+
+    public async Task<bool> RejectJoinRequestAsync(
+        long adminId,
+        long groupId,
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await IsAdminAsync(adminId, groupId, cancellationToken))
+        {
+            return false;
+        }
+
+        return await _associationService.DeleteOneAssociationAsync(
+            userId,
+            GraphAssociationType.GroupJoinRequest,
+            groupId,
+            cancellationToken);
+    }
+
+    public async Task<bool> InviteUserAsync(
+        long adminId,
+        long groupId,
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await IsAdminAsync(adminId, groupId, cancellationToken) ||
+            !await AreUserAndGroupAsync(userId, groupId, cancellationToken) ||
+            await IsParticipantAsync(userId, groupId, cancellationToken) ||
+            await _associationService.HasAssociationAsync(
+                userId,
+                GraphAssociationType.GroupJoinRequest,
+                groupId,
+                cancellationToken) ||
+            await _associationService.HasAssociationAsync(
+                adminId,
+                GraphAssociationType.Blocked,
+                userId,
+                cancellationToken) ||
+            await _associationService.HasAssociationAsync(
+                adminId,
+                GraphAssociationType.BlockedBy,
+                userId,
+                cancellationToken))
+        {
+            return false;
+        }
+
+        await _externalServiceClient.NotifyAsync(
+            adminId,
+            userId,
+            ExternalNotificationAction.GroupInvite,
+            groupId,
+            null,
+            cancellationToken);
+        return true;
+    }
+
+    public async Task<bool> LeaveGroupAsync(long userId, long groupId, CancellationToken cancellationToken = default)
+    {
+        if (await IsAdminAsync(userId, groupId, cancellationToken))
+        {
+            var adminCount = await _associationService.CountAssociationAsync(
+                groupId,
+                GraphAssociationType.HaveAdmin,
+                cancellationToken);
+            if (adminCount <= 1)
+            {
+                return false;
+            }
+
+            return await RemoveAdminAsync(groupId, userId, cancellationToken);
+        }
+
+        return await RemoveMemberAsync(groupId, userId, cancellationToken);
+    }
+
     public Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
-        return _associationService.AddAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken);
+        return _associationService.ApplyMutationsAsync(
+            new AssociationMutation[]
+            {
+                new(userId, GraphAssociationType.GroupJoinRequest, groupId, false),
+                new(userId, GraphAssociationType.Member, groupId, true)
+            },
+            cancellationToken);
     }
 
     public Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
@@ -227,13 +401,54 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
-        await RemoveMemberAsync(groupId, userId, cancellationToken);
-        return await _associationService.AddAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
+        return await _associationService.ApplyMutationsAsync(
+            new AssociationMutation[]
+            {
+                new(userId, GraphAssociationType.Member, groupId, false),
+                new(userId, GraphAssociationType.Admin, groupId, true)
+            },
+            cancellationToken);
     }
 
-    public Task<bool> RemoveAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
+    public async Task<bool> RemoveAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
-        return _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
+        if (!await IsAdminAsync(userId, groupId, cancellationToken))
+        {
+            return false;
+        }
+
+        var adminCount = await _associationService.CountAssociationAsync(
+            groupId,
+            GraphAssociationType.HaveAdmin,
+            cancellationToken);
+        if (adminCount <= 1)
+        {
+            return false;
+        }
+
+        return await _associationService.DeleteOneAssociationAsync(
+            userId,
+            GraphAssociationType.Admin,
+            groupId,
+            cancellationToken);
+    }
+
+    private async Task<bool> AreUserAndGroupAsync(long userId, long groupId, CancellationToken cancellationToken)
+    {
+        if (userId <= 0 || groupId <= 0)
+        {
+            return false;
+        }
+
+        var user = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        return user?.otype == GraphObjectType.User && group?.otype == GraphObjectType.Group;
+    }
+
+    public async Task<bool> IsParticipantAsync(long userId, long groupId, CancellationToken cancellationToken = default)
+    {
+        return await _associationService.HasAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken) ||
+               await _associationService.HasAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
     }
 
     private async Task AddOwnedPhotoAsync(long ownerId, string url, CancellationToken cancellationToken)

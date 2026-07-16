@@ -12,13 +12,19 @@ using StackExchange.Redis;
 
 public sealed class ObjectService : IObjectService
 {
+    private const string CacheKeyPrefix = "socialgraph:v2:object";
     private readonly MyDbContext _dbContext;
     private readonly IDatabase _redis;
+    private readonly ILogger<ObjectService> _logger;
 
-    public ObjectService(MyDbContext dbContext, IConnectionMultiplexer redis)
+    public ObjectService(
+        MyDbContext dbContext,
+        IConnectionMultiplexer redis,
+        ILogger<ObjectService> logger)
     {
         _dbContext = dbContext;
         _redis = redis.GetDatabase();
+        _logger = logger;
     }
 
     public async Task<SocialGraphObjectResult> AddObjectAsync(
@@ -112,12 +118,14 @@ public sealed class ObjectService : IObjectService
             new object[] { new NpgsqlParameter("id", id) },
             cancellationToken);
 
-        if (rows > 0)
-        {
-            await _redis.KeyDeleteAsync(ObjectKey(id));
-        }
+        await InvalidateObjectCacheAsync(id);
 
         return rows > 0;
+    }
+
+    public Task InvalidateObjectCacheAsync(long id)
+    {
+        return TryRedisWriteAsync(() => _redis.KeyDeleteAsync(ObjectKey(id)));
     }
 
     public async Task<SocialGraphObjectResult?> RetrieveObjectAsync(
@@ -152,56 +160,88 @@ public sealed class ObjectService : IObjectService
             ["data"] = JsonNode.Parse(item.data)
         }.ToJsonString();
 
-        await _redis.ExecuteAsync("JSON.SET", ObjectKey(item.id), "$", payload);
+        await TryRedisWriteAsync(() => _redis.ExecuteAsync("JSON.SET", ObjectKey(item.id), "$", payload));
     }
 
     private async Task PatchCachedObjectAsync(long id, JsonObject patch)
     {
-        var key = ObjectKey(id);
-        if (!await _redis.KeyExistsAsync(key))
+        try
         {
-            return;
-        }
+            var key = ObjectKey(id);
+            if (!await _redis.KeyExistsAsync(key))
+            {
+                return;
+            }
 
-        foreach (var item in patch)
+            foreach (var item in patch)
+            {
+                await _redis.ExecuteAsync("JSON.SET", key, $"$.data.{item.Key}", ToJson(item.Value));
+            }
+        }
+        catch (RedisException exception)
         {
-            await _redis.ExecuteAsync("JSON.SET", key, $"$.data.{item.Key}", ToJson(item.Value));
+            LogRedisFallback(exception);
         }
     }
 
     private async Task<SocialGraphObjectResult?> TryGetCachedObjectAsync(long id)
     {
-        var key = ObjectKey(id);
-        var result = await _redis.ExecuteAsync("JSON.GET", key);
-        if (result.IsNull)
-        {
-            return null;
-        }
-
-        var json = result.ToString();
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
         try
         {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            var otype = root.GetProperty("otype").GetInt16();
-            var data = root.GetProperty("data").GetRawText();
-            return new SocialGraphObjectResult(id, otype, data);
+            var key = ObjectKey(id);
+            var result = await _redis.ExecuteAsync("JSON.GET", key);
+            if (result.IsNull)
+            {
+                return null;
+            }
+
+            var json = result.ToString();
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                var otype = root.GetProperty("otype").GetInt16();
+                var data = root.GetProperty("data").GetRawText();
+                return new SocialGraphObjectResult(id, otype, data);
+            }
+            catch (JsonException)
+            {
+                await TryRedisWriteAsync(() => _redis.KeyDeleteAsync(key));
+                return null;
+            }
         }
-        catch (JsonException)
+        catch (RedisException exception)
         {
-            await _redis.KeyDeleteAsync(key);
+            LogRedisFallback(exception);
             return null;
         }
     }
 
     private static string ObjectKey(long id)
     {
-        return id.ToString(CultureInfo.InvariantCulture);
+        return $"{CacheKeyPrefix}:{id.ToString(CultureInfo.InvariantCulture)}";
+    }
+
+    private async Task TryRedisWriteAsync(Func<Task> operation)
+    {
+        try
+        {
+            await operation();
+        }
+        catch (RedisException exception)
+        {
+            LogRedisFallback(exception);
+        }
+    }
+
+    private void LogRedisFallback(RedisException exception)
+    {
+        _logger.LogWarning(exception, "Redis is unavailable; SocialGraph object access is using PostgreSQL only.");
     }
 
     private static string ToJson(JsonNode? node)

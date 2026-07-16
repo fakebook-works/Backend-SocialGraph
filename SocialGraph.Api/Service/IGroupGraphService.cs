@@ -12,6 +12,14 @@ public interface IGroupGraphService
     Task<GroupResult?> ChangeGroupBackgroundAsync(long groupId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<VisitedGroupPageResult> GetVisitedGroupsAsync(long userId, int limit, string? cursor, CancellationToken cancellationToken = default);
     Task<bool> RecordGroupVisitAsync(long userId, long groupId, CancellationToken cancellationToken = default);
+    Task<bool> IsAdminAsync(long userId, long groupId, CancellationToken cancellationToken = default);
+    Task<bool> IsParticipantAsync(long userId, long groupId, CancellationToken cancellationToken = default);
+    Task<bool> RequestJoinAsync(long userId, long groupId, CancellationToken cancellationToken = default);
+    Task<bool> CancelJoinRequestAsync(long userId, long groupId, CancellationToken cancellationToken = default);
+    Task<bool> ApproveJoinRequestAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
+    Task<bool> RejectJoinRequestAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
+    Task<bool> InviteUserAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
+    Task<bool> LeaveGroupAsync(long userId, long groupId, CancellationToken cancellationToken = default);
     Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default);

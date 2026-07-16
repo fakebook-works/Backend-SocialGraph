@@ -1,8 +1,6 @@
 namespace SocialGraph.Api.Infrastructure;
 
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using HotChocolate;
 
 public interface ITrustedCallerAccessor
@@ -31,18 +29,15 @@ public sealed class TrustedCallerAccessor : ITrustedCallerAccessor
         var context = _httpContextAccessor.HttpContext ??
             throw Error("UNAUTHENTICATED", "Trusted caller context is unavailable.");
 
-        var expectedSecret = _configuration["Gateway:InternalSharedSecret"] ??
-                             _configuration["InternalServices:SharedSecret"] ??
-                             string.Empty;
-        if (Encoding.UTF8.GetByteCount(expectedSecret) < 32)
+        var authentication = InternalCallerAuthentication.Validate(_configuration, context.Request.Headers);
+        if (authentication == InternalAuthenticationResult.NotConfigured)
         {
             throw Error(
                 "INTERNAL_AUTH_NOT_CONFIGURED",
                 "Internal service authentication is not configured.");
         }
 
-        var providedSecret = context.Request.Headers[InternalApiAuthenticationMiddleware.SecretHeaderName].ToString();
-        if (!SecretsMatch(expectedSecret, providedSecret))
+        if (authentication != InternalAuthenticationResult.Valid)
         {
             throw Error("FORBIDDEN", "Trusted Gateway authentication failed.");
         }
@@ -65,14 +60,6 @@ public sealed class TrustedCallerAccessor : ITrustedCallerAccessor
         }
 
         return userId;
-    }
-
-    private static bool SecretsMatch(string expected, string actual)
-    {
-        var expectedBytes = Encoding.UTF8.GetBytes(expected);
-        var actualBytes = Encoding.UTF8.GetBytes(actual);
-        return expectedBytes.Length == actualBytes.Length &&
-               CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes);
     }
 
     private static GraphQLException Error(string code, string message)

@@ -34,7 +34,7 @@ public sealed class ContentGraphService : IContentGraphService
         var post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
         var media = await AttachMediaAsync(input.AuthorId, post.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(post.id, "post", input.Content, cancellationToken);
+        await _externalServiceClient.CreateSearchIndexAsync(post.id, "feedPost", input.Content, cancellationToken);
         await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
         return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
     }
@@ -45,20 +45,73 @@ public sealed class ContentGraphService : IContentGraphService
         var media = await AttachMediaAsync(input.AuthorId, post.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
         await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(post.id, "post", input.Content, cancellationToken);
+        await _externalServiceClient.CreateSearchIndexAsync(post.id, "groupPost", input.Content, cancellationToken);
         await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
         return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
     }
 
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default)
     {
+        var current = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+        if (current?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost))
+        {
+            return null;
+        }
+
+        var currentData = GraphJson.ParseObject(current.data);
+        var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
         var post = await _objectService.UpdateObjectAsync(
             input.Id,
-            GraphObjectType.FeedPost,
-            GraphJson.PatchJson(("privacy", input.Privacy)),
+            current.otype,
+            GraphJson.PatchJson(
+                ("content", input.Content),
+                ("privacy", current.otype == GraphObjectType.FeedPost ? input.Privacy : null)),
             cancellationToken);
+        if (post is null)
+        {
+            return null;
+        }
 
-        return post is null ? null : await GetContentAsync(input.Id, cancellationToken);
+        IReadOnlyList<MediaResult> media;
+        if (input.Media is null)
+        {
+            media = await GetMediaAsync(input.Id, cancellationToken);
+        }
+        else
+        {
+            var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
+            foreach (var mediaId in existingMediaIds)
+            {
+                await _associationService.DeleteOneAssociationAsync(
+                    input.Id,
+                    GraphAssociationType.Contained,
+                    mediaId,
+                    cancellationToken);
+            }
+
+            media = await AttachMediaAsync(authorId, input.Id, input.Media, cancellationToken);
+        }
+
+        var content = input.Content ?? GraphJson.String(currentData, "content");
+        if (input.Content is not null)
+        {
+            await _externalServiceClient.UpdateSearchIndexAsync(
+                input.Id,
+                current.otype == GraphObjectType.FeedPost ? "feedPost" : "groupPost",
+                content,
+                cancellationToken);
+        }
+
+        if (input.Content is not null || input.Media is not null)
+        {
+            await _externalServiceClient.CreatePostEmbeddingAsync(
+                input.Id,
+                content,
+                media.Select(item => item.Url).ToArray(),
+                cancellationToken);
+        }
+
+        return await BuildContentResultAsync(post, authorId, media, cancellationToken);
     }
 
     public async Task<bool> DeleteContentAsync(long contentId, CancellationToken cancellationToken = default)
@@ -71,7 +124,9 @@ public sealed class ContentGraphService : IContentGraphService
 
         await _associationService.DeleteObjectAssociationsAsync(contentId, cancellationToken);
         var deleted = await _objectService.DeleteObjectAsync(contentId, cancellationToken);
-        if (deleted && (item.otype == GraphObjectType.FeedPost || item.otype == GraphObjectType.GroupPost))
+        if (deleted && (item.otype == GraphObjectType.FeedPost ||
+                        item.otype == GraphObjectType.GroupPost ||
+                        item.otype == GraphObjectType.Reel))
         {
             await _externalServiceClient.DeletePostEmbeddingAsync(contentId, cancellationToken);
             await _externalServiceClient.DeleteSearchIndexAsync(contentId, cancellationToken);
@@ -91,6 +146,15 @@ public sealed class ContentGraphService : IContentGraphService
         var authorId = await GetAuthorIdAsync(contentId, cancellationToken);
         var media = await GetMediaAsync(contentId, cancellationToken);
         return await BuildContentResultAsync(item, authorId, media, cancellationToken);
+    }
+
+    public Task<bool> IsAuthorAsync(long userId, long contentId, CancellationToken cancellationToken = default)
+    {
+        return _associationService.HasAssociationAsync(
+            userId,
+            GraphAssociationType.Authored,
+            contentId,
+            cancellationToken);
     }
 
     public async Task<IHomePostResult?> GetPostDetailAsync(
@@ -277,14 +341,33 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default)
     {
         var comment = await _objectService.AddObjectAsync(GraphObjectType.Comment, GraphJson.ContentJson(input.Content), cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, comment.id, cancellationToken);
-        await _associationService.AddAssociationAsync(input.TargetId, GraphAssociationType.Comment, comment.id, cancellationToken);
+        try
+        {
+            await _associationService.ApplyMutationsAsync(
+                new AssociationMutation[]
+                {
+                    new(input.AuthorId, GraphAssociationType.Authored, comment.id, true),
+                    new(input.TargetId, GraphAssociationType.HaveComment, comment.id, true)
+                },
+                cancellationToken);
+        }
+        catch
+        {
+            await _objectService.DeleteObjectAsync(comment.id, cancellationToken);
+            throw;
+        }
 
         var targetAuthorId = await GetAuthorIdAsync(input.TargetId, cancellationToken);
         if (targetAuthorId > 0 && targetAuthorId != input.AuthorId)
         {
             await _externalServiceClient.NotifyAsync(input.AuthorId, targetAuthorId, ExternalNotificationAction.Comment, input.TargetId, null, cancellationToken);
         }
+
+        await QueueRecommendationInteractionIfContentAsync(
+            input.AuthorId,
+            input.TargetId,
+            RecommendationInteractionAction.Comment,
+            cancellationToken);
 
         return await BuildContentResultAsync(comment, input.AuthorId, Array.Empty<MediaResult>(), cancellationToken);
     }
@@ -314,6 +397,28 @@ public sealed class ContentGraphService : IContentGraphService
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
         await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, input.SharedSourceId, cancellationToken);
+        await _externalServiceClient.RecordRecommendationInteractionAsync(
+            input.AuthorId,
+            input.SharedSourceId,
+            RecommendationInteractionAction.Share,
+            cancellationToken);
+
+        var sourceAuthorId = sharedSource switch
+        {
+            FeedPostSharedSourceResult feedPost => feedPost.Author?.Id ?? 0,
+            ReelSharedSourceResult reel => reel.Author?.Id ?? 0,
+            _ => 0
+        };
+        if (sourceAuthorId > 0 && sourceAuthorId != input.AuthorId)
+        {
+            await _externalServiceClient.NotifyAsync(
+                input.AuthorId,
+                sourceAuthorId,
+                ExternalNotificationAction.Share,
+                input.SharedSourceId,
+                new { shareId = story.id, shareType = "story" },
+                cancellationToken);
+        }
 
         return BuildShareStoryResult(story, sharedSource);
     }
@@ -482,6 +587,8 @@ public sealed class ContentGraphService : IContentGraphService
         var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.ContentJson(input.Content), cancellationToken);
         var media = await AttachSingleMediaAsync(input.AuthorId, reel.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
+        await _externalServiceClient.CreateSearchIndexAsync(reel.id, "reel", input.Content, cancellationToken);
+        await _externalServiceClient.CreatePostEmbeddingAsync(reel.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
         return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
     }
 
@@ -489,39 +596,104 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var post = await CreateFeedPostAsync(new CreateFeedPostInput(input.AuthorId, input.Content, input.Privacy, Array.Empty<MediaInput>()), cancellationToken);
         await _associationService.AddAssociationAsync(post.Id, GraphAssociationType.Share, input.SourceId, cancellationToken);
+        await QueueRecommendationInteractionIfContentAsync(
+            input.AuthorId,
+            input.SourceId,
+            RecommendationInteractionAction.Share,
+            cancellationToken);
+        var sourceAuthorId = await GetAuthorIdAsync(input.SourceId, cancellationToken);
+        if (sourceAuthorId > 0 && sourceAuthorId != input.AuthorId)
+        {
+            await _externalServiceClient.NotifyAsync(
+                input.AuthorId,
+                sourceAuthorId,
+                ExternalNotificationAction.Share,
+                input.SourceId,
+                new { shareId = post.Id, shareType = "feedPost" },
+                cancellationToken);
+        }
+
         return post;
     }
 
     public async Task<bool> LikeAsync(long userId, long targetId, CancellationToken cancellationToken = default)
     {
         var result = await _associationService.AddAssociationAsync(userId, GraphAssociationType.Liked, targetId, cancellationToken);
-        var targetAuthorId = await GetAuthorIdAsync(targetId, cancellationToken);
-        if (targetAuthorId > 0 && targetAuthorId != userId)
+        if (result)
         {
-            await _externalServiceClient.NotifyAsync(userId, targetAuthorId, ExternalNotificationAction.Like, targetId, null, cancellationToken);
+            await QueueRecommendationInteractionIfContentAsync(
+                userId,
+                targetId,
+                RecommendationInteractionAction.Like,
+                cancellationToken);
+            var targetAuthorId = await GetAuthorIdAsync(targetId, cancellationToken);
+            if (targetAuthorId > 0 && targetAuthorId != userId)
+            {
+                await _externalServiceClient.NotifyAsync(userId, targetAuthorId, ExternalNotificationAction.Like, targetId, null, cancellationToken);
+            }
         }
 
         return result;
     }
 
-    public Task<bool> UnlikeAsync(long userId, long targetId, CancellationToken cancellationToken = default)
+    public async Task<bool> UnlikeAsync(long userId, long targetId, CancellationToken cancellationToken = default)
     {
-        return _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Liked, targetId, cancellationToken);
+        var result = await _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Liked, targetId, cancellationToken);
+        if (result)
+        {
+            await QueueRecommendationInteractionIfContentAsync(
+                userId,
+                targetId,
+                RecommendationInteractionAction.Unlike,
+                cancellationToken);
+        }
+
+        return result;
     }
 
-    public Task<bool> SaveAsync(long userId, long targetId, CancellationToken cancellationToken = default)
+    public async Task<bool> SaveAsync(long userId, long targetId, CancellationToken cancellationToken = default)
     {
-        return _associationService.AddAssociationAsync(userId, GraphAssociationType.Saved, targetId, cancellationToken);
+        var result = await _associationService.AddAssociationAsync(userId, GraphAssociationType.Saved, targetId, cancellationToken);
+        if (result)
+        {
+            await QueueRecommendationInteractionIfContentAsync(
+                userId,
+                targetId,
+                RecommendationInteractionAction.Save,
+                cancellationToken);
+        }
+
+        return result;
     }
 
-    public Task<bool> UnsaveAsync(long userId, long targetId, CancellationToken cancellationToken = default)
+    public async Task<bool> UnsaveAsync(long userId, long targetId, CancellationToken cancellationToken = default)
     {
-        return _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Saved, targetId, cancellationToken);
+        var result = await _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Saved, targetId, cancellationToken);
+        if (result)
+        {
+            await QueueRecommendationInteractionIfContentAsync(
+                userId,
+                targetId,
+                RecommendationInteractionAction.Unsave,
+                cancellationToken);
+        }
+
+        return result;
     }
 
-    public Task<bool> WatchAsync(long userId, long targetId, CancellationToken cancellationToken = default)
+    public async Task<bool> WatchAsync(long userId, long targetId, CancellationToken cancellationToken = default)
     {
-        return _associationService.AddAssociationAsync(userId, GraphAssociationType.Watched, targetId, cancellationToken);
+        var result = await _associationService.AddAssociationAsync(userId, GraphAssociationType.Watched, targetId, cancellationToken);
+        if (result)
+        {
+            await QueueRecommendationInteractionIfContentAsync(
+                userId,
+                targetId,
+                RecommendationInteractionAction.Watch,
+                cancellationToken);
+        }
+
+        return result;
     }
 
     public async Task<bool> TagAsync(long postId, long userId, CancellationToken cancellationToken = default)
@@ -538,6 +710,25 @@ public sealed class ContentGraphService : IContentGraphService
         var authorId = await GetAuthorIdAsync(sourceId, cancellationToken);
         await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Mention, sourceId, null, cancellationToken);
         return result;
+    }
+
+    private async Task QueueRecommendationInteractionIfContentAsync(
+        long userId,
+        long targetId,
+        string action,
+        CancellationToken cancellationToken)
+    {
+        var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
+        if (target?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
+        {
+            return;
+        }
+
+        await _externalServiceClient.RecordRecommendationInteractionAsync(
+            userId,
+            targetId,
+            action,
+            cancellationToken);
     }
 
     private Task<IReadOnlyList<MediaResult>> AttachSingleMediaAsync(

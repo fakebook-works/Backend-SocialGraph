@@ -44,6 +44,32 @@ public sealed class InternalMiddlewareTests
     }
 
     [Fact]
+    public async Task InternalApi_AcceptsDedicatedSocialGraphServiceSecret()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["InternalServices:SocialGraph:SharedSecret"] = SharedSecret
+            })
+            .Build();
+        var context = new DefaultHttpContext();
+        context.Request.Path = "/internal/recommendation/post-candidates";
+        context.Request.Headers["X-Internal-SocialGraphService-Secret"] = SharedSecret;
+        var called = false;
+        var middleware = new InternalApiAuthenticationMiddleware(
+            _ =>
+            {
+                called = true;
+                return Task.CompletedTask;
+            },
+            configuration);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.True(called);
+    }
+
+    [Fact]
     public async Task CorrelationMiddleware_PreservesIncomingId_AndGeneratesMissingId()
     {
         var incomingContext = new DefaultHttpContext();
