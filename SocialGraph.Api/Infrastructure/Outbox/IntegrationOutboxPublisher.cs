@@ -198,6 +198,30 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
             cancellationToken);
     }
 
+    public Task FinalizeMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default)
+    {
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaFinalize, urls, cancellationToken);
+    }
+
+    public Task DeleteMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default)
+    {
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaDelete, urls, cancellationToken);
+    }
+
+    private Task EnqueueMediaLifecycleAsync(
+        string eventType,
+        IReadOnlyList<string> urls,
+        CancellationToken cancellationToken)
+    {
+        var normalized = urls
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return normalized.Length == 0
+            ? Task.CompletedTask
+            : EnqueueAsync(eventType, null, new MediaLifecycleEvent(normalized), cancellationToken);
+    }
+
     private Task UpsertSearchAsync(
         long objectId,
         string objectType,

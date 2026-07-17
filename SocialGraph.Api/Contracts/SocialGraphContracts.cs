@@ -42,9 +42,20 @@ public sealed record UpdateGroupInput(
 
 public sealed record MediaInput(int Type, string Url);
 
-public sealed record CreateFeedPostInput(long AuthorId, string Content, int Privacy, IReadOnlyList<MediaInput>? Media);
+public sealed record CreateFeedPostInput(
+    long AuthorId,
+    string Content,
+    int Privacy,
+    IReadOnlyList<MediaInput>? Media,
+    IReadOnlyList<long>? TaggedUserIds = null,
+    IReadOnlyList<long>? MentionedUserIds = null);
 
-public sealed record CreateGroupPostInput(long AuthorId, long GroupId, string Content, IReadOnlyList<MediaInput>? Media);
+public sealed record CreateGroupPostInput(
+    long AuthorId,
+    long GroupId,
+    string Content,
+    IReadOnlyList<MediaInput>? Media,
+    IReadOnlyList<long>? MentionedUserIds = null);
 
 public sealed record UpdatePostInput(
     long Id,
@@ -83,7 +94,7 @@ public sealed record UserProfileResult(
     string Location,
     int Privacy,
     string Create,
-    string Verify,
+    string? Verify,
     bool IsVerified,
     long FriendCount,
     long FollowerCount,
@@ -120,7 +131,8 @@ public sealed record FeedPostDetailResult(
     int Privacy,
     string Create,
     PostAuthorResult Author,
-    IReadOnlyList<MediaResult> Media) : IHomePostResult;
+    IReadOnlyList<MediaResult> Media,
+    SharedPostSourceResult? SharedSource = null) : IHomePostResult;
 
 [GraphQLName("GroupPostDetail")]
 public sealed record GroupPostDetailResult(
@@ -151,6 +163,14 @@ public sealed record PostGroupResult(
     string Name,
     string Avatar,
     bool CanJoin);
+
+public sealed record SharedPostSourceResult(
+    long Id,
+    bool IsAvailable,
+    short? Type,
+    string? Content,
+    UserSummaryResult? Author,
+    IReadOnlyList<MediaResult> Media);
 
 public sealed record UserSummaryResult(
     long Id,
@@ -216,6 +236,7 @@ public sealed record ReelShareStoryResult(
 public sealed record HomeStoryBucketResult(
     UserSummaryResult Author,
     string LatestCreate,
+    bool HasUnseen,
     IReadOnlyList<IHomeStoryResult> Stories);
 
 public sealed record HomeStoryPageResult(
@@ -241,6 +262,19 @@ public sealed record ProfileReelPageResult(
 
 public sealed record MediaPageResult(
     IReadOnlyList<MediaResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
+public sealed record PhotoItemResult(
+    MediaResult Media,
+    long ContentId,
+    short ContentType,
+    string Create,
+    long AuthorId,
+    long? GroupId);
+
+public sealed record PhotoPageResult(
+    IReadOnlyList<PhotoItemResult> Items,
     string? EndCursor,
     bool HasNextPage);
 

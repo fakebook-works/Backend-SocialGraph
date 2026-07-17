@@ -52,8 +52,7 @@ public static class GraphAssociationType
     public const short Mentioned = 26;
     public const short Saved = 27;
     public const short Contained = 28;
-    public const short Owned = 29;
-    public const short Visited = 30;
+    public const short Visited = 29;
 
     public const short MinValue = Friend;
     public const short MaxValue = Visited;

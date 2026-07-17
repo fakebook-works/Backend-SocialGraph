@@ -108,47 +108,39 @@ public sealed class SocialReadModelServiceTests
     }
 
     [Fact]
-    public async Task OwnedMedia_FiltersMediaWhoseContainingContentIsNotVisible()
+    public async Task UserPhotos_ReturnsOnlyMediaFromVisibleFeedPosts()
     {
         await using var context = CreateContext();
         const long visibleMediaId = 601;
         const long hiddenMediaId = 602;
         const long visiblePostId = 611;
         const long hiddenPostId = 612;
+        context.ObjectsTb.AddRange(
+            new Objects { id = visiblePostId, otype = GraphObjectType.FeedPost, data = ContentJson("visible") },
+            new Objects { id = hiddenPostId, otype = GraphObjectType.FeedPost, data = ContentJson("hidden") },
+            new Objects { id = visibleMediaId, otype = GraphObjectType.Media, data = MediaJson("visible") },
+            new Objects { id = hiddenMediaId, otype = GraphObjectType.Media, data = MediaJson("hidden") });
         context.AssociationsTb.AddRange(
+            Edge(TargetUserId, GraphAssociationType.Authored, visiblePostId),
+            Edge(TargetUserId, GraphAssociationType.Authored, hiddenPostId),
             Edge(visiblePostId, GraphAssociationType.Contained, visibleMediaId),
             Edge(hiddenPostId, GraphAssociationType.Contained, hiddenMediaId));
         await context.SaveChangesAsync();
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.RetrieveObjectAsync(TargetUserId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(TargetUserId, GraphObjectType.User, UserJson("Owner")));
-        objects.Setup(item => item.RetrieveObjectAsync(visibleMediaId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(visibleMediaId, GraphObjectType.Media, MediaJson("visible")));
-        objects.Setup(item => item.RetrieveObjectAsync(hiddenMediaId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(hiddenMediaId, GraphObjectType.Media, MediaJson("hidden")));
-        objects.Setup(item => item.RetrieveObjectAsync(visiblePostId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(visiblePostId, GraphObjectType.FeedPost, ContentJson("visible")));
-        objects.Setup(item => item.RetrieveObjectAsync(hiddenPostId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(hiddenPostId, GraphObjectType.FeedPost, ContentJson("hidden")));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
-        associations.Setup(item => item.RetrieveAssociationAsync(TargetUserId, GraphAssociationType.Owned, null, 40, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new AssociationPageResult(
-                new[]
-                {
-                    new AssociationEdgeResult(visibleMediaId, 2),
-                    new AssociationEdgeResult(hiddenMediaId, 1)
-                },
-                null));
         var content = new Mock<IContentGraphService>(MockBehavior.Loose);
-        content.Setup(item => item.GetPostDetailAsync(ViewerId, visiblePostId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(FeedPost(visiblePostId, TargetUserId));
-        content.Setup(item => item.GetPostDetailAsync(ViewerId, hiddenPostId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IHomePostResult?)null);
+        content.Setup(item => item.GetPostDetailsAsync(
+                ViewerId,
+                It.IsAny<IReadOnlyList<long>>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new IHomePostResult[] { FeedPost(visiblePostId, TargetUserId) });
         var service = CreateService(context, objects, associations, content);
 
-        var page = await service.GetOwnedMediaAsync(ViewerId, TargetUserId, null, null, 10);
+        var page = await service.GetUserPhotosAsync(ViewerId, TargetUserId, null, 10);
 
-        Assert.Equal(visibleMediaId, Assert.Single(page.Items).Id);
+        Assert.Equal(visibleMediaId, Assert.Single(page.Items).Media.Id);
     }
 
     [Fact]

@@ -67,22 +67,52 @@ public sealed class StoryServiceTests
     }
 
     [Fact]
-    public async Task CleanupExpiredStories_DeletesTemporaryMediaButPreservesOwnedMedia()
+    public async Task HomeStories_ReportsUnseenUntilEveryVisibleStoryIsWatched()
+    {
+        await using var context = CreateContext();
+        const long firstStoryId = 1_030;
+        const long secondStoryId = 1_031;
+        context.ObjectsTb.AddRange(
+            User(StoryAuthorId, "Story Author"),
+            new Objects { id = firstStoryId, otype = GraphObjectType.Story, data = ActiveStoryJson("first") },
+            new Objects { id = secondStoryId, otype = GraphObjectType.Story, data = ActiveStoryJson("second") });
+        context.AssociationsTb.AddRange(
+            Edge(StoryAuthorId, GraphAssociationType.Authored, firstStoryId),
+            Edge(StoryAuthorId, GraphAssociationType.Authored, secondStoryId),
+            Edge(ViewerId, GraphAssociationType.Watched, firstStoryId));
+        await context.SaveChangesAsync();
+        var service = CreateService(context, VisibleAuthorAssociations());
+
+        var partlyWatched = Assert.Single((await service.GetHomeStoriesAsync(ViewerId, 20, null)).Items);
+
+        Assert.True(partlyWatched.HasUnseen);
+
+        context.AssociationsTb.Add(Edge(ViewerId, GraphAssociationType.Watched, secondStoryId));
+        await context.SaveChangesAsync();
+
+        var fullyWatched = Assert.Single((await service.GetHomeStoriesAsync(ViewerId, 20, null)).Items);
+        Assert.False(fullyWatched.HasUnseen);
+    }
+
+    [Fact]
+    public async Task CleanupExpiredStories_DeletesOrphanMediaButPreservesSharedMedia()
     {
         await using var context = CreateContext();
         const long temporaryStoryId = 1_010;
         const long temporaryMediaId = 1_011;
-        const long legacyStoryId = 1_020;
-        const long ownedMediaId = 1_021;
+        const long sharedStoryId = 1_020;
+        const long sharedMediaId = 1_021;
+        const long feedPostId = 1_022;
         context.ObjectsTb.AddRange(
             new Objects { id = temporaryStoryId, otype = GraphObjectType.Story, data = ExpiredStoryJson("temporary") },
             new Objects { id = temporaryMediaId, otype = GraphObjectType.Media, data = MediaJson(0, "temporary.jpg") },
-            new Objects { id = legacyStoryId, otype = GraphObjectType.Story, data = ExpiredStoryJson("legacy") },
-            new Objects { id = ownedMediaId, otype = GraphObjectType.Media, data = MediaJson(0, "owned.jpg") });
+            new Objects { id = sharedStoryId, otype = GraphObjectType.Story, data = ExpiredStoryJson("shared") },
+            new Objects { id = sharedMediaId, otype = GraphObjectType.Media, data = MediaJson(0, "shared.jpg") },
+            new Objects { id = feedPostId, otype = GraphObjectType.FeedPost, data = "{}" });
         context.AssociationsTb.AddRange(
             Edge(temporaryStoryId, GraphAssociationType.Contained, temporaryMediaId),
-            Edge(legacyStoryId, GraphAssociationType.Contained, ownedMediaId),
-            Edge(StoryAuthorId, GraphAssociationType.Owned, ownedMediaId));
+            Edge(sharedStoryId, GraphAssociationType.Contained, sharedMediaId),
+            Edge(feedPostId, GraphAssociationType.Contained, sharedMediaId));
         await context.SaveChangesAsync();
 
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
@@ -96,12 +126,12 @@ public sealed class StoryServiceTests
             .ReturnsAsync(Page(temporaryMediaId));
         associations
             .Setup(item => item.RetrieveAssociationAsync(
-                legacyStoryId,
+                sharedStoryId,
                 GraphAssociationType.Contained,
                 null,
                 100,
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Page(ownedMediaId));
+            .ReturnsAsync(Page(sharedMediaId));
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects
             .Setup(item => item.DeleteObjectAsync(It.IsAny<long>(), It.IsAny<CancellationToken>()))
@@ -112,9 +142,9 @@ public sealed class StoryServiceTests
 
         Assert.Equal(2, deleted);
         objects.Verify(item => item.DeleteObjectAsync(temporaryMediaId, It.IsAny<CancellationToken>()), Times.Once);
-        objects.Verify(item => item.DeleteObjectAsync(ownedMediaId, It.IsAny<CancellationToken>()), Times.Never);
+        objects.Verify(item => item.DeleteObjectAsync(sharedMediaId, It.IsAny<CancellationToken>()), Times.Never);
         objects.Verify(item => item.DeleteObjectAsync(temporaryStoryId, It.IsAny<CancellationToken>()), Times.Once);
-        objects.Verify(item => item.DeleteObjectAsync(legacyStoryId, It.IsAny<CancellationToken>()), Times.Once);
+        objects.Verify(item => item.DeleteObjectAsync(sharedStoryId, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     private static MyDbContext CreateContext()

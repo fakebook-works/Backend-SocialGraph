@@ -11,6 +11,7 @@ public class Query
 {
     private const int MaxBatchLookupIds = 50;
 
+    [GraphQLIgnore]
     public Task<FederatedUser?> GetUserByIdAsync(
         long id,
         [Service] IUserGraphService userGraphService,
@@ -29,30 +30,12 @@ public class Query
     public async Task<IReadOnlyList<UserProfileResult>> GetProfilesAsync(
         IReadOnlyList<long> userIds,
         [Service] IUserGraphService userGraphService,
-        [Service] IAssociationService associationService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
         EnsureBatchSize(userIds.Count);
         var viewerId = trustedCaller.RequireUserId();
-        var profiles = new List<UserProfileResult>(userIds.Count);
-        foreach (var userId in userIds.Distinct())
-        {
-            if (viewerId != userId &&
-                (await associationService.HasAssociationAsync(viewerId, GraphAssociationType.Blocked, userId, cancellationToken) ||
-                 await associationService.HasAssociationAsync(viewerId, GraphAssociationType.BlockedBy, userId, cancellationToken)))
-            {
-                continue;
-            }
-
-            var profile = await userGraphService.GetProfileAsync(userId, cancellationToken);
-            if (profile is not null)
-            {
-                profiles.Add(profile);
-            }
-        }
-
-        return profiles;
+        return await userGraphService.GetProfilesForViewerAsync(viewerId, userIds, cancellationToken);
     }
 
     public async Task<IReadOnlyList<GroupResult>> GetGroupsAsync(
@@ -230,6 +213,7 @@ public class Query
     public async Task<ReelSearchHydrationResult?> GetReelSearchResultAsync(
         [GraphQLType(typeof(NonNullType<IdType>))] long referenceId,
         [Service] IContentGraphService contentGraphService,
+        [Service] IUserGraphService userGraphService,
         [Service] IAssociationService associationService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
@@ -248,7 +232,13 @@ public class Query
             return null;
         }
 
-        return new ReelSearchHydrationResult(referenceId, reel);
+        var author = await userGraphService.GetProfileAsync(reel.AuthorId, cancellationToken);
+        return author is null
+            ? null
+            : new ReelSearchHydrationResult(
+                referenceId,
+                reel,
+                new UserSummaryResult(author.Id, author.Name, author.Avatar, author.IsVerified));
     }
 
     public RecommendationItemResult? GetRecommendationItem(
@@ -540,23 +530,61 @@ public class Query
             cancellationToken);
     }
 
-    public Task<MediaPageResult> GetOwnedMediaAsync(
-        long ownerId,
-        int? type,
+    public Task<PhotoPageResult> GetUserPhotosAsync(
+        long userId,
         string? cursor,
         int limit,
         [Service] ISocialReadModelService readModels,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        return readModels.GetOwnedMediaAsync(
+        return readModels.GetUserPhotosAsync(
             trustedCaller.RequireUserId(),
-            ownerId,
-            type,
+            userId,
             cursor,
             limit,
             cancellationToken);
     }
+
+    public Task<PhotoPageResult> GetGroupPhotosAsync(
+        long groupId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken) =>
+        readModels.GetGroupPhotosAsync(
+            trustedCaller.RequireUserId(), groupId, cursor, limit, cancellationToken);
+
+    public Task<PhotoPageResult> GetGroupUserPhotosAsync(
+        long groupId,
+        long userId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken) =>
+        readModels.GetGroupUserPhotosAsync(
+            trustedCaller.RequireUserId(), groupId, userId, cursor, limit, cancellationToken);
+
+    public Task<PhotoPageResult> GetMyFeedPhotoCandidatesAsync(
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken) =>
+        readModels.GetMyFeedPhotoCandidatesAsync(
+            trustedCaller.RequireUserId(), cursor, limit, cancellationToken);
+
+    public Task<PhotoPageResult> GetGroupPhotoCandidatesAsync(
+        long groupId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken) =>
+        readModels.GetGroupPhotoCandidatesAsync(
+            trustedCaller.RequireUserId(), groupId, cursor, limit, cancellationToken);
 
     public Task<ProfileReelPageResult> GetLikedReelsAsync(
         string? cursor,

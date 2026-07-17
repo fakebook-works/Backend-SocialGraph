@@ -52,7 +52,7 @@ value: sorted set (id2, time) (time là score)
 
 Định nghĩa các atype và inverse atype của chúng (atype, inverse atype):
 - (0, 0) (1, 2) (3, 4) (5, 6) (7, 8) (9, 10) (11, 12) (13, 14) (15, 16) (17, 18) (19, 20) (21, 22) (23, 24)
-- inverse map hoạt động hai chiều: gọi service bằng forward hay inverse atype đều duy trì đúng cạnh đối ứng. Các atype 25..30 là một chiều và không tự tạo inverse.
+- inverse map hoạt động hai chiều: gọi service bằng forward hay inverse atype đều duy trì đúng cạnh đối ứng. Các atype 25..29 là một chiều và không tự tạo inverse.
 - association được kiểm tra loại object ở cả hai đầu trước khi ghi; id không tồn tại, cùng id hoặc sai loại sẽ bị từ chối.
 - các chuyển đổi nhiều cạnh (accept friend, block, approve member, promote admin) dùng một transaction.
 

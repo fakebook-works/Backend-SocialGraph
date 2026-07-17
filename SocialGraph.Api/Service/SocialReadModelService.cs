@@ -74,7 +74,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         }
 
         var isAdmin = await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Admin, groupId, cancellationToken);
-        var isMember = !isAdmin && await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Member, groupId, cancellationToken);
+        var isMember = await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Member, groupId, cancellationToken);
         var pending = !isAdmin && !isMember && await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.GroupJoinRequest, groupId, cancellationToken);
         var isPublic = GraphJson.Int(GraphJson.ParseObject(group.data), "privacy") == 0;
         return new GroupViewerStateResult(groupId, isMember, isAdmin, pending, isPublic || isMember || isAdmin);
@@ -216,76 +216,65 @@ public sealed class SocialReadModelService : ISocialReadModelService
         return new GroupPostPageResult(items, hasNext ? AdvanceCursor(cursor, processed) : null, hasNext);
     }
 
-    public async Task<MediaPageResult> GetOwnedMediaAsync(
+    public async Task<PhotoPageResult> GetUserPhotosAsync(
         long viewerId,
-        long ownerId,
-        int? type,
+        long userId,
         string? cursor,
         int limit,
         CancellationToken cancellationToken = default)
     {
-        var owner = await _objectService.RetrieveObjectAsync(ownerId, cancellationToken);
-        if (owner?.otype is not (GraphObjectType.User or GraphObjectType.Group))
+        var user = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        if (user?.otype != GraphObjectType.User || await IsBlockedAsync(viewerId, userId, cancellationToken))
         {
-            return EmptyMedia();
+            return EmptyPhotos();
         }
 
-        var canManage = owner.otype == GraphObjectType.User
-            ? viewerId == ownerId
-            : await _associationService.HasAssociationAsync(
-                viewerId,
-                GraphAssociationType.Admin,
-                ownerId,
-                cancellationToken);
-        if (!canManage && owner.otype == GraphObjectType.User && await IsBlockedAsync(viewerId, ownerId, cancellationToken))
-        {
-            return EmptyMedia();
-        }
+        return await GetFeedPhotoPageAsync(viewerId, userId, cursor, limit, cancellationToken);
+    }
 
-        if (!canManage && owner.otype == GraphObjectType.Group && !await CanViewGroupAsync(viewerId, ownerId, cancellationToken))
-        {
-            return EmptyMedia();
-        }
+    public async Task<PhotoPageResult> GetGroupPhotosAsync(
+        long viewerId,
+        long groupId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        return await CanViewGroupAsync(viewerId, groupId, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, cancellationToken)
+            : EmptyPhotos();
+    }
 
-        var take = Math.Clamp(limit, 1, 25);
-        var page = await _associationService.RetrieveAssociationAsync(
-            ownerId,
-            GraphAssociationType.Owned,
-            cursor,
-            Math.Min(take * 4, 100),
-            cancellationToken);
-        var items = new List<MediaResult>(take);
-        var processed = 0;
-        foreach (var edge in page.items)
-        {
-            processed++;
-            var media = await _objectService.RetrieveObjectAsync(edge.id2, cancellationToken);
-            if (media?.otype != GraphObjectType.Media)
-            {
-                continue;
-            }
+    public async Task<PhotoPageResult> GetGroupUserPhotosAsync(
+        long viewerId,
+        long groupId,
+        long userId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        return await CanViewGroupAsync(viewerId, groupId, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, userId, cursor, limit, cancellationToken)
+            : EmptyPhotos();
+    }
 
-            var data = GraphJson.ParseObject(media.data);
-            var mediaType = GraphJson.Int(data, "type");
-            if (type is not null && type.Value != mediaType)
-            {
-                continue;
-            }
+    public Task<PhotoPageResult> GetMyFeedPhotoCandidatesAsync(
+        long viewerId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default) =>
+        GetFeedPhotoPageAsync(viewerId, viewerId, cursor, limit, cancellationToken);
 
-            if (!canManage && !await IsOwnedMediaVisibleAsync(viewerId, media.id, cancellationToken))
-            {
-                continue;
-            }
-
-            items.Add(new MediaResult(media.id, mediaType, GraphJson.String(data, "url")));
-            if (items.Count == take)
-            {
-                break;
-            }
-        }
-
-        var hasNext = processed < page.items.Count || page.nextCursor is not null;
-        return new MediaPageResult(items, hasNext ? AdvanceCursor(cursor, processed) : null, hasNext);
+    public async Task<PhotoPageResult> GetGroupPhotoCandidatesAsync(
+        long viewerId,
+        long groupId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        return await _associationService.HasAssociationAsync(
+            viewerId, GraphAssociationType.Admin, groupId, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, cancellationToken)
+            : EmptyPhotos();
     }
 
     public Task<ProfileReelPageResult> GetLikedReelsAsync(
@@ -663,26 +652,156 @@ public sealed class SocialReadModelService : ISocialReadModelService
                 await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.BlockedBy, userId, cancellationToken));
     }
 
-    private async Task<bool> IsOwnedMediaVisibleAsync(
+    private async Task<PhotoPageResult> GetFeedPhotoPageAsync(
         long viewerId,
-        long mediaId,
+        long userId,
+        string? cursor,
+        int limit,
         CancellationToken cancellationToken)
     {
-        var containerIds = await _dbContext.AssociationsTb
-            .AsNoTracking()
-            .Where(item => item.atype == GraphAssociationType.Contained && item.id2 == mediaId)
-            .Select(item => item.id1)
-            .Distinct()
-            .ToArrayAsync(cancellationToken);
-        foreach (var containerId in containerIds)
+        var take = Math.Clamp(limit, 1, 50);
+        var offset = ParseOffset(cursor);
+        if (offset > int.MaxValue)
         {
-            if (await CanViewTargetCoreAsync(viewerId, containerId, 0, cancellationToken))
+            return EmptyPhotos();
+        }
+
+        var scanTake = Math.Min(take * 4, 100);
+        var rows = await (
+            from authored in _dbContext.AssociationsTb.AsNoTracking()
+            join post in _dbContext.ObjectsTb.AsNoTracking() on authored.id2 equals post.id
+            join contained in _dbContext.AssociationsTb.AsNoTracking() on post.id equals contained.id1
+            join media in _dbContext.ObjectsTb.AsNoTracking() on contained.id2 equals media.id
+            where authored.id1 == userId &&
+                  authored.atype == GraphAssociationType.Authored &&
+                  post.otype == GraphObjectType.FeedPost &&
+                  contained.atype == GraphAssociationType.Contained &&
+                  media.otype == GraphObjectType.Media
+            orderby post.id descending, contained.time descending, media.id descending
+            select new PhotoCandidate(
+                media.id,
+                media.data,
+                post.id,
+                post.otype,
+                post.data,
+                userId,
+                null))
+            .Skip((int)offset)
+            .Take(scanTake)
+            .ToListAsync(cancellationToken);
+
+        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, cancellationToken);
+    }
+
+    private async Task<PhotoPageResult> GetGroupPhotoPageAsync(
+        long viewerId,
+        long groupId,
+        long? userId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var take = Math.Clamp(limit, 1, 50);
+        var offset = ParseOffset(cursor);
+        if (offset > int.MaxValue)
+        {
+            return EmptyPhotos();
+        }
+
+        var scanTake = Math.Min(take * 4, 100);
+        var query =
+            from published in _dbContext.AssociationsTb.AsNoTracking()
+            join post in _dbContext.ObjectsTb.AsNoTracking() on published.id2 equals post.id
+            join authoredBy in _dbContext.AssociationsTb.AsNoTracking() on post.id equals authoredBy.id1
+            join contained in _dbContext.AssociationsTb.AsNoTracking() on post.id equals contained.id1
+            join media in _dbContext.ObjectsTb.AsNoTracking() on contained.id2 equals media.id
+            where published.id1 == groupId &&
+                  published.atype == GraphAssociationType.Published &&
+                  post.otype == GraphObjectType.GroupPost &&
+                  authoredBy.atype == GraphAssociationType.AuthoredBy &&
+                  contained.atype == GraphAssociationType.Contained &&
+                  media.otype == GraphObjectType.Media &&
+                  (userId == null || authoredBy.id2 == userId.Value)
+            orderby post.id descending, contained.time descending, media.id descending
+            select new PhotoCandidate(
+                media.id,
+                media.data,
+                post.id,
+                post.otype,
+                post.data,
+                authoredBy.id2,
+                groupId);
+
+        var rows = await query
+            .Skip((int)offset)
+            .Take(scanTake)
+            .ToListAsync(cancellationToken);
+
+        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, cancellationToken);
+    }
+
+    private async Task<PhotoPageResult> BuildPhotoPageAsync(
+        long viewerId,
+        string? cursor,
+        int take,
+        int scanTake,
+        IReadOnlyList<PhotoCandidate> rows,
+        CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0)
+        {
+            return EmptyPhotos();
+        }
+
+        var visibleContentIds = (await _contentGraphService.GetPostDetailsAsync(
+                viewerId,
+                rows.Select(item => item.ContentId).Distinct().ToArray(),
+                cancellationToken))
+            .Select(item => item switch
             {
-                return true;
+                FeedPostDetailResult feed => feed.Id,
+                GroupPostDetailResult group => group.Id,
+                _ => 0
+            })
+            .Where(id => id > 0)
+            .ToHashSet();
+        var items = new List<PhotoItemResult>(take);
+        var seenMedia = new HashSet<long>();
+        var processed = 0;
+
+        foreach (var row in rows)
+        {
+            processed++;
+            if (!visibleContentIds.Contains(row.ContentId) || !seenMedia.Add(row.MediaId))
+            {
+                continue;
+            }
+
+            var mediaData = GraphJson.ParseObject(row.MediaData);
+            var mediaType = GraphJson.Int(mediaData, "type");
+            if (mediaType != GraphMediaType.Photo)
+            {
+                continue;
+            }
+
+            items.Add(new PhotoItemResult(
+                new MediaResult(row.MediaId, mediaType, GraphJson.String(mediaData, "url")),
+                row.ContentId,
+                row.ContentType,
+                GraphJson.String(GraphJson.ParseObject(row.ContentData), "create"),
+                row.AuthorId,
+                row.GroupId));
+            if (items.Count == take)
+            {
+                break;
             }
         }
 
-        return false;
+        var hasNext = processed < rows.Count || rows.Count == scanTake;
+        return new PhotoPageResult(
+            items,
+            hasNext ? AdvanceCursor(cursor, processed) : null,
+            hasNext);
     }
 
     private async Task<ProfileReelPageResult> GetAssociatedReelsAsync(
@@ -802,7 +921,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
 
     private static UserSummaryPageResult EmptyUsers() => new(Array.Empty<UserSummaryResult>(), null, false);
 
-    private static MediaPageResult EmptyMedia() => new(Array.Empty<MediaResult>(), null, false);
+    private static PhotoPageResult EmptyPhotos() => new(Array.Empty<PhotoItemResult>(), null, false);
 
     private static ProfileReelPageResult EmptyReels() => new(Array.Empty<ContentResult>(), null, false);
 
@@ -818,4 +937,13 @@ public sealed class SocialReadModelService : ISocialReadModelService
         var start = long.TryParse(cursor, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value > 0 ? value : 0;
         return (start + processed).ToString(CultureInfo.InvariantCulture);
     }
+
+    private sealed record PhotoCandidate(
+        long MediaId,
+        string MediaData,
+        long ContentId,
+        short ContentType,
+        string ContentData,
+        long AuthorId,
+        long? GroupId);
 }

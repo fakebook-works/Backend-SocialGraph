@@ -23,6 +23,12 @@ builder.Services.AddHttpClient("external-services", client =>
 });
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITrustedCallerAccessor, TrustedCallerAccessor>();
+builder.Services.Configure<SocialGraphCacheOptions>(options =>
+{
+    options.Mode = Environment.GetEnvironmentVariable("CACHE_MODE")
+        ?? builder.Configuration[$"{SocialGraphCacheOptions.SectionName}:Mode"]
+        ?? "auto";
+});
 
 builder.Services.AddDbContext<MyDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSQL")));
@@ -33,8 +39,10 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
     var connectionString = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
     var configuration = ConfigurationOptions.Parse(connectionString);
     configuration.AbortOnConnectFail = false;
-    configuration.ConnectRetry = Math.Max(configuration.ConnectRetry, 3);
-    configuration.ConnectTimeout = Math.Max(configuration.ConnectTimeout, 5_000);
+    configuration.ConnectRetry = 0;
+    configuration.ConnectTimeout = Math.Min(configuration.ConnectTimeout, 750);
+    configuration.AsyncTimeout = Math.Min(configuration.AsyncTimeout, 750);
+    configuration.SyncTimeout = Math.Min(configuration.SyncTimeout, 750);
     return ConnectionMultiplexer.Connect(configuration);
 });
 

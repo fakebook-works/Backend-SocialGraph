@@ -22,4 +22,6 @@ public interface IExternalServiceClient
     Task RecordRecommendationInteractionAsync(long userId, long targetId, string action, CancellationToken cancellationToken = default);
     Task CreateMessengerUserAsync(long userId, CancellationToken cancellationToken = default);
     Task DeleteMessengerUserAsync(long userId, CancellationToken cancellationToken = default);
+    Task FinalizeMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default);
+    Task DeleteMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default);
 }

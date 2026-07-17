@@ -54,7 +54,8 @@ Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
           group, groups, groupViewerState, memberGroups, adminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
-          visitedGroups, ownedMedia, likedReels, sharedReels, watchedReels,
+          visitedGroups, userPhotos, groupPhotos, groupUserPhotos,
+          myFeedPhotoCandidates, groupPhotoCandidates, likedReels, sharedReels, watchedReels,
           postDetail, postDetails, profilePosts, profileReels, comments,
           contentEngagement, savedContent, likedUsers, taggedUsers, mentionedUsers,
           homeStories, myStories, storyViewers
@@ -75,15 +76,15 @@ X-Internal-SocialGraphService-Secret: <dedicated SocialGraph secret>
 X-User-Id: <authenticated user id>
 ```
 
-The `userId` or `authorId` GraphQL argument must match `X-User-Id`. Gateway must remove client-supplied trusted headers and generate them from the validated session. Calls with a missing/invalid secret, missing user identity, or mismatched identity fail before Story business logic runs.
+Viewer-specific IDs are derived from `X-User-Id`; legacy `authorId` values in create inputs are overwritten by the trusted actor. Gateway must remove client-supplied trusted headers and generate them from the validated session. Calls with a missing/invalid secret or missing user identity fail before business logic runs.
 
-Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(30)` and hides inaccessible private groups.
+Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)` and hides inaccessible private groups.
 
 Raw object/association CRUD is not part of the public schema. Search hydration is provided through five internal Fusion lookups (`userSearchResult`, `groupSearchResult`, `feedPostSearchResult`, `groupPostSearchResult`, and `reelSearchResult`). Messenger hydrates participants through the federated `User @key(id)` entity. All hydration applies block and content/group privacy rules.
 
 Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. Shared feed-post privacy is checked both when a Story is created and each time it is read, so a source made private later is no longer returned. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
 
-`updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item from that post while keeping the media in the owner's library. The mutation remains author-only. `ownedMedia` returns all owned media to its owner/group admin, while other viewers receive only media attached to content they can currently view. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
+`updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
 
 `inviteGroupUser` is an admin-only notification flow and does not silently add membership; the invited user still uses the normal join/request flow. Feed/story shares enqueue canonical Share notifications for the original author and suppress self-notifications.
 
@@ -107,6 +108,8 @@ InternalServices__Messaging__BaseUrl=http://localhost:1006
 InternalServices__Messaging__SharedSecret=<messaging-target-secret>
 InternalServices__TimeoutSeconds=10
 IntegrationOutbox__PayloadEncryptionKey=<at-least-32-bytes>
+IntegrationOutbox__PollMilliseconds=500
+IntegrationOutbox__MaxIdlePollMilliseconds=2000
 IntegrationOutbox__MaxAttempts=10
 IntegrationOutbox__BaseDelaySeconds=2
 IntegrationOutbox__MaxDelayMinutes=15
@@ -162,7 +165,7 @@ The suite verifies the 0..30 association contract and migration mapping, precede
 
 ## Durable integration outbox
 
-SocialGraph creates `social_graph.integration_outbox` additively with `CREATE TABLE IF NOT EXISTS`; it does not alter the object or association tables. Workers claim rows with `FOR UPDATE SKIP LOCKED`, recover stale processing locks, send a stable `Idempotency-Key` to each target, and retain completed rows for the configured retention period. HTTP 408/425/429/5xx and transport errors retry; invalid payloads/configuration and other 4xx responses dead-letter immediately.
+SocialGraph creates `social_graph.integration_outbox` additively with `CREATE TABLE IF NOT EXISTS`; it does not alter the object or association tables. Workers claim rows with `FOR UPDATE SKIP LOCKED`, recover stale processing locks, send a stable `Idempotency-Key` to each target, and retain completed rows for the configured retention period. Idle polling backs off from `PollMilliseconds` to `MaxIdlePollMilliseconds` and resets immediately after work is found. HTTP 408/425/429/5xx and transport errors retry; invalid payloads/configuration and other 4xx responses dead-letter immediately.
 
 User create, user update-name projection, and user delete write domain state plus outbox rows in the same PostgreSQL transaction because they share the scoped `MyDbContext`. Other content, group, relationship, and notification flows enqueue immediately after their domain write, but their existing service-level transaction boundaries still leave a small crash window between the domain commit and outbox insert. The downstream endpoints must honor `Idempotency-Key`; replaying a partially delivered operation is otherwise only at-least-once.
 

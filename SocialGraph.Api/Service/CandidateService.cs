@@ -29,8 +29,8 @@ public sealed class CandidateService : ICandidateService
         var groupIds = await GetUserGroupIdsAsync(userId, cancellationToken);
         var candidates = new HashSet<long>();
 
-        await AddAuthoredPostIdsAsync(candidates, friends, blocked, take, includePrivate: true, cancellationToken);
-        await AddAuthoredPostIdsAsync(candidates, followed, blocked, take, includePrivate: false, cancellationToken);
+        await AddAuthoredPostIdsAsync(candidates, friends, blocked, take, maxVisiblePrivacy: 2, cancellationToken);
+        await AddAuthoredPostIdsAsync(candidates, followed, blocked, take, maxVisiblePrivacy: 1, cancellationToken);
         await AddGroupPostIdsAsync(candidates, groupIds, blocked, take, cancellationToken);
         await AddRecentPublicFeedPostIdsAsync(candidates, blocked, take, cancellationToken);
         await AddPublicGroupPostIdsAsync(candidates, blocked, take, cancellationToken);
@@ -65,7 +65,7 @@ public sealed class CandidateService : ICandidateService
         IReadOnlyList<long> authorIds,
         ISet<long> blocked,
         int limit,
-        bool includePrivate,
+        int maxVisiblePrivacy,
         CancellationToken cancellationToken)
     {
         if (authorIds.Count == 0)
@@ -91,7 +91,8 @@ public sealed class CandidateService : ICandidateService
                 continue;
             }
 
-            if (!includePrivate && GraphJson.Int(GraphJson.ParseObject(row.data), "privacy") != 0)
+            var privacy = GraphJson.Int(GraphJson.ParseObject(row.data), "privacy");
+            if (privacy < 0 || privacy > maxVisiblePrivacy)
             {
                 continue;
             }

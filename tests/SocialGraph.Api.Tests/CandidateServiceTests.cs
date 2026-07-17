@@ -39,8 +39,7 @@ public sealed class CandidateServiceTests
 
         var ids = await service.GetPostCandidateIdsAsync(UserId, 20);
 
-        Assert.Equal(new long[] { 1_005, 1_003, 1_002, 1_000 }, ids);
-        Assert.DoesNotContain(1_001, ids);
+        Assert.Equal(new long[] { 1_005, 1_003, 1_002, 1_001, 1_000 }, ids);
         Assert.DoesNotContain(1_004, ids);
     }
 

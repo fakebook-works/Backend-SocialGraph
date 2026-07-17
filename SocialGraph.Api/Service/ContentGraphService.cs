@@ -31,23 +31,90 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateFeedPostAsync(CreateFeedPostInput input, CancellationToken cancellationToken = default)
     {
-        var post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
-        var media = await AttachMediaAsync(input.AuthorId, post.id, input.Media, cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(post.id, "feedPost", input.Content, cancellationToken);
-        await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-        return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
+        if (input.Privacy is < 0 or > 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(input), "Feed privacy must be between 0 and 3.");
+        }
+
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
+            var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
+            await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
+            foreach (var userId in NormalizeUserIds(input.TaggedUserIds))
+            {
+                if (!await TagAsync(post.id, userId, cancellationToken))
+                {
+                    throw new InvalidOperationException($"Unable to tag user {userId}.");
+                }
+            }
+
+            foreach (var userId in NormalizeUserIds(input.MentionedUserIds))
+            {
+                if (!await MentionAsync(post.id, userId, cancellationToken))
+                {
+                    throw new InvalidOperationException($"Unable to mention user {userId}.");
+                }
+            }
+
+            await _externalServiceClient.CreateSearchIndexAsync(post.id, "feedPost", input.Content, cancellationToken);
+            await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
+        }
+        catch
+        {
+            if (transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+
+            throw;
+        }
     }
 
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, CancellationToken cancellationToken = default)
     {
-        var post = await _objectService.AddObjectAsync(GraphObjectType.GroupPost, GraphJson.GroupPostJson(input.Content), cancellationToken);
-        var media = await AttachMediaAsync(input.AuthorId, post.id, input.Media, cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
-        await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(post.id, "groupPost", input.Content, cancellationToken);
-        await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-        return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var post = await _objectService.AddObjectAsync(GraphObjectType.GroupPost, GraphJson.GroupPostJson(input.Content), cancellationToken);
+            var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
+            await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
+            await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
+            foreach (var userId in NormalizeUserIds(input.MentionedUserIds))
+            {
+                if (!await MentionAsync(post.id, userId, cancellationToken))
+                {
+                    throw new InvalidOperationException($"Unable to mention user {userId}.");
+                }
+            }
+
+            await _externalServiceClient.CreateSearchIndexAsync(post.id, "groupPost", input.Content, cancellationToken);
+            await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
+        }
+        catch
+        {
+            if (transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+
+            throw;
+        }
     }
 
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default)
@@ -89,7 +156,9 @@ public sealed class ContentGraphService : IContentGraphService
                     cancellationToken);
             }
 
-            media = await AttachMediaAsync(authorId, input.Id, input.Media, cancellationToken);
+            media = await AttachMediaAsync(input.Id, input.Media, cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
         }
 
         var content = input.Content ?? GraphJson.String(currentData, "content");
@@ -122,8 +191,13 @@ public sealed class ContentGraphService : IContentGraphService
             return false;
         }
 
+        var mediaIds = await GetContainedMediaIdsAsync(contentId, cancellationToken);
         await _associationService.DeleteObjectAssociationsAsync(contentId, cancellationToken);
         var deleted = await _objectService.DeleteObjectAsync(contentId, cancellationToken);
+        if (deleted)
+        {
+            await DeleteOrphanMediaAsync(mediaIds, cancellationToken, contentId);
+        }
         if (deleted && (item.otype == GraphObjectType.FeedPost ||
                         item.otype == GraphObjectType.GroupPost ||
                         item.otype == GraphObjectType.Reel))
@@ -202,7 +276,8 @@ public sealed class ContentGraphService : IContentGraphService
             .Where(item => loadedPostIds.Contains(item.id1) &&
                 (item.atype == GraphAssociationType.AuthoredBy ||
                  item.atype == GraphAssociationType.Contained ||
-                 item.atype == GraphAssociationType.PublishedIn))
+                 item.atype == GraphAssociationType.PublishedIn ||
+                 item.atype == GraphAssociationType.Share))
             .ToListAsync(cancellationToken);
         var authorByPost = postLinks
             .Where(item => item.atype == GraphAssociationType.AuthoredBy)
@@ -212,9 +287,31 @@ public sealed class ContentGraphService : IContentGraphService
             .Where(item => item.atype == GraphAssociationType.PublishedIn)
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var sourceByPost = postLinks
+            .Where(item => item.atype == GraphAssociationType.Share)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var sourceIds = sourceByPost.Values.Distinct().ToArray();
+        var sourceLinks = sourceIds.Length == 0
+            ? new List<Associations>()
+            : await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => sourceIds.Contains(item.id1) &&
+                    (item.atype == GraphAssociationType.AuthoredBy ||
+                     item.atype == GraphAssociationType.Contained))
+                .ToListAsync(cancellationToken);
+        var sourceAuthorBySource = sourceLinks
+            .Where(item => item.atype == GraphAssociationType.AuthoredBy)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
         var relatedIds = authorByPost.Values
             .Concat(groupByPost.Values)
+            .Concat(sourceIds)
+            .Concat(sourceAuthorBySource.Values)
             .Concat(postLinks
+                .Where(item => item.atype == GraphAssociationType.Contained)
+                .Select(item => item.id2))
+            .Concat(sourceLinks
                 .Where(item => item.atype == GraphAssociationType.Contained)
                 .Select(item => item.id2))
             .Distinct()
@@ -228,6 +325,7 @@ public sealed class ContentGraphService : IContentGraphService
 
         var relationTargetIds = authorByPost.Values
             .Concat(groupByPost.Values)
+            .Concat(sourceAuthorBySource.Values)
             .Distinct()
             .ToArray();
         var viewerLinks = relationTargetIds.Length == 0
@@ -276,10 +374,16 @@ public sealed class ContentGraphService : IContentGraphService
                 privacy = GraphJson.Int(GraphJson.ParseObject(group.data), "privacy");
             }
 
-            var canView = viewerId == authorId ||
-                privacy == 0 ||
-                post.otype == GraphObjectType.FeedPost && friends.Contains(authorId) ||
-                post.otype == GraphObjectType.GroupPost && participatingGroups.Contains(groupId);
+            var canView = post.otype == GraphObjectType.FeedPost
+                ? viewerId == authorId || privacy switch
+                {
+                    0 => true,
+                    1 => friends.Contains(authorId) || followed.Contains(authorId),
+                    2 => friends.Contains(authorId),
+                    3 => false,
+                    _ => false
+                }
+                : privacy == 0 || participatingGroups.Contains(groupId);
             if (!canView)
             {
                 continue;
@@ -325,6 +429,70 @@ public sealed class ContentGraphService : IContentGraphService
                 continue;
             }
 
+            SharedPostSourceResult? sharedSource = null;
+            if (sourceByPost.TryGetValue(post.id, out var sourceId))
+            {
+                if (!relatedObjects.TryGetValue(sourceId, out var source) ||
+                    source.otype is not (GraphObjectType.FeedPost or GraphObjectType.Reel))
+                {
+                    sharedSource = new SharedPostSourceResult(
+                        sourceId,
+                        false,
+                        null,
+                        null,
+                        null,
+                        Array.Empty<MediaResult>());
+                }
+                else
+                {
+                    var sourceData = GraphJson.ParseObject(source.data);
+                    var sourceIsPublic = source.otype == GraphObjectType.Reel ||
+                        GraphJson.Int(sourceData, "privacy") == 0;
+                    var sourceAuthorId = sourceAuthorBySource.GetValueOrDefault(sourceId);
+                    relatedObjects.TryGetValue(sourceAuthorId, out var sourceAuthor);
+                    var hasSourceAuthor = sourceAuthorId > 0 &&
+                        sourceAuthor is not null &&
+                        sourceAuthor.otype == GraphObjectType.User;
+                    var sourceAvailable = sourceIsPublic &&
+                        hasSourceAuthor &&
+                        (viewerId == sourceAuthorId || !blocked.Contains(sourceAuthorId));
+
+                    if (!sourceAvailable)
+                    {
+                        sharedSource = new SharedPostSourceResult(
+                            sourceId,
+                            false,
+                            source.otype,
+                            null,
+                            null,
+                            Array.Empty<MediaResult>());
+                    }
+                    else
+                    {
+                        var sourceAuthorData = GraphJson.ParseObject(sourceAuthor!.data);
+                        var sourceMedia = sourceLinks
+                            .Where(item => item.id1 == sourceId && item.atype == GraphAssociationType.Contained)
+                            .OrderByDescending(item => item.time)
+                            .Select(item => relatedObjects.TryGetValue(item.id2, out var mediaObject)
+                                ? BuildMediaResult(mediaObject)
+                                : null)
+                            .OfType<MediaResult>()
+                            .ToArray();
+                        sharedSource = new SharedPostSourceResult(
+                            sourceId,
+                            true,
+                            source.otype,
+                            GraphJson.String(sourceData, "content"),
+                            new UserSummaryResult(
+                                sourceAuthorId,
+                                GraphJson.String(sourceAuthorData, "name"),
+                                GraphJson.String(sourceAuthorData, "avatar"),
+                                IsVerifyActive(sourceAuthorData)),
+                            sourceMedia);
+                    }
+                }
+            }
+
             results.Add(new FeedPostDetailResult(
                 post.id,
                 post.otype,
@@ -332,7 +500,8 @@ public sealed class ContentGraphService : IContentGraphService
                 privacy,
                 create,
                 postAuthor,
-                media));
+                media,
+                sharedSource));
         }
 
         return results;
@@ -377,8 +546,9 @@ public sealed class ContentGraphService : IContentGraphService
         CancellationToken cancellationToken = default)
     {
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
-        var media = await AttachTemporarySingleMediaAsync(story.id, input.Media, cancellationToken);
+        var media = await AttachSingleMediaAsync(story.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
+        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
 
         var data = GraphJson.ParseObject(story.data);
         return new NormalStoryResult(
@@ -486,6 +656,22 @@ public sealed class ContentGraphService : IContentGraphService
         var storiesByAuthor = activeStories
             .GroupBy(item => item.AuthorId)
             .ToDictionary(group => group.Key, group => group.OrderBy(item => item.CreatedAt).ToArray());
+        var visibleStoryIds = activeStories
+            .Where(story => storyItems.ContainsKey(story.Story.id))
+            .Select(story => story.Story.id)
+            .Distinct()
+            .ToArray();
+        var watchedStoryIds = visibleStoryIds.Length == 0
+            ? new HashSet<long>()
+            : (await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == userId &&
+                               item.atype == GraphAssociationType.Watched &&
+                               visibleStoryIds.Contains(item.id2))
+                .Select(item => item.id2)
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .ToHashSet();
         var resultItems = new List<HomeStoryBucketResult>(selectedCandidates.Length);
 
         foreach (var candidate in selectedCandidates)
@@ -507,6 +693,7 @@ public sealed class ContentGraphService : IContentGraphService
             resultItems.Add(new HomeStoryBucketResult(
                 author,
                 visibleStories[^1].CreatedAt.ToString("O", CultureInfo.InvariantCulture),
+                visibleStories.Any(story => !watchedStoryIds.Contains(story.Story.id)),
                 visibleStories.Select(story => storyItems[story.Story.id]).ToArray()));
         }
 
@@ -547,6 +734,7 @@ public sealed class ContentGraphService : IContentGraphService
         return new HomeStoryBucketResult(
             author,
             orderedStories[^1].CreatedAt.ToString("O", CultureInfo.InvariantCulture),
+            false,
             orderedStories.Select(story => storyItems[story.Story.id]).ToArray());
     }
 
@@ -585,8 +773,9 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default)
     {
         var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.ContentJson(input.Content), cancellationToken);
-        var media = await AttachSingleMediaAsync(input.AuthorId, reel.id, input.Media, cancellationToken);
+        var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
+        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
         await _externalServiceClient.CreateSearchIndexAsync(reel.id, "reel", input.Content, cancellationToken);
         await _externalServiceClient.CreatePostEmbeddingAsync(reel.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
         return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
@@ -700,7 +889,11 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var result = await _associationService.AddAssociationAsync(postId, GraphAssociationType.Tagged, userId, cancellationToken);
         var authorId = await GetAuthorIdAsync(postId, cancellationToken);
-        await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Tag, postId, null, cancellationToken);
+        if (result && authorId > 0 && authorId != userId)
+        {
+            await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Tag, postId, null, cancellationToken);
+        }
+
         return result;
     }
 
@@ -708,7 +901,11 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var result = await _associationService.AddAssociationAsync(sourceId, GraphAssociationType.Mentioned, userId, cancellationToken);
         var authorId = await GetAuthorIdAsync(sourceId, cancellationToken);
-        await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Mention, sourceId, null, cancellationToken);
+        if (result && authorId > 0 && authorId != userId)
+        {
+            await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Mention, sourceId, null, cancellationToken);
+        }
+
         return result;
     }
 
@@ -732,28 +929,17 @@ public sealed class ContentGraphService : IContentGraphService
     }
 
     private Task<IReadOnlyList<MediaResult>> AttachSingleMediaAsync(
-        long ownerId,
         long contentId,
         MediaInput? media,
         CancellationToken cancellationToken)
     {
-        return AttachMediaAsync(ownerId, contentId, media is null ? null : new[] { media }, cancellationToken);
-    }
-
-    private Task<IReadOnlyList<MediaResult>> AttachTemporarySingleMediaAsync(
-        long contentId,
-        MediaInput? media,
-        CancellationToken cancellationToken)
-    {
-        return AttachMediaAsync(0, contentId, media is null ? null : new[] { media }, cancellationToken, createOwned: false);
+        return AttachMediaAsync(contentId, media is null ? null : new[] { media }, cancellationToken);
     }
 
     private async Task<IReadOnlyList<MediaResult>> AttachMediaAsync(
-        long ownerId,
         long contentId,
         IReadOnlyList<MediaInput>? media,
-        CancellationToken cancellationToken,
-        bool createOwned = true)
+        CancellationToken cancellationToken)
     {
         if (media is null || media.Count == 0)
         {
@@ -764,11 +950,6 @@ public sealed class ContentGraphService : IContentGraphService
         foreach (var input in media)
         {
             var mediaObject = await _objectService.AddObjectAsync(GraphObjectType.Media, GraphJson.MediaJson(input.Type, input.Url), cancellationToken);
-            if (createOwned)
-            {
-                await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, mediaObject.id, cancellationToken);
-            }
-
             await _associationService.AddAssociationAsync(contentId, GraphAssociationType.Contained, mediaObject.id, cancellationToken);
             results.Add(new MediaResult(mediaObject.id, input.Type, input.Url));
         }
@@ -892,18 +1073,6 @@ public sealed class ContentGraphService : IContentGraphService
     private async Task<bool> DeleteStoryWithTemporaryMediaAsync(long storyId, CancellationToken cancellationToken)
     {
         var mediaIds = await GetContainedMediaIdsAsync(storyId, cancellationToken);
-        var protectedMediaIds = mediaIds.Count == 0
-            ? new HashSet<long>()
-            : (await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => mediaIds.Contains(item.id2) &&
-                    (item.atype == GraphAssociationType.Owned ||
-                     item.atype == GraphAssociationType.Contained && item.id1 != storyId))
-                .Select(item => item.id2)
-                .Distinct()
-                .ToListAsync(cancellationToken))
-                .ToHashSet();
-        var temporaryMediaIds = mediaIds.Where(id => !protectedMediaIds.Contains(id)).ToArray();
 
         IDbContextTransaction? transaction = null;
         if (_dbContext.Database.IsRelational())
@@ -915,11 +1084,9 @@ public sealed class ContentGraphService : IContentGraphService
         {
             await _associationService.DeleteObjectAssociationsAsync(storyId, cancellationToken);
             var deleted = await _objectService.DeleteObjectAsync(storyId, cancellationToken);
-
-            foreach (var mediaId in temporaryMediaIds)
+            if (deleted)
             {
-                await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
-                await _objectService.DeleteObjectAsync(mediaId, cancellationToken);
+                await DeleteOrphanMediaAsync(mediaIds, cancellationToken, storyId);
             }
 
             if (transaction is not null)
@@ -947,10 +1114,90 @@ public sealed class ContentGraphService : IContentGraphService
         }
     }
 
+    private async Task DeleteOrphanMediaAsync(
+        IEnumerable<long> mediaIds,
+        CancellationToken cancellationToken,
+        long? removedContainerId = null)
+    {
+        foreach (var mediaId in mediaIds.Distinct())
+        {
+            var stillContained = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .AnyAsync(
+                    item => item.atype == GraphAssociationType.Contained &&
+                            item.id2 == mediaId &&
+                            (!removedContainerId.HasValue || item.id1 != removedContainerId.Value),
+                    cancellationToken);
+            if (stillContained)
+            {
+                continue;
+            }
+
+            var media = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .SingleOrDefaultAsync(item => item.id == mediaId, cancellationToken);
+            if (media?.otype != GraphObjectType.Media)
+            {
+                continue;
+            }
+
+            var mediaUrl = GraphJson.String(GraphJson.ParseObject(media.data), "url");
+            var otherContainedMediaIds = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.atype == GraphAssociationType.Contained && item.id2 != mediaId)
+                .Select(item => item.id2)
+                .Distinct()
+                .ToArrayAsync(cancellationToken);
+            var sameAssetStillContained = !string.IsNullOrWhiteSpace(mediaUrl) &&
+                otherContainedMediaIds.Length > 0 &&
+                (await _dbContext.ObjectsTb
+                    .AsNoTracking()
+                    .Where(item => otherContainedMediaIds.Contains(item.id) && item.otype == GraphObjectType.Media)
+                    .Select(item => item.data)
+                    .ToListAsync(cancellationToken))
+                .Any(data => string.Equals(
+                    GraphJson.String(GraphJson.ParseObject(data), "url"),
+                    mediaUrl,
+                    StringComparison.OrdinalIgnoreCase));
+            await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
+            if (await _objectService.DeleteObjectAsync(mediaId, cancellationToken) &&
+                !string.IsNullOrWhiteSpace(mediaUrl) &&
+                !sameAssetStillContained)
+            {
+                await _externalServiceClient.DeleteMediaAsync(new[] { mediaUrl }, cancellationToken);
+            }
+        }
+    }
+
+    private async Task<IDbContextTransaction?> BeginTransactionAsync(CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational() || _dbContext.Database.CurrentTransaction is not null)
+        {
+            return null;
+        }
+
+        return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    private static IReadOnlyList<long> NormalizeUserIds(IReadOnlyList<long>? userIds)
+    {
+        if (userIds is null || userIds.Count == 0)
+        {
+            return Array.Empty<long>();
+        }
+
+        if (userIds.Any(id => id <= 0))
+        {
+            throw new ArgumentException("User IDs must be positive.", nameof(userIds));
+        }
+
+        return userIds.Distinct().Take(100).ToArray();
+    }
+
     private async Task<IReadOnlyList<long>> GetContainedMediaIdsAsync(long contentId, CancellationToken cancellationToken)
     {
         var media = await _associationService.RetrieveAssociationAsync(contentId, GraphAssociationType.Contained, null, 100, cancellationToken);
-        return media.items.Select(item => item.id2).ToArray();
+        return media?.items.Select(item => item.id2).ToArray() ?? Array.Empty<long>();
     }
 
     private async Task<IReadOnlyList<StoryBucketCandidate>> GetActiveStoryBucketCandidatesAsync(

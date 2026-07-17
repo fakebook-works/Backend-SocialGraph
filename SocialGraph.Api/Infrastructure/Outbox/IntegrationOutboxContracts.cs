@@ -16,6 +16,8 @@ public static class IntegrationEventType
     public const string RecommendationInteraction = "recommendation.interaction.v1";
     public const string MessagingUserCreate = "messaging.user-create.v1";
     public const string MessagingUserDelete = "messaging.user-delete.v1";
+    public const string MediaFinalize = "media.finalize.v1";
+    public const string MediaDelete = "media.delete.v1";
 }
 
 public static class IntegrationOutboxStatus
@@ -31,6 +33,7 @@ public sealed class IntegrationOutboxOptions
     public const string SectionName = "IntegrationOutbox";
 
     public int PollMilliseconds { get; set; } = 500;
+    public int MaxIdlePollMilliseconds { get; set; } = 2_000;
     public int BatchSize { get; set; } = 20;
     public int MaxAttempts { get; set; } = 10;
     public int BaseDelaySeconds { get; set; } = 2;
@@ -69,6 +72,8 @@ public sealed record ContentProjectionDeleteEvent(long ContentId);
 public sealed record RecommendationInteractionEvent(long UserId, long TargetId, string Action);
 
 public sealed record MessagingUserEvent(long UserId);
+
+public sealed record MediaLifecycleEvent(IReadOnlyList<string> Urls);
 
 public interface IIntegrationOutboxStore
 {

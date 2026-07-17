@@ -39,24 +39,26 @@ public class Mutation
         long userId,
         string avatarUrl,
         string? originalUrl,
+        int? privacy,
         [Service] IUserGraphService userGraphService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
         trustedCaller.RequireUserId(userId);
-        return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, cancellationToken);
+        return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, privacy ?? 0, cancellationToken);
     }
 
     public Task<UserProfileResult?> ChangeUserBackgroundAsync(
         long userId,
         string backgroundUrl,
         string? originalUrl,
+        int? privacy,
         [Service] IUserGraphService userGraphService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
         trustedCaller.RequireUserId(userId);
-        return userGraphService.ChangeUserBackgroundAsync(userId, backgroundUrl, originalUrl, cancellationToken);
+        return userGraphService.ChangeUserBackgroundAsync(userId, backgroundUrl, originalUrl, privacy ?? 0, cancellationToken);
     }
 
     public Task<UserProfileResult?> RemoveUserAvatarAsync(
@@ -176,10 +178,11 @@ public class Mutation
         return await groupGraphService.DeleteGroupAsync(groupId, cancellationToken);
     }
 
-    public async Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
+    public async Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, string? originalUrl, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.ChangeGroupAvatarAsync(groupId, avatarUrl, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.ChangeGroupAvatarAsync(actorId, groupId, avatarUrl, originalUrl, cancellationToken);
     }
 
     public async Task<GroupResult?> ChangeGroupBackgroundAsync(
@@ -190,8 +193,9 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.ChangeGroupBackgroundAsync(groupId, backgroundUrl, originalUrl, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.ChangeGroupBackgroundAsync(actorId, groupId, backgroundUrl, originalUrl, cancellationToken);
     }
 
     public async Task<GroupResult?> RemoveGroupAvatarAsync(
@@ -200,8 +204,9 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.ChangeGroupAvatarAsync(groupId, string.Empty, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.ChangeGroupAvatarAsync(actorId, groupId, string.Empty, null, cancellationToken);
     }
 
     public async Task<GroupResult?> RemoveGroupBackgroundAsync(
@@ -210,8 +215,9 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.ChangeGroupBackgroundAsync(groupId, string.Empty, null, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.ChangeGroupBackgroundAsync(actorId, groupId, string.Empty, null, cancellationToken);
     }
 
     public Task<bool> RecordGroupVisitAsync(
@@ -295,19 +301,19 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        return contentGraphService.CreateFeedPostAsync(input, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        return contentGraphService.CreateFeedPostAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, [Service] IContentGraphService contentGraphService, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        if (!await groupGraphService.IsParticipantAsync(input.AuthorId, input.GroupId, cancellationToken))
+        var actorId = trustedCaller.RequireUserId();
+        if (!await groupGraphService.IsParticipantAsync(actorId, input.GroupId, cancellationToken))
         {
             throw Forbidden("Only group members and administrators can publish group posts.");
         }
 
-        return await contentGraphService.CreateGroupPostAsync(input, cancellationToken);
+        return await contentGraphService.CreateGroupPostAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, [Service] IContentGraphService contentGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
@@ -324,13 +330,13 @@ public class Mutation
 
     public async Task<ContentResult> CreateCommentAsync(CreateCommentInput input, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        if (!await readModels.CanCommentTargetAsync(input.AuthorId, input.TargetId, cancellationToken))
+        var actorId = trustedCaller.RequireUserId();
+        if (!await readModels.CanCommentTargetAsync(actorId, input.TargetId, cancellationToken))
         {
             throw Forbidden("The target is unavailable or not visible to the current user.");
         }
 
-        return await contentGraphService.CreateCommentAsync(input, cancellationToken);
+        return await contentGraphService.CreateCommentAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public Task<NormalStoryResult> CreateNormalStoryAsync(
@@ -339,8 +345,8 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        return contentGraphService.CreateNormalStoryAsync(input, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        return contentGraphService.CreateNormalStoryAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public async Task<IHomeStoryResult> CreateShareStoryAsync(
@@ -350,13 +356,13 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        if (!await readModels.CanShareTargetAsync(input.AuthorId, input.SharedSourceId, cancellationToken))
+        var actorId = trustedCaller.RequireUserId();
+        if (!await readModels.CanShareTargetAsync(actorId, input.SharedSourceId, cancellationToken))
         {
             throw Forbidden("Only visible public feed posts and reels can be shared to a story.");
         }
 
-        return await contentGraphService.CreateShareStoryAsync(input, cancellationToken);
+        return await contentGraphService.CreateShareStoryAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public Task<DeleteStoryPayload> DeleteStoryAsync(
@@ -365,25 +371,25 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        return contentGraphService.DeleteStoryAsync(input, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        return contentGraphService.DeleteStoryAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public Task<ContentResult> CreateReelAsync(CreateReelInput input, [Service] IContentGraphService contentGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        return contentGraphService.CreateReelAsync(input, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        return contentGraphService.CreateReelAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public async Task<ContentResult> SharePostAsync(SharePostInput input, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId(input.AuthorId);
-        if (!await readModels.CanShareTargetAsync(input.AuthorId, input.SourceId, cancellationToken))
+        var actorId = trustedCaller.RequireUserId();
+        if (!await readModels.CanShareTargetAsync(actorId, input.SourceId, cancellationToken))
         {
             throw Forbidden("Only visible public feed posts and reels can be shared.");
         }
 
-        return await contentGraphService.SharePostAsync(input, cancellationToken);
+        return await contentGraphService.SharePostAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
     public async Task<bool> LikeAsync(long userId, long targetId, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)

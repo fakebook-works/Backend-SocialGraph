@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
 using SocialGraph.Api.Database;
@@ -14,17 +15,23 @@ public sealed class ObjectService : IObjectService
 {
     private const string CacheKeyPrefix = "socialgraph:v2:object";
     private readonly MyDbContext _dbContext;
+    private readonly IConnectionMultiplexer _redisConnection;
     private readonly IDatabase _redis;
     private readonly ILogger<ObjectService> _logger;
+    private readonly bool _cacheEnabled;
+    private long _lastRedisWarningTicks;
 
     public ObjectService(
         MyDbContext dbContext,
         IConnectionMultiplexer redis,
-        ILogger<ObjectService> logger)
+        ILogger<ObjectService> logger,
+        IOptions<SocialGraphCacheOptions>? cacheOptions = null)
     {
         _dbContext = dbContext;
+        _redisConnection = redis;
         _redis = redis.GetDatabase();
         _logger = logger;
+        _cacheEnabled = cacheOptions?.Value.Enabled ?? true;
     }
 
     public async Task<SocialGraphObjectResult> AddObjectAsync(
@@ -160,23 +167,39 @@ public sealed class ObjectService : IObjectService
             ["data"] = JsonNode.Parse(item.data)
         }.ToJsonString();
 
-        await TryRedisWriteAsync(() => _redis.ExecuteAsync("JSON.SET", ObjectKey(item.id), "$", payload));
+        await TryRedisWriteAsync(() => _redis.StringSetAsync(ObjectKey(item.id), payload));
     }
 
     private async Task PatchCachedObjectAsync(long id, JsonObject patch)
     {
         try
         {
-            var key = ObjectKey(id);
-            if (!await _redis.KeyExistsAsync(key))
+            if (!CanUseRedis())
             {
+                return;
+            }
+
+            var key = ObjectKey(id);
+            var cached = await _redis.StringGetAsync(key);
+            if (cached.IsNullOrEmpty)
+            {
+                return;
+            }
+
+            var root = JsonNode.Parse(cached.ToString()) as JsonObject;
+            var data = root?["data"] as JsonObject;
+            if (root is null || data is null)
+            {
+                await _redis.KeyDeleteAsync(key);
                 return;
             }
 
             foreach (var item in patch)
             {
-                await _redis.ExecuteAsync("JSON.SET", key, $"$.data.{item.Key}", ToJson(item.Value));
+                data[item.Key] = item.Value?.DeepClone();
             }
+
+            await _redis.StringSetAsync(key, root.ToJsonString());
         }
         catch (RedisException exception)
         {
@@ -188,9 +211,14 @@ public sealed class ObjectService : IObjectService
     {
         try
         {
+            if (!CanUseRedis())
+            {
+                return null;
+            }
+
             var key = ObjectKey(id);
-            var result = await _redis.ExecuteAsync("JSON.GET", key);
-            if (result.IsNull)
+            var result = await _redis.StringGetAsync(key);
+            if (result.IsNullOrEmpty)
             {
                 return null;
             }
@@ -229,6 +257,11 @@ public sealed class ObjectService : IObjectService
 
     private async Task TryRedisWriteAsync(Func<Task> operation)
     {
+        if (!CanUseRedis())
+        {
+            return;
+        }
+
         try
         {
             await operation();
@@ -241,11 +274,16 @@ public sealed class ObjectService : IObjectService
 
     private void LogRedisFallback(RedisException exception)
     {
+        var now = DateTimeOffset.UtcNow.UtcTicks;
+        var previous = Interlocked.Read(ref _lastRedisWarningTicks);
+        if (previous != 0 && now - previous < TimeSpan.FromSeconds(30).Ticks)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _lastRedisWarningTicks, now);
         _logger.LogWarning(exception, "Redis is unavailable; SocialGraph object access is using PostgreSQL only.");
     }
 
-    private static string ToJson(JsonNode? node)
-    {
-        return node?.ToJsonString() ?? "null";
-    }
+    private bool CanUseRedis() => _cacheEnabled && _redisConnection.IsConnected;
 }

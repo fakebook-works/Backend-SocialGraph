@@ -89,9 +89,6 @@ public static class GraphAssociationRules
                 Is(sourceType, GraphObjectType.User) && IsSaveable(targetType),
             GraphAssociationType.Contained =>
                 IsMediaContainer(sourceType) && Is(targetType, GraphObjectType.Media),
-            GraphAssociationType.Owned =>
-                (Is(sourceType, GraphObjectType.User) || Is(sourceType, GraphObjectType.Group)) &&
-                Is(targetType, GraphObjectType.Media),
             GraphAssociationType.Visited =>
                 Is(sourceType, GraphObjectType.User) && Is(targetType, GraphObjectType.Group),
             _ => false
@@ -109,4 +106,3 @@ public static class GraphAssociationRules
     private static bool IsSaveable(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel;
     private static bool IsMediaContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story;
 }
-

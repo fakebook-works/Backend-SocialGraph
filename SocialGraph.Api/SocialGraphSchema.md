@@ -135,14 +135,9 @@ những trường không đánh dấu là không được sửa đổi khi đã 
     * không cần inverse vì không cần biết media1 thuộc về những post/reel/story nào
 
 
--- 29 owned (user/group->media)
-    
-    user1 -(29)-> media1: user1 sở hữu những media nào
-    * không cần inverse vì không cần biết media1 được sở hữu bởi những user/group nào
-
--- 30 visited (user->group)
+-- 29 visited (user->group)
  
-    user1 -(30)-> group1: user1 đã ghé thăm những group nào
+    user1 -(29)-> group1: user1 đã ghé thăm những group nào
     * không cần inverse vì không cần biết group1 được những user nào ghé thăm
 
 
@@ -177,8 +172,12 @@ CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 
 -- ** Typed GraphQL additions ** --
 -----------------------------------
-updatePost(input: { id, privacy?, content?, media? }) giữ nguyên field bị omit; media=[] chỉ detach khỏi post và không xóa media khỏi thư viện Owned.
-ownedMedia(ownerId, type?, cursor, limit) chỉ trả media gắn với content viewer xem được, trừ owner/group admin được xem toàn bộ.
+Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng.
+updatePost(input: { id, privacy?, content?, media? }) giữ nguyên field bị omit; media=[] detach toàn bộ và garbage-collect media không còn parent.
+userPhotos(userId, cursor, limit) lấy ảnh từ feed post của user mà viewer được xem.
+groupPhotos(groupId, cursor, limit) lấy ảnh từ group post của group mà viewer được xem.
+groupUserPhotos(groupId, userId, cursor, limit) lấy ảnh từ group post do user tạo trong group.
+myFeedPhotoCandidates/groupPhotoCandidates là nguồn ảnh hợp lệ để chọn avatar/background.
 groupUserPosts(groupId, userId, cursor, limit) áp dụng group privacy và block/content visibility.
 likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trusted gateway header.
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.

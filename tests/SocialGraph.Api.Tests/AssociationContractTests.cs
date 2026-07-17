@@ -39,11 +39,10 @@ public sealed class AssociationContractTests
             GraphAssociationType.Mentioned,
             GraphAssociationType.Saved,
             GraphAssociationType.Contained,
-            GraphAssociationType.Owned,
             GraphAssociationType.Visited
         };
 
-        Assert.Equal(Enumerable.Range(0, 31).Select(value => (short)value), codes);
+        Assert.Equal(Enumerable.Range(0, 30).Select(value => (short)value), codes);
     }
 
     [Theory]
@@ -84,7 +83,6 @@ public sealed class AssociationContractTests
     [InlineData(27)]
     [InlineData(28)]
     [InlineData(29)]
-    [InlineData(30)]
     public void OneWayTypes_DoNotCreateInventedInverse(short associationType)
     {
         Assert.False(GraphAssociationRules.TryGetInverse(associationType, out _));
@@ -112,10 +110,9 @@ public sealed class AssociationContractTests
     [InlineData(19, 27)]
     [InlineData(20, 28)]
     [InlineData(21, 26)]
-    [InlineData(22, 29)]
     [InlineData(23, 5)]
     [InlineData(24, 6)]
-    [InlineData(25, 30)]
+    [InlineData(25, 29)]
     public void LegacyCodes_MapToCanonicalCodes(short legacyType, short canonicalType)
     {
         Assert.Equal(canonicalType, AssociationContractMigrationCommand.MapLegacyType(legacyType));
@@ -123,8 +120,9 @@ public sealed class AssociationContractTests
 
     [Theory]
     [InlineData(12)]
+    [InlineData(22)]
     [InlineData(-1)]
-    [InlineData(31)]
+    [InlineData(30)]
     public void UnsupportedLegacyCodes_AreDiscarded(short legacyType)
     {
         Assert.Null(AssociationContractMigrationCommand.MapLegacyType(legacyType));
@@ -151,4 +149,3 @@ public sealed class AssociationContractTests
             GraphObjectType.Media));
     }
 }
-

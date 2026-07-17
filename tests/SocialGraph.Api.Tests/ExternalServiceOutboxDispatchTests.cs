@@ -100,6 +100,25 @@ public sealed class ExternalServiceOutboxDispatchTests
         Assert.Equal("SAVE", body.RootElement.GetProperty("action").GetString());
     }
 
+    [Fact]
+    public async Task MediaFinalizeDispatch_UsesUploadInternalContract()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var client = CreateClient(handler);
+        var message = Message(
+            IntegrationEventType.MediaFinalize,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(new[] { "/media/files/a.jpg" })));
+
+        await client.DispatchAsync(message);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("upload", request.Uri.Host);
+        Assert.Equal("/internal/media/finalize", request.Uri.AbsolutePath);
+        Assert.Equal(SharedSecret, Assert.Single(request.Headers["X-Internal-UploadService-Secret"]));
+        using var body = JsonDocument.Parse(request.Body!);
+        Assert.Equal("/media/files/a.jpg", body.RootElement.GetProperty("urls")[0].GetString());
+    }
+
     private static ExternalServiceClient CreateClient(
         CapturingHandler handler,
         IConfiguration? configuration = null,
@@ -130,7 +149,9 @@ public sealed class ExternalServiceOutboxDispatchTests
                 ["InternalServices:Notification:BaseUrl"] = "http://notification",
                 ["InternalServices:Notification:SharedSecret"] = SharedSecret,
                 ["InternalServices:Messaging:BaseUrl"] = "http://messaging",
-                ["InternalServices:Messaging:SharedSecret"] = SharedSecret
+                ["InternalServices:Messaging:SharedSecret"] = SharedSecret,
+                ["InternalServices:Upload:BaseUrl"] = "http://upload",
+                ["InternalServices:Upload:SharedSecret"] = SharedSecret
             })
             .Build();
     }

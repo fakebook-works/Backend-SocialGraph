@@ -16,6 +16,13 @@ internal static class GraphJson
             : fallback;
     }
 
+    public static string? NullableString(JsonObject data, string name)
+    {
+        return data.TryGetPropertyValue(name, out var value) && value is not null
+            ? value.GetValue<string?>()
+            : null;
+    }
+
     public static int Int(JsonObject data, string name, int fallback = 0)
     {
         if (!data.TryGetPropertyValue(name, out var value) || value is null)
@@ -49,7 +56,7 @@ internal static class GraphJson
             ["gender"] = gender ? 1 : 0,
             ["birthdate"] = birthdate,
             ["location"] = location,
-            ["verify"] = "",
+            ["verify"] = null,
             ["privacy"] = 0,
             ["create"] = UtcNowString()
         }.ToJsonString();
@@ -127,6 +134,17 @@ internal static class GraphJson
             }
 
             json[name] = JsonValue.Create(value);
+        }
+
+        return json.ToJsonString();
+    }
+
+    public static string PatchJsonIncludingNulls(params (string Name, object? Value)[] values)
+    {
+        var json = new JsonObject();
+        foreach (var (name, value) in values)
+        {
+            json[name] = value is null ? null : JsonValue.Create(value);
         }
 
         return json.ToJsonString();

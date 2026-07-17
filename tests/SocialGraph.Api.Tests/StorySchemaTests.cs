@@ -38,6 +38,7 @@ public sealed class StorySchemaTests
         Assert.Contains("postDetails", schema);
         Assert.Contains("homeStories", schema);
         Assert.Contains("myStories", schema);
+        Assert.Contains("hasUnseen", schema);
         Assert.Contains("recordGroupVisit", schema);
         Assert.Contains("incomingFriendRequests", schema);
         Assert.Contains("groupJoinRequests", schema);
@@ -46,7 +47,9 @@ public sealed class StorySchemaTests
         Assert.Contains("feedPostSearchResult(referenceId: ID!): FeedPostSearchResult", schema);
         Assert.Contains("groupPostSearchResult(referenceId: ID!): GroupPostSearchResult", schema);
         Assert.Contains("reelSearchResult(referenceId: ID!): ReelSearchResult", schema);
-        Assert.Contains("userById(id: Long!): User", schema);
+        // userById is an internal Fusion lookup extension and is intentionally
+        // hidden from the standalone public SocialGraph schema.
+        Assert.DoesNotContain("userById(id: Long!): User", schema);
         Assert.Contains("profiles(userIds: [Long!]!): [UserProfileResult!]!", schema);
         Assert.Contains("groups(groupIds: [Long!]!): [GroupResult!]!", schema);
         Assert.Contains("profilePosts", schema);
@@ -60,7 +63,12 @@ public sealed class StorySchemaTests
         Assert.Contains("groupAdmins", schema);
         Assert.Contains("groupPosts", schema);
         Assert.Contains("groupUserPosts", schema);
-        Assert.Contains("ownedMedia", schema);
+        Assert.Contains("userPhotos", schema);
+        Assert.Contains("groupPhotos", schema);
+        Assert.Contains("groupUserPhotos", schema);
+        Assert.Contains("myFeedPhotoCandidates", schema);
+        Assert.Contains("groupPhotoCandidates", schema);
+        Assert.DoesNotContain("ownedMedia", schema);
         Assert.Contains("likedReels", schema);
         Assert.Contains("sharedReels", schema);
         Assert.Contains("watchedReels", schema);

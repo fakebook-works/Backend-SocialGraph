@@ -8,7 +8,7 @@ using Npgsql;
 public static class AssociationContractMigrationCommand
 {
     public const int LegacyVersion = 1;
-    public const int CanonicalVersion = 2;
+    public const int CanonicalVersion = 3;
     private const string CommandName = "--migrate-association-contract";
     private const string ApplyFlag = "--apply";
     private const string SourceVersionPrefix = "--source-version=";
@@ -190,10 +190,10 @@ public static class AssociationContractMigrationCommand
         19 => 27,
         20 => 28,
         21 => 26,
-        22 => 29,
+        22 => null,
         23 => 5,
         24 => 6,
-        25 => 30,
+        25 => 29,
         _ => null
     };
 
@@ -237,8 +237,8 @@ public static class AssociationContractMigrationCommand
                         WHEN 8 THEN 23 WHEN 9 THEN 11 WHEN 10 THEN 12 WHEN 11 THEN 25
                         WHEN 13 THEN 13 WHEN 14 THEN 14 WHEN 15 THEN 15 WHEN 16 THEN 16
                         WHEN 17 THEN 19 WHEN 18 THEN 20 WHEN 19 THEN 27 WHEN 20 THEN 28
-                        WHEN 21 THEN 26 WHEN 22 THEN 29 WHEN 23 THEN 5 WHEN 24 THEN 6
-                        WHEN 25 THEN 30
+                        WHEN 21 THEN 26 WHEN 23 THEN 5 WHEN 24 THEN 6
+                        WHEN 25 THEN 29
                     END::smallint AS atype,
                     association.id2,
                     association.time,
@@ -247,7 +247,7 @@ public static class AssociationContractMigrationCommand
                 FROM social_graph.associations association
                 LEFT JOIN social_graph.objects source ON source.id = association.id1
                 LEFT JOIN social_graph.objects target ON target.id = association.id2
-                WHERE association.atype BETWEEN 0 AND 25 AND association.atype <> 12
+                WHERE association.atype BETWEEN 0 AND 25 AND association.atype NOT IN (12, 22)
             )
             SELECT id1, atype, id2, time
             FROM mapped
@@ -272,8 +272,7 @@ public static class AssociationContractMigrationCommand
                 (atype = 26 AND source_type IN (2,3,4,5,6) AND target_type = 0) OR
                 (atype = 27 AND source_type = 0 AND target_type IN (2,3,4)) OR
                 (atype = 28 AND source_type IN (2,3,4,5) AND target_type = 7) OR
-                (atype = 29 AND source_type IN (0,1) AND target_type = 7) OR
-                (atype = 30 AND source_type = 0 AND target_type = 1)
+                (atype = 29 AND source_type = 0 AND target_type = 1)
               );
 
             INSERT INTO canonical_associations (id1, atype, id2, time)
@@ -362,23 +361,6 @@ public static class AssociationContractMigrationCommand
                     WHERE membership.id1 = join_request.id1 AND membership.id2 = join_request.id2
                       AND membership.atype IN (14,16)));
 
-            INSERT INTO migration_conflict_counts (rule, affected_rows)
-            SELECT 'admin_over_member', COUNT(*)
-            FROM canonical_associations member_edge
-            WHERE (member_edge.atype = 13 AND EXISTS (
-                    SELECT 1 FROM canonical_associations admin_edge
-                    WHERE admin_edge.id1 = member_edge.id1 AND admin_edge.id2 = member_edge.id2 AND admin_edge.atype = 15))
-               OR (member_edge.atype = 14 AND EXISTS (
-                    SELECT 1 FROM canonical_associations admin_edge
-                    WHERE admin_edge.id1 = member_edge.id1 AND admin_edge.id2 = member_edge.id2 AND admin_edge.atype = 16));
-
-            DELETE FROM canonical_associations member_edge
-            WHERE (member_edge.atype = 13 AND EXISTS (
-                    SELECT 1 FROM canonical_associations admin_edge
-                    WHERE admin_edge.id1 = member_edge.id1 AND admin_edge.id2 = member_edge.id2 AND admin_edge.atype = 15))
-               OR (member_edge.atype = 14 AND EXISTS (
-                    SELECT 1 FROM canonical_associations admin_edge
-                    WHERE admin_edge.id1 = member_edge.id1 AND admin_edge.id2 = member_edge.id2 AND admin_edge.atype = 16));
             """,
             cancellationToken);
     }

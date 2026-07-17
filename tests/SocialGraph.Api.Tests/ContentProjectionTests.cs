@@ -91,7 +91,6 @@ public sealed class ContentProjectionTests
         Assert.Equal("updated", patchJson["content"]!.GetValue<string>());
         Assert.False(patchJson.ContainsKey("privacy"));
         associations.Verify(item => item.DeleteOneAssociationAsync(PostId, GraphAssociationType.Contained, oldMediaId, It.IsAny<CancellationToken>()), Times.Once);
-        associations.Verify(item => item.AddAssociationAsync(AuthorId, GraphAssociationType.Owned, newMediaId, It.IsAny<CancellationToken>()), Times.Once);
         associations.Verify(item => item.AddAssociationAsync(PostId, GraphAssociationType.Contained, newMediaId, It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.UpdateSearchIndexAsync(PostId, "feedPost", "updated", It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.CreatePostEmbeddingAsync(

@@ -100,6 +100,32 @@ public sealed class IntegrationOutboxPublisherTests
         Assert.Equal("SAVE", payload.Action);
     }
 
+    [Fact]
+    public async Task MediaLifecycle_QueuesDeduplicatedFinalizeAndDeleteEvents()
+    {
+        await using var dbContext = CreateDbContext();
+        var store = new PostgresIntegrationOutboxStore(dbContext, Options.Create(new IntegrationOutboxOptions()));
+        var configuration = Configuration();
+        var context = new DefaultHttpContext();
+        context.Request.Headers["Idempotency-Key"] = "media-operation";
+        var publisher = new IntegrationOutboxPublisher(
+            store,
+            new HttpContextAccessor { HttpContext = context },
+            new OutboxPayloadProtector(configuration));
+
+        await publisher.FinalizeMediaAsync(new[] { "/media/files/a.jpg", "/media/files/a.jpg" });
+        await publisher.DeleteMediaAsync(new[] { "/media/files/b.jpg" });
+
+        var messages = await dbContext.IntegrationOutboxTb.OrderBy(item => item.event_type).ToListAsync();
+        Assert.Equal(2, messages.Count);
+        Assert.Contains(messages, item => item.event_type == IntegrationEventType.MediaFinalize);
+        Assert.Contains(messages, item => item.event_type == IntegrationEventType.MediaDelete);
+        var finalize = JsonSerializer.Deserialize<MediaLifecycleEvent>(
+            Assert.Single(messages, item => item.event_type == IntegrationEventType.MediaFinalize).payload,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(new[] { "/media/files/a.jpg" }, finalize?.Urls);
+    }
+
     private static IConfiguration Configuration()
     {
         return new ConfigurationBuilder()

@@ -2,26 +2,34 @@ namespace SocialGraph.Api.Service;
 
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using SocialGraph.Api.Database;
 using StackExchange.Redis;
+using IDbContextTransaction = Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction;
 
 public sealed class AssociationService : IAssociationService
 {
     private const string CacheKeyPrefix = "socialgraph:v2:association";
 
     private readonly MyDbContext _dbContext;
+    private readonly IConnectionMultiplexer _redisConnection;
     private readonly IDatabase _redis;
     private readonly ILogger<AssociationService> _logger;
+    private readonly bool _cacheEnabled;
+    private long _lastRedisWarningTicks;
 
     public AssociationService(
         MyDbContext dbContext,
         IConnectionMultiplexer redis,
-        ILogger<AssociationService> logger)
+        ILogger<AssociationService> logger,
+        IOptions<SocialGraphCacheOptions>? cacheOptions = null)
     {
         _dbContext = dbContext;
+        _redisConnection = redis;
         _redis = redis.GetDatabase();
         _logger = logger;
+        _cacheEnabled = cacheOptions?.Value.Enabled ?? true;
     }
 
     public async Task<bool> AddAssociationAsync(
@@ -33,7 +41,7 @@ public sealed class AssociationService : IAssociationService
         await ValidateAssociationAsync(id1, atype, id2, cancellationToken);
         var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(cancellationToken);
         await UpsertAssociationAsync(id1, atype, id2, time, cancellationToken);
 
         if (TryGetInverseAssociationType(atype, out var inverseAtype) && !IsSameAssociation(id1, atype, id2, id2, inverseAtype, id1))
@@ -41,7 +49,10 @@ public sealed class AssociationService : IAssociationService
             await UpsertAssociationAsync(id2, inverseAtype, id1, time, cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
 
         await TryRedisWriteAsync(async () =>
         {
@@ -81,7 +92,7 @@ public sealed class AssociationService : IAssociationService
 
         var affected = 0;
         var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(cancellationToken);
         foreach (var mutation in expanded)
         {
             affected += mutation.Value
@@ -98,7 +109,10 @@ public sealed class AssociationService : IAssociationService
                     cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
 
         await TryRedisWriteAsync(async () =>
         {
@@ -133,7 +147,7 @@ public sealed class AssociationService : IAssociationService
         long id2,
         CancellationToken cancellationToken = default)
     {
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(cancellationToken);
         var rows = await DeleteAssociationRowAsync(id1, atype, id2, cancellationToken);
 
         if (TryGetInverseAssociationType(atype, out var inverseAtype) && !IsSameAssociation(id1, atype, id2, id2, inverseAtype, id1))
@@ -141,7 +155,10 @@ public sealed class AssociationService : IAssociationService
             rows += await DeleteAssociationRowAsync(id2, inverseAtype, id1, cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
 
         await TryRedisWriteAsync(async () =>
         {
@@ -170,7 +187,7 @@ public sealed class AssociationService : IAssociationService
                 .ToListAsync(cancellationToken);
         }
 
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await BeginOwnedTransactionAsync(cancellationToken);
         var rows = await _dbContext.Database.ExecuteSqlRawAsync(
             "DELETE FROM social_graph.associations WHERE id1 = @id1 AND atype = @atype",
             new object[]
@@ -192,7 +209,10 @@ public sealed class AssociationService : IAssociationService
                 cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
 
         await TryRedisWriteAsync(async () =>
         {
@@ -213,14 +233,19 @@ public sealed class AssociationService : IAssociationService
     {
         var affectedKeys = await _dbContext.AssociationsTb
             .AsNoTracking()
-            .Where(item => item.id1 == objectId || item.id2 == objectId)
+            .Where(item => item.id1 == objectId ||
+                (item.id2 == objectId && item.atype != GraphAssociationType.Share))
             .Select(item => new { item.id1, item.atype })
             .Distinct()
             .ToListAsync(cancellationToken);
 
         var rows = await _dbContext.Database.ExecuteSqlRawAsync(
-            "DELETE FROM social_graph.associations WHERE id1 = @id OR id2 = @id",
-            new object[] { new NpgsqlParameter("id", objectId) },
+            "DELETE FROM social_graph.associations WHERE id1 = @id OR (id2 = @id AND atype <> @share)",
+            new object[]
+            {
+                new NpgsqlParameter("id", objectId),
+                new NpgsqlParameter("share", GraphAssociationType.Share)
+            },
             cancellationToken);
 
         await TryRedisWriteAsync(async () =>
@@ -239,6 +264,11 @@ public sealed class AssociationService : IAssociationService
         short atype,
         CancellationToken cancellationToken = default)
     {
+        if (!CanUseRedis())
+        {
+            return await CountFromPostgresAsync(id1, atype, cancellationToken);
+        }
+
         try
         {
             await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
@@ -247,9 +277,7 @@ public sealed class AssociationService : IAssociationService
         catch (RedisException exception)
         {
             LogRedisFallback(exception);
-            return await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .LongCountAsync(item => item.id1 == id1 && item.atype == atype, cancellationToken);
+            return await CountFromPostgresAsync(id1, atype, cancellationToken);
         }
     }
 
@@ -262,6 +290,11 @@ public sealed class AssociationService : IAssociationService
     {
         var skip = ParseCursor(cursor);
         var take = Math.Clamp(limit, 1, 100);
+
+        if (!CanUseRedis())
+        {
+            return await RetrieveFromPostgresAsync(id1, atype, skip, take, cancellationToken);
+        }
 
         try
         {
@@ -289,21 +322,7 @@ public sealed class AssociationService : IAssociationService
         catch (RedisException exception)
         {
             LogRedisFallback(exception);
-            var rows = await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => item.id1 == id1 && item.atype == atype)
-                .OrderByDescending(item => item.time)
-                .ThenByDescending(item => item.id2)
-                .Skip((int)Math.Min(skip, int.MaxValue))
-                .Take(take + 1)
-                .ToListAsync(cancellationToken);
-            var hasNext = rows.Count > take;
-            var items = rows.Take(take)
-                .Select(item => new AssociationEdgeResult(item.id2, item.time))
-                .ToArray();
-            return new AssociationPageResult(
-                items,
-                hasNext ? (skip + items.Length).ToString(CultureInfo.InvariantCulture) : null);
+            return await RetrieveFromPostgresAsync(id1, atype, skip, take, cancellationToken);
         }
     }
 
@@ -489,6 +508,11 @@ public sealed class AssociationService : IAssociationService
 
     private async Task TryRedisWriteAsync(Func<Task> operation)
     {
+        if (!CanUseRedis())
+        {
+            return;
+        }
+
         try
         {
             await operation();
@@ -501,6 +525,55 @@ public sealed class AssociationService : IAssociationService
 
     private void LogRedisFallback(RedisException exception)
     {
+        var now = DateTimeOffset.UtcNow.UtcTicks;
+        var previous = Interlocked.Read(ref _lastRedisWarningTicks);
+        if (previous != 0 && now - previous < TimeSpan.FromSeconds(30).Ticks)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _lastRedisWarningTicks, now);
         _logger.LogWarning(exception, "Redis is unavailable; SocialGraph association access is using PostgreSQL only.");
+    }
+
+    private async Task<IDbContextTransaction?> BeginOwnedTransactionAsync(CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational() || _dbContext.Database.CurrentTransaction is not null)
+        {
+            return null;
+        }
+
+        return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    private bool CanUseRedis() => _cacheEnabled && _redisConnection.IsConnected;
+
+    private Task<long> CountFromPostgresAsync(long id1, short atype, CancellationToken cancellationToken) =>
+        _dbContext.AssociationsTb
+            .AsNoTracking()
+            .LongCountAsync(item => item.id1 == id1 && item.atype == atype, cancellationToken);
+
+    private async Task<AssociationPageResult> RetrieveFromPostgresAsync(
+        long id1,
+        short atype,
+        long skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        var rows = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == id1 && item.atype == atype)
+            .OrderByDescending(item => item.time)
+            .ThenByDescending(item => item.id2)
+            .Skip((int)Math.Min(skip, int.MaxValue))
+            .Take(take + 1)
+            .ToListAsync(cancellationToken);
+        var hasNext = rows.Count > take;
+        var items = rows.Take(take)
+            .Select(item => new AssociationEdgeResult(item.id2, item.time))
+            .ToArray();
+        return new AssociationPageResult(
+            items,
+            hasNext ? (skip + items.Length).ToString(CultureInfo.InvariantCulture) : null);
     }
 }

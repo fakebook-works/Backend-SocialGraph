@@ -22,7 +22,12 @@ public sealed class IntegrationOutboxWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var pollDelay = TimeSpan.FromMilliseconds(Math.Clamp(_options.PollMilliseconds, 100, 60_000));
+        var pollMilliseconds = Math.Clamp(_options.PollMilliseconds, 100, 60_000);
+        var maxIdlePollMilliseconds = Math.Clamp(
+            _options.MaxIdlePollMilliseconds,
+            pollMilliseconds,
+            60_000);
+        var idlePollMilliseconds = pollMilliseconds;
         var lockTimeout = TimeSpan.FromMinutes(Math.Clamp(_options.LockTimeoutMinutes, 1, 120));
         var lastCleanup = DateTimeOffset.MinValue;
         var schemaInitialized = false;
@@ -78,12 +83,17 @@ public sealed class IntegrationOutboxWorker : BackgroundService
             {
                 try
                 {
-                    await Task.Delay(pollDelay, stoppingToken);
+                    await Task.Delay(TimeSpan.FromMilliseconds(idlePollMilliseconds), stoppingToken);
+                    idlePollMilliseconds = Math.Min(maxIdlePollMilliseconds, idlePollMilliseconds * 2);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     break;
                 }
+            }
+            else
+            {
+                idlePollMilliseconds = pollMilliseconds;
             }
         }
     }

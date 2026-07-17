@@ -10,7 +10,11 @@ public interface ISocialReadModelService
     Task<UserSummaryPageResult> GetGroupMembersAsync(long viewerId, long groupId, string? cursor, int limit, bool admins, CancellationToken cancellationToken = default);
     Task<GroupPostPageResult> GetGroupPostsAsync(long viewerId, long groupId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<GroupPostPageResult> GetGroupUserPostsAsync(long viewerId, long groupId, long userId, string? cursor, int limit, CancellationToken cancellationToken = default);
-    Task<MediaPageResult> GetOwnedMediaAsync(long viewerId, long ownerId, int? type, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PhotoPageResult> GetUserPhotosAsync(long viewerId, long userId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PhotoPageResult> GetGroupPhotosAsync(long viewerId, long groupId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PhotoPageResult> GetGroupUserPhotosAsync(long viewerId, long groupId, long userId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PhotoPageResult> GetMyFeedPhotoCandidatesAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PhotoPageResult> GetGroupPhotoCandidatesAsync(long viewerId, long groupId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<ProfileReelPageResult> GetLikedReelsAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<ProfileReelPageResult> GetSharedReelsAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<ProfileReelPageResult> GetWatchedReelsAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);

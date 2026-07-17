@@ -12,17 +12,20 @@ public sealed class GroupGraphService : IGroupGraphService
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
+    private readonly IContentGraphService? _contentGraphService;
 
     public GroupGraphService(
         MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
-        IExternalServiceClient externalServiceClient)
+        IExternalServiceClient externalServiceClient,
+        IContentGraphService? contentGraphService = null)
     {
         _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
+        _contentGraphService = contentGraphService;
     }
 
     public async Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default)
@@ -32,7 +35,13 @@ public sealed class GroupGraphService : IGroupGraphService
             GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar, input.Background),
             cancellationToken);
 
-        await _associationService.AddAssociationAsync(input.CreatorId, GraphAssociationType.Admin, group.id, cancellationToken);
+        await _associationService.ApplyMutationsAsync(
+            new AssociationMutation[]
+            {
+                new(input.CreatorId, GraphAssociationType.Member, group.id, true),
+                new(input.CreatorId, GraphAssociationType.Admin, group.id, true)
+            },
+            cancellationToken);
         await _externalServiceClient.CreateSearchIndexAsync(group.id, "group", input.Name, cancellationToken);
         return (await GetGroupAsync(group.id, cancellationToken))!;
     }
@@ -60,11 +69,34 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<bool> DeleteGroupAsync(long groupId, CancellationToken cancellationToken = default)
     {
+        var current = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        var currentData = current is null ? null : GraphJson.ParseObject(current.data);
+        var profileMedia = currentData is null
+            ? Array.Empty<string>()
+            : new[]
+            {
+                GraphJson.String(currentData, "avatar"),
+                GraphJson.String(currentData, "background")
+            }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (_contentGraphService is not null)
+        {
+            var groupPostIds = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == groupId && item.atype == GraphAssociationType.Published)
+                .Select(item => item.id2)
+                .Distinct()
+                .ToArrayAsync(cancellationToken);
+            foreach (var postId in groupPostIds)
+            {
+                await _contentGraphService.DeleteContentAsync(postId, cancellationToken);
+            }
+        }
         await _associationService.DeleteObjectAssociationsAsync(groupId, cancellationToken);
         var deleted = await _objectService.DeleteObjectAsync(groupId, cancellationToken);
         if (deleted)
         {
             await _externalServiceClient.DeleteSearchIndexAsync(groupId, cancellationToken);
+            await _externalServiceClient.DeleteMediaAsync(profileMedia, cancellationToken);
         }
 
         return deleted;
@@ -91,13 +123,48 @@ public sealed class GroupGraphService : IGroupGraphService
             await _associationService.CountAssociationAsync(groupId, GraphAssociationType.HaveAdmin, cancellationToken));
     }
 
-    public async Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, CancellationToken cancellationToken = default)
+    public async Task<GroupResult?> ChangeGroupAvatarAsync(
+        long actorId,
+        long groupId,
+        string avatarUrl,
+        string? originalUrl = null,
+        CancellationToken cancellationToken = default)
     {
+        var currentGroup = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        if (currentGroup is null || currentGroup.otype != GraphObjectType.Group)
+        {
+            return null;
+        }
+        var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "avatar");
         var updated = await _objectService.UpdateObjectAsync(groupId, GraphObjectType.Group, GraphJson.PatchJson(("avatar", avatarUrl)), cancellationToken);
+        if (updated is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(avatarUrl))
+            {
+                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, cancellationToken);
+            }
+            if (!string.IsNullOrWhiteSpace(previousUrl) &&
+                !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+            }
+        }
+        if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
+        {
+            await _contentGraphService.CreateGroupPostAsync(
+                new CreateGroupPostInput(
+                    actorId,
+                    groupId,
+                    "đã cập nhật ảnh đại diện của nhóm.",
+                    new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
+                cancellationToken);
+        }
+
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
     }
 
     public async Task<GroupResult?> ChangeGroupBackgroundAsync(
+        long actorId,
         long groupId,
         string backgroundUrl,
         string? originalUrl = null,
@@ -109,16 +176,37 @@ public sealed class GroupGraphService : IGroupGraphService
             return null;
         }
 
-        if (!string.IsNullOrWhiteSpace(originalUrl))
-        {
-            await AddOwnedPhotoAsync(groupId, originalUrl, cancellationToken);
-        }
+        var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "background");
 
         var updated = await _objectService.UpdateObjectAsync(
             groupId,
             GraphObjectType.Group,
             GraphJson.PatchJson(("background", backgroundUrl)),
             cancellationToken);
+
+        if (updated is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(backgroundUrl))
+            {
+                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, cancellationToken);
+            }
+            if (!string.IsNullOrWhiteSpace(previousUrl) &&
+                !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+            }
+        }
+
+        if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
+        {
+            await _contentGraphService.CreateGroupPostAsync(
+                new CreateGroupPostInput(
+                    actorId,
+                    groupId,
+                    "đã cập nhật ảnh bìa của nhóm.",
+                    new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
+                cancellationToken);
+        }
 
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
     }
@@ -377,7 +465,13 @@ public sealed class GroupGraphService : IGroupGraphService
                 return false;
             }
 
-            return await RemoveAdminAsync(groupId, userId, cancellationToken);
+            return await _associationService.ApplyMutationsAsync(
+                new AssociationMutation[]
+                {
+                    new(userId, GraphAssociationType.Admin, groupId, false),
+                    new(userId, GraphAssociationType.Member, groupId, false)
+                },
+                cancellationToken);
         }
 
         return await RemoveMemberAsync(groupId, userId, cancellationToken);
@@ -394,9 +488,14 @@ public sealed class GroupGraphService : IGroupGraphService
             cancellationToken);
     }
 
-    public Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
+    public async Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
-        return _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken);
+        if (await IsAdminAsync(userId, groupId, cancellationToken))
+        {
+            return false;
+        }
+
+        return await _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken);
     }
 
     public async Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
@@ -404,7 +503,7 @@ public sealed class GroupGraphService : IGroupGraphService
         return await _associationService.ApplyMutationsAsync(
             new AssociationMutation[]
             {
-                new(userId, GraphAssociationType.Member, groupId, false),
+                new(userId, GraphAssociationType.Member, groupId, true),
                 new(userId, GraphAssociationType.Admin, groupId, true)
             },
             cancellationToken);
@@ -426,10 +525,12 @@ public sealed class GroupGraphService : IGroupGraphService
             return false;
         }
 
-        return await _associationService.DeleteOneAssociationAsync(
-            userId,
-            GraphAssociationType.Admin,
-            groupId,
+        return await _associationService.ApplyMutationsAsync(
+            new AssociationMutation[]
+            {
+                new(userId, GraphAssociationType.Member, groupId, true),
+                new(userId, GraphAssociationType.Admin, groupId, false)
+            },
             cancellationToken);
     }
 
@@ -449,16 +550,6 @@ public sealed class GroupGraphService : IGroupGraphService
     {
         return await _associationService.HasAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken) ||
                await _associationService.HasAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
-    }
-
-    private async Task AddOwnedPhotoAsync(long ownerId, string url, CancellationToken cancellationToken)
-    {
-        var media = await _objectService.AddObjectAsync(
-            GraphObjectType.Media,
-            GraphJson.MediaJson(GraphMediaType.Photo, url),
-            cancellationToken);
-
-        await _associationService.AddAssociationAsync(ownerId, GraphAssociationType.Owned, media.id, cancellationToken);
     }
 
     private async Task<bool> CanViewGroupAsync(

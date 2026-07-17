@@ -16,6 +16,7 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
     private const string RecommendationSecretHeader = "X-Internal-RecommendationService-Secret";
     private const string NotificationSecretHeader = "X-Internal-NotificationService-Secret";
     private const string MessagingSecretHeader = "X-Internal-MessengerService-Secret";
+    private const string UploadSecretHeader = "X-Internal-UploadService-Secret";
     private const string IdempotencyHeader = "Idempotency-Key";
 
     private readonly IHttpClientFactory _httpClientFactory;
@@ -183,6 +184,35 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
                 {
                     var payload = Deserialize<MessagingUserEvent>(message.payload);
                     await DispatchMessagingUserAsync(payload.UserId, false, message.idempotency_key, cancellationToken);
+                    break;
+                }
+            case IntegrationEventType.MediaFinalize:
+                {
+                    var payload = Deserialize<MediaLifecycleEvent>(message.payload);
+                    await SendOutboxRequiredAsync(
+                        "UploadServiceFinalizeMedia",
+                        HttpMethod.Post,
+                        GetInternalServiceUrl("Upload", "internal/media/finalize"),
+                        new { urls = payload.Urls },
+                        UploadSecretHeader,
+                        "InternalServices:Upload:SharedSecret",
+                        message.idempotency_key,
+                        cancellationToken);
+                    break;
+                }
+            case IntegrationEventType.MediaDelete:
+                {
+                    var payload = Deserialize<MediaLifecycleEvent>(message.payload);
+                    await SendOutboxRequiredAsync(
+                        "UploadServiceDeleteMedia",
+                        HttpMethod.Post,
+                        GetInternalServiceUrl("Upload", "internal/media/delete"),
+                        new { urls = payload.Urls },
+                        UploadSecretHeader,
+                        "InternalServices:Upload:SharedSecret",
+                        message.idempotency_key,
+                        cancellationToken,
+                        notFoundIsSuccess: true);
                     break;
                 }
             default:
