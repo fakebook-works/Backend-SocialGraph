@@ -47,9 +47,9 @@ public sealed class StorySchemaTests
         Assert.Contains("feedPostSearchResult(referenceId: ID!): FeedPostSearchResult", schema);
         Assert.Contains("groupPostSearchResult(referenceId: ID!): GroupPostSearchResult", schema);
         Assert.Contains("reelSearchResult(referenceId: ID!): ReelSearchResult", schema);
-        // userById is an internal Fusion lookup extension and is intentionally
-        // hidden from the standalone public SocialGraph schema.
-        Assert.DoesNotContain("userById(id: Long!): User", schema);
+        // Fusion executes this field directly against the SocialGraph subgraph.
+        // The Gateway composition marks it internal, so it is not public there.
+        Assert.Contains("userById(id: Long!): User", schema);
         Assert.Contains("profiles(userIds: [Long!]!): [UserProfileResult!]!", schema);
         Assert.Contains("groups(groupIds: [Long!]!): [GroupResult!]!", schema);
         Assert.Contains("profilePosts", schema);
@@ -73,6 +73,9 @@ public sealed class StorySchemaTests
         Assert.Contains("sharedReels", schema);
         Assert.Contains("watchedReels", schema);
         Assert.Contains("comments", schema);
+        Assert.Contains("mentions:", schema);
+        Assert.Contains("taggedUsers:", schema);
+        Assert.Contains("type MentionUserResult", schema);
         Assert.Contains("contentEngagement", schema);
         Assert.Contains("savedContent", schema);
         Assert.Contains("storyViewers", schema);

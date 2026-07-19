@@ -113,6 +113,121 @@ public sealed class UserGraphServiceTests
         Assert.Equal(1, profile.FollowingCount);
     }
 
+    [Fact]
+    public async Task GetFriendRelationProfiles_LoadsEveryFriendsPageAndIncludesOwnBlockList()
+    {
+        const long viewerId = 151;
+        const long friendId = 152;
+        const long outgoingId = 153;
+        const long incomingId = 154;
+        const long blockedId = 155;
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        context.ObjectsTb.AddRange(
+            User(viewerId, "Viewer"),
+            User(friendId, "Friend"),
+            User(outgoingId, "Outgoing"),
+            User(incomingId, "Incoming"),
+            User(blockedId, "Blocked"));
+        context.AssociationsTb.AddRange(
+            Edge(viewerId, GraphAssociationType.Friend, friendId),
+            Edge(viewerId, GraphAssociationType.FriendRequest, outgoingId),
+            Edge(viewerId, GraphAssociationType.HaveFriendRequest, incomingId),
+            Edge(viewerId, GraphAssociationType.Blocked, blockedId));
+        await context.SaveChangesAsync();
+        var service = new UserGraphService(
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>(),
+            context);
+
+        var friends = await service.GetFriendRelationProfilesAsync(viewerId, GraphAssociationType.Friend, 100);
+        var outgoing = await service.GetFriendRelationProfilesAsync(viewerId, GraphAssociationType.FriendRequest, 100);
+        var incoming = await service.GetFriendRelationProfilesAsync(viewerId, GraphAssociationType.HaveFriendRequest, 100);
+        var blocked = await service.GetFriendRelationProfilesAsync(viewerId, GraphAssociationType.Blocked, 100);
+
+        Assert.Equal(friendId, Assert.Single(friends).Id);
+        Assert.Equal(outgoingId, Assert.Single(outgoing).Id);
+        Assert.Equal(incomingId, Assert.Single(incoming).Id);
+        Assert.Equal(blockedId, Assert.Single(blocked).Id);
+    }
+
+    [Fact]
+    public async Task GetFriendIds_ReturnsOnlyExistingUnblockedAcceptedFriends()
+    {
+        const long viewerId = 171;
+        const long friendId = 172;
+        const long blockedFriendId = 173;
+        const long pendingId = 174;
+        const long deletedFriendId = 175;
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        context.ObjectsTb.AddRange(
+            User(viewerId, "Viewer"),
+            User(friendId, "Friend"),
+            User(blockedFriendId, "Blocked Friend"),
+            User(pendingId, "Pending"));
+        context.AssociationsTb.AddRange(
+            Edge(viewerId, GraphAssociationType.Friend, friendId),
+            Edge(viewerId, GraphAssociationType.Friend, blockedFriendId),
+            Edge(viewerId, GraphAssociationType.Blocked, blockedFriendId),
+            Edge(viewerId, GraphAssociationType.FriendRequest, pendingId),
+            Edge(viewerId, GraphAssociationType.Friend, deletedFriendId));
+        await context.SaveChangesAsync();
+        var service = new UserGraphService(
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>(),
+            context);
+
+        var ids = await service.GetFriendIdsAsync(viewerId);
+
+        Assert.Equal(new[] { friendId }, ids);
+    }
+
+    [Fact]
+    public async Task GetFriendSuggestions_RanksMutualFriendsAndExcludesExistingRelationships()
+    {
+        const long viewerId = 201;
+        const long friendId = 202;
+        const long mutualCandidateId = 203;
+        const long pendingId = 204;
+        const long blockedId = 205;
+        const long fallbackCandidateId = 206;
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        context.ObjectsTb.AddRange(
+            User(viewerId, "Viewer"),
+            User(friendId, "Mutual Friend"),
+            User(mutualCandidateId, "Mutual Candidate"),
+            User(pendingId, "Pending Candidate"),
+            User(blockedId, "Blocked Candidate"),
+            User(fallbackCandidateId, "Fallback Candidate"));
+        context.AssociationsTb.AddRange(
+            Edge(viewerId, GraphAssociationType.Friend, friendId),
+            Edge(friendId, GraphAssociationType.Friend, viewerId),
+            Edge(friendId, GraphAssociationType.Friend, mutualCandidateId),
+            Edge(mutualCandidateId, GraphAssociationType.Friend, friendId),
+            Edge(viewerId, GraphAssociationType.FriendRequest, pendingId),
+            Edge(viewerId, GraphAssociationType.Blocked, blockedId));
+        await context.SaveChangesAsync();
+        var service = new UserGraphService(
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>(),
+            context);
+
+        var suggestions = await service.GetFriendSuggestionsAsync(viewerId, 10);
+
+        Assert.Equal(new[] { mutualCandidateId, fallbackCandidateId }, suggestions.Select(item => item.Profile.Id));
+        Assert.Equal(1, suggestions[0].MutualFriendCount);
+        Assert.Equal(friendId, Assert.Single(suggestions[0].MutualFriends).Id);
+        Assert.DoesNotContain(suggestions, item => item.Profile.Id == pendingId || item.Profile.Id == blockedId);
+    }
+
     private static CreateUserInput Input()
     {
         return new CreateUserInput(

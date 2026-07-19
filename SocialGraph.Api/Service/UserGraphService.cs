@@ -208,6 +208,235 @@ public sealed class UserGraphService : IUserGraphService
         return profiles;
     }
 
+    public async Task<IReadOnlyList<long>> GetFriendIdsAsync(
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (userId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(userId));
+        }
+
+        if (_dbContext is not null)
+        {
+            var viewerExists = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .AnyAsync(item => item.id == userId && item.otype == GraphObjectType.User, cancellationToken);
+            if (!viewerExists)
+            {
+                return Array.Empty<long>();
+            }
+
+            var blockedIds = _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == userId &&
+                               (item.atype == GraphAssociationType.Blocked ||
+                                item.atype == GraphAssociationType.BlockedBy))
+                .Select(item => item.id2);
+
+            return await (
+                    from relation in _dbContext.AssociationsTb.AsNoTracking()
+                    join candidate in _dbContext.ObjectsTb.AsNoTracking()
+                        on relation.id2 equals candidate.id
+                    where relation.id1 == userId &&
+                          relation.atype == GraphAssociationType.Friend &&
+                          relation.id2 != userId &&
+                          candidate.otype == GraphObjectType.User &&
+                          !blockedIds.Contains(relation.id2)
+                    orderby relation.id2
+                    select relation.id2)
+                .Distinct()
+                .ToArrayAsync(cancellationToken);
+        }
+
+        var ids = new List<long>();
+        string? cursor = null;
+        do
+        {
+            var page = await _associationService.RetrieveAssociationAsync(
+                userId,
+                GraphAssociationType.Friend,
+                cursor,
+                100,
+                cancellationToken);
+            ids.AddRange(page.items.Select(item => item.id2).Where(id => id > 0 && id != userId));
+            cursor = page.nextCursor;
+        }
+        while (cursor is not null);
+
+        return ids.Distinct().OrderBy(id => id).ToArray();
+    }
+
+    public async Task<IReadOnlyList<UserProfileResult>> GetFriendRelationProfilesAsync(
+        long userId,
+        short associationType,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (associationType is not (GraphAssociationType.Friend or
+            GraphAssociationType.FriendRequest or
+            GraphAssociationType.HaveFriendRequest or
+            GraphAssociationType.Blocked))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(associationType),
+                associationType,
+                "Only friend, incoming request, outgoing request and blocked relations are supported.");
+        }
+
+        var take = Math.Clamp(limit, 1, 100);
+        if (_dbContext is not null)
+        {
+            var relationIds = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == userId && item.atype == associationType)
+                .OrderByDescending(item => item.time)
+                .ThenByDescending(item => item.id2)
+                .Select(item => item.id2)
+                .Take(take)
+                .ToArrayAsync(cancellationToken);
+            if (relationIds.Length == 0)
+            {
+                return Array.Empty<UserProfileResult>();
+            }
+
+            // A user must still be able to see the people in their own block list so they can unblock them.
+            long? profileViewerId = associationType == GraphAssociationType.Blocked ? null : userId;
+            return await GetProfilesFromDatabaseAsync(relationIds, profileViewerId, cancellationToken);
+        }
+
+        var page = await _associationService.RetrieveAssociationAsync(
+            userId,
+            associationType,
+            null,
+            take,
+            cancellationToken);
+        var profiles = new List<UserProfileResult>(page.items.Count);
+        foreach (var relation in page.items)
+        {
+            var profile = await GetProfileFromServicesAsync(relation.id2, cancellationToken);
+            if (profile is not null)
+            {
+                profiles.Add(profile);
+            }
+        }
+
+        return profiles;
+    }
+
+    public async Task<IReadOnlyList<FriendSuggestionResult>> GetFriendSuggestionsAsync(
+        long userId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (_dbContext is null)
+        {
+            return Array.Empty<FriendSuggestionResult>();
+        }
+
+        var take = Math.Clamp(limit, 1, 50);
+        var excludedAssociationTypes = new short[]
+        {
+            GraphAssociationType.Friend,
+            GraphAssociationType.FriendRequest,
+            GraphAssociationType.HaveFriendRequest,
+            GraphAssociationType.Blocked,
+            GraphAssociationType.BlockedBy
+        };
+        var viewerEdges = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == userId && excludedAssociationTypes.Contains(item.atype))
+            .Select(item => new { item.atype, item.id2 })
+            .ToListAsync(cancellationToken);
+        var directFriendIds = viewerEdges
+            .Where(item => item.atype == GraphAssociationType.Friend)
+            .Select(item => item.id2)
+            .Distinct()
+            .ToArray();
+        var excludedIds = viewerEdges
+            .Select(item => item.id2)
+            .Append(userId)
+            .Distinct()
+            .ToArray();
+
+        var mutualFriendIdsByCandidate = new Dictionary<long, List<long>>();
+        if (directFriendIds.Length > 0)
+        {
+            var mutualEdges = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => directFriendIds.Contains(item.id1) &&
+                               item.atype == GraphAssociationType.Friend &&
+                               !excludedIds.Contains(item.id2))
+                .Select(item => new { FriendId = item.id1, CandidateId = item.id2 })
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            foreach (var edge in mutualEdges)
+            {
+                if (!mutualFriendIdsByCandidate.TryGetValue(edge.CandidateId, out var mutualIds))
+                {
+                    mutualIds = new List<long>();
+                    mutualFriendIdsByCandidate[edge.CandidateId] = mutualIds;
+                }
+                mutualIds.Add(edge.FriendId);
+            }
+        }
+
+        var selectedIds = mutualFriendIdsByCandidate
+            .OrderByDescending(item => item.Value.Count)
+            .ThenByDescending(item => item.Key)
+            .Select(item => item.Key)
+            .Take(take)
+            .ToList();
+        if (selectedIds.Count < take)
+        {
+            var remaining = take - selectedIds.Count;
+            var alreadySelected = selectedIds.ToArray();
+            var fallbackIds = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .Where(item => item.otype == GraphObjectType.User &&
+                               !excludedIds.Contains(item.id) &&
+                               !alreadySelected.Contains(item.id))
+                .OrderByDescending(item => item.id)
+                .Select(item => item.id)
+                .Take(remaining)
+                .ToListAsync(cancellationToken);
+            selectedIds.AddRange(fallbackIds);
+        }
+
+        if (selectedIds.Count == 0)
+        {
+            return Array.Empty<FriendSuggestionResult>();
+        }
+
+        var profiles = await GetProfilesFromDatabaseAsync(selectedIds, userId, cancellationToken);
+        var profilesById = profiles.ToDictionary(item => item.Id);
+        var displayedMutualIds = selectedIds
+            .SelectMany(candidateId => mutualFriendIdsByCandidate.TryGetValue(candidateId, out var ids) ? ids.Take(3) : Array.Empty<long>())
+            .Distinct()
+            .ToArray();
+        var mutualProfiles = displayedMutualIds.Length == 0
+            ? Array.Empty<UserProfileResult>()
+            : (await GetProfilesFromDatabaseAsync(displayedMutualIds, userId, cancellationToken)).ToArray();
+        var mutualProfilesById = mutualProfiles.ToDictionary(item => item.Id);
+
+        return selectedIds
+            .Where(profilesById.ContainsKey)
+            .Select(candidateId =>
+            {
+                var mutualIds = mutualFriendIdsByCandidate.TryGetValue(candidateId, out var ids)
+                    ? ids.Distinct().ToArray()
+                    : Array.Empty<long>();
+                var mutualFriends = mutualIds
+                    .Take(3)
+                    .Where(mutualProfilesById.ContainsKey)
+                    .Select(mutualId => mutualProfilesById[mutualId])
+                    .Select(profile => new UserSummaryResult(profile.Id, profile.Name, profile.Avatar, profile.IsVerified))
+                    .ToArray();
+                return new FriendSuggestionResult(profilesById[candidateId], mutualIds.Length, mutualFriends);
+            })
+            .ToArray();
+    }
+
     private async Task<UserProfileResult?> GetProfileFromServicesAsync(
         long userId,
         CancellationToken cancellationToken)

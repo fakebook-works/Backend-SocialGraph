@@ -11,7 +11,7 @@ public class Query
 {
     private const int MaxBatchLookupIds = 50;
 
-    [GraphQLIgnore]
+    [GraphQLName("userById")]
     public Task<FederatedUser?> GetUserByIdAsync(
         long id,
         [Service] IUserGraphService userGraphService,
@@ -36,6 +36,29 @@ public class Query
         EnsureBatchSize(userIds.Count);
         var viewerId = trustedCaller.RequireUserId();
         return await userGraphService.GetProfilesForViewerAsync(viewerId, userIds, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<FriendSuggestionResult>> GetFriendSuggestionsAsync(
+        long userId,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return userGraphService.GetFriendSuggestionsAsync(userId, limit, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<UserProfileResult>> GetFriendRelationProfilesAsync(
+        long userId,
+        short associationType,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return userGraphService.GetFriendRelationProfilesAsync(userId, associationType, limit, cancellationToken);
     }
 
     public async Task<IReadOnlyList<GroupResult>> GetGroupsAsync(

@@ -183,3 +183,23 @@ likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trust
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.
 inviteGroupUser chỉ gửi notification action 6, không tự thêm member; share feed/story gửi action 9 cho source author và bỏ qua self-notify.
 
+-- ** Mention trong content ** --
+--------------------------------
+Mention được lưu ngay tại đúng vị trí trong `content` bằng token `[[mention:<userId>]]`, ví dụ: `Chào [[mention:123]], bạn khỏe không?`.
+`userId` phải là số nguyên dương hợp lệ trong miền BIGINT/Int64. Tên user không được lưu trong token hoặc content.
+Frontend chỉ giữ `@từ-khóa` trong lúc đang tìm người dùng. Ngay khi chọn, editor bỏ ký tự `@`, hiển thị tên đậm tại đúng vị trí nhưng vẫn giữ `userId` trong draft; trước khi gửi, vùng tên đó được thay bằng token ID. Client mới không cần gửi `mentionedUserIds`; field cũ chỉ còn trong input để tương thích schema và backend không dùng nó làm nguồn tạo mention.
+
+Association type 26 (`mentioned`) được derive từ token trong content:
+- Khi tạo post/comment, backend parse token và tạo association cho các user ID hợp lệ.
+- Khi sửa content post, backend đồng bộ association: thêm mention mới và xóa mention không còn trong content.
+- Token trùng user ID chỉ tạo một association; token sai định dạng, bằng 0, số âm hoặc vượt miền Int64 bị bỏ qua.
+- Token trong content là tham chiếu ổn định; association không phải nơi lưu snapshot tên hiển thị.
+
+Read model của feed post, group post, shared source và comment trả thêm `mentions { userId name available }`.
+`name` luôn là tên hiện tại tại thời điểm đọc, vì vậy user đổi tên thì lần đọc tiếp theo tự cập nhật mà không cần sửa content.
+Nếu user đã bị xóa hoặc không còn khả dụng, token vẫn được giữ, read model trả `available: false`; client hiển thị nhãn fallback `Người dùng Fakebook` và không tạo liên kết profile.
+Khi render, frontend bỏ ký tự `@`, hiển thị tên đậm và cho phép nhấn để mở `/profile/<userId>` nếu `available: true`.
+Không cần migration hay bảng mới; cơ chế này tái sử dụng association type 26 hiện có.
+
+Feed post detail trả thêm `taggedUsers { id name avatar isVerified }`. Danh sách này được hydrate cùng batch association/object của trang feed, không gọi query riêng cho từng post.
+

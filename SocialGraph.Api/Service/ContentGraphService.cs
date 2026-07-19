@@ -50,7 +50,7 @@ public sealed class ContentGraphService : IContentGraphService
                 }
             }
 
-            foreach (var userId in NormalizeUserIds(input.MentionedUserIds))
+            foreach (var userId in MentionUserIds(input.Content))
             {
                 if (!await MentionAsync(post.id, userId, cancellationToken))
                 {
@@ -88,7 +88,7 @@ public sealed class ContentGraphService : IContentGraphService
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
             await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
-            foreach (var userId in NormalizeUserIds(input.MentionedUserIds))
+            foreach (var userId in MentionUserIds(input.Content))
             {
                 if (!await MentionAsync(post.id, userId, cancellationToken))
                 {
@@ -164,6 +164,7 @@ public sealed class ContentGraphService : IContentGraphService
         var content = input.Content ?? GraphJson.String(currentData, "content");
         if (input.Content is not null)
         {
+            await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
             await _externalServiceClient.UpdateSearchIndexAsync(
                 input.Id,
                 current.otype == GraphObjectType.FeedPost ? "feedPost" : "groupPost",
@@ -277,7 +278,9 @@ public sealed class ContentGraphService : IContentGraphService
                 (item.atype == GraphAssociationType.AuthoredBy ||
                  item.atype == GraphAssociationType.Contained ||
                  item.atype == GraphAssociationType.PublishedIn ||
-                 item.atype == GraphAssociationType.Share))
+                 item.atype == GraphAssociationType.Share ||
+                 item.atype == GraphAssociationType.Mentioned ||
+                 item.atype == GraphAssociationType.Tagged))
             .ToListAsync(cancellationToken);
         var authorByPost = postLinks
             .Where(item => item.atype == GraphAssociationType.AuthoredBy)
@@ -298,12 +301,17 @@ public sealed class ContentGraphService : IContentGraphService
                 .AsNoTracking()
                 .Where(item => sourceIds.Contains(item.id1) &&
                     (item.atype == GraphAssociationType.AuthoredBy ||
-                     item.atype == GraphAssociationType.Contained))
+                     item.atype == GraphAssociationType.Contained ||
+                     item.atype == GraphAssociationType.Mentioned))
                 .ToListAsync(cancellationToken);
         var sourceAuthorBySource = sourceLinks
             .Where(item => item.atype == GraphAssociationType.AuthoredBy)
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var postMentionTokenIds = posts.Values
+            .SelectMany(post => MentionTokenCodec.ExtractUserIds(
+                GraphJson.String(GraphJson.ParseObject(post.data), "content")))
+            .Distinct();
         var relatedIds = authorByPost.Values
             .Concat(groupByPost.Values)
             .Concat(sourceIds)
@@ -314,6 +322,16 @@ public sealed class ContentGraphService : IContentGraphService
             .Concat(sourceLinks
                 .Where(item => item.atype == GraphAssociationType.Contained)
                 .Select(item => item.id2))
+            .Concat(postLinks
+                .Where(item => item.atype == GraphAssociationType.Mentioned)
+                .Select(item => item.id2))
+            .Concat(postLinks
+                .Where(item => item.atype == GraphAssociationType.Tagged)
+                .Select(item => item.id2))
+            .Concat(sourceLinks
+                .Where(item => item.atype == GraphAssociationType.Mentioned)
+                .Select(item => item.id2))
+            .Concat(postMentionTokenIds)
             .Distinct()
             .ToArray();
         var relatedObjects = relatedIds.Length == 0
@@ -409,6 +427,7 @@ public sealed class ContentGraphService : IContentGraphService
                 .ToArray();
             var content = GraphJson.String(postData, "content");
             var create = GraphJson.String(postData, "create");
+            var mentions = BuildMentionUsers(content, relatedObjects);
 
             if (post.otype == GraphObjectType.GroupPost && group is not null)
             {
@@ -425,7 +444,8 @@ public sealed class ContentGraphService : IContentGraphService
                         GraphJson.String(groupData, "name"),
                         GraphJson.String(groupData, "avatar"),
                         !participatingGroups.Contains(group.id)),
-                    media));
+                    media,
+                    mentions));
                 continue;
             }
 
@@ -441,7 +461,8 @@ public sealed class ContentGraphService : IContentGraphService
                         null,
                         null,
                         null,
-                        Array.Empty<MediaResult>());
+                        Array.Empty<MediaResult>(),
+                        Array.Empty<MentionUserResult>());
                 }
                 else
                 {
@@ -465,7 +486,8 @@ public sealed class ContentGraphService : IContentGraphService
                             source.otype,
                             null,
                             null,
-                            Array.Empty<MediaResult>());
+                            Array.Empty<MediaResult>(),
+                            Array.Empty<MentionUserResult>());
                     }
                     else
                     {
@@ -478,21 +500,32 @@ public sealed class ContentGraphService : IContentGraphService
                                 : null)
                             .OfType<MediaResult>()
                             .ToArray();
+                        var sourceContent = GraphJson.String(sourceData, "content");
                         sharedSource = new SharedPostSourceResult(
                             sourceId,
                             true,
                             source.otype,
-                            GraphJson.String(sourceData, "content"),
+                            sourceContent,
                             new UserSummaryResult(
                                 sourceAuthorId,
                                 GraphJson.String(sourceAuthorData, "name"),
                                 GraphJson.String(sourceAuthorData, "avatar"),
                                 IsVerifyActive(sourceAuthorData)),
-                            sourceMedia);
+                            sourceMedia,
+                            BuildMentionUsers(sourceContent, relatedObjects));
                     }
                 }
             }
 
+            var taggedUsers = postLinks
+                .Where(item => item.id1 == postId && item.atype == GraphAssociationType.Tagged)
+                .OrderBy(item => item.time)
+                .ThenBy(item => item.id2)
+                .Select(item => relatedObjects.TryGetValue(item.id2, out var taggedUser) && taggedUser.otype == GraphObjectType.User
+                    ? BuildUserSummary(taggedUser)
+                    : null)
+                .OfType<UserSummaryResult>()
+                .ToArray();
             results.Add(new FeedPostDetailResult(
                 post.id,
                 post.otype,
@@ -501,7 +534,9 @@ public sealed class ContentGraphService : IContentGraphService
                 create,
                 postAuthor,
                 media,
-                sharedSource));
+                sharedSource,
+                mentions,
+                taggedUsers));
         }
 
         return results;
@@ -510,14 +545,18 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default)
     {
         var comment = await _objectService.AddObjectAsync(GraphObjectType.Comment, GraphJson.ContentJson(input.Content), cancellationToken);
+        var mentionedUserIds = MentionUserIds(input.Content);
         try
         {
+            var mutations = new List<AssociationMutation>
+            {
+                new(input.AuthorId, GraphAssociationType.Authored, comment.id, true),
+                new(input.TargetId, GraphAssociationType.HaveComment, comment.id, true)
+            };
+            mutations.AddRange(mentionedUserIds.Select(userId =>
+                new AssociationMutation(comment.id, GraphAssociationType.Mentioned, userId, true)));
             await _associationService.ApplyMutationsAsync(
-                new AssociationMutation[]
-                {
-                    new(input.AuthorId, GraphAssociationType.Authored, comment.id, true),
-                    new(input.TargetId, GraphAssociationType.HaveComment, comment.id, true)
-                },
+                mutations,
                 cancellationToken);
         }
         catch
@@ -530,6 +569,17 @@ public sealed class ContentGraphService : IContentGraphService
         if (targetAuthorId > 0 && targetAuthorId != input.AuthorId)
         {
             await _externalServiceClient.NotifyAsync(input.AuthorId, targetAuthorId, ExternalNotificationAction.Comment, input.TargetId, null, cancellationToken);
+        }
+
+        foreach (var mentionedUserId in mentionedUserIds.Where(userId => userId != input.AuthorId))
+        {
+            await _externalServiceClient.NotifyAsync(
+                input.AuthorId,
+                mentionedUserId,
+                ExternalNotificationAction.Mention,
+                comment.id,
+                null,
+                cancellationToken);
         }
 
         await QueueRecommendationInteractionIfContentAsync(
@@ -1192,6 +1242,63 @@ public sealed class ContentGraphService : IContentGraphService
         }
 
         return userIds.Distinct().Take(100).ToArray();
+    }
+
+    private static IReadOnlyList<long> MentionUserIds(string content) =>
+        MentionTokenCodec.ExtractUserIds(content)
+            .Take(100)
+            .ToArray();
+
+    private static IReadOnlyList<MentionUserResult> BuildMentionUsers(
+        string content,
+        IReadOnlyDictionary<long, Objects> objects) =>
+        MentionTokenCodec.ExtractUserIds(content)
+            .Select(userId =>
+            {
+                if (!objects.TryGetValue(userId, out var user) || user.otype != GraphObjectType.User)
+                {
+                    return new MentionUserResult(userId, string.Empty, false);
+                }
+
+                var data = GraphJson.ParseObject(user.data);
+                return new MentionUserResult(userId, GraphJson.String(data, "name"), true);
+            })
+            .ToArray();
+
+    private async Task SyncMentionAssociationsAsync(
+        long sourceId,
+        long authorId,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var desired = MentionUserIds(content).ToHashSet();
+        var existing = (await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == sourceId && item.atype == GraphAssociationType.Mentioned)
+                .Select(item => item.id2)
+                .ToListAsync(cancellationToken))
+            .ToHashSet();
+        var added = desired.Except(existing).ToArray();
+        var removed = existing.Except(desired).ToArray();
+        var mutations = added
+            .Select(userId => new AssociationMutation(sourceId, GraphAssociationType.Mentioned, userId, true))
+            .Concat(removed.Select(userId => new AssociationMutation(sourceId, GraphAssociationType.Mentioned, userId, false)))
+            .ToArray();
+        if (mutations.Length > 0)
+        {
+            await _associationService.ApplyMutationsAsync(mutations, cancellationToken);
+        }
+
+        foreach (var userId in added.Where(userId => userId != authorId))
+        {
+            await _externalServiceClient.NotifyAsync(
+                authorId,
+                userId,
+                ExternalNotificationAction.Mention,
+                sourceId,
+                null,
+                cancellationToken);
+        }
     }
 
     private async Task<IReadOnlyList<long>> GetContainedMediaIdsAsync(long contentId, CancellationToken cancellationToken)

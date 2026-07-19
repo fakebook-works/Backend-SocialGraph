@@ -385,7 +385,13 @@ public sealed class SocialReadModelService : ISocialReadModelService
         var authorByComment = links.Where(item => item.atype == GraphAssociationType.AuthoredBy)
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.First().id2);
-        var summaries = await GetUserSummariesAsync(authorByComment.Values.Distinct().ToArray(), cancellationToken);
+        var mentionedUserIds = comments.Values
+            .SelectMany(comment => MentionTokenCodec.ExtractUserIds(GraphJson.String(GraphJson.ParseObject(comment.data), "content")))
+            .Distinct()
+            .ToArray();
+        var summaries = await GetUserSummariesAsync(
+            authorByComment.Values.Concat(mentionedUserIds).Distinct().ToArray(),
+            cancellationToken);
         var result = new List<CommentThreadItemResult>(page.items.Count);
         foreach (var edge in page.items)
         {
@@ -397,14 +403,21 @@ public sealed class SocialReadModelService : ISocialReadModelService
             }
 
             var data = GraphJson.ParseObject(comment.data);
+            var content = GraphJson.String(data, "content");
+            var mentions = MentionTokenCodec.ExtractUserIds(content)
+                .Select(userId => summaries.TryGetValue(userId, out var mentionedUser)
+                    ? new MentionUserResult(userId, mentionedUser.Name, true)
+                    : new MentionUserResult(userId, string.Empty, false))
+                .ToArray();
             result.Add(new CommentThreadItemResult(
                 comment.id,
-                GraphJson.String(data, "content"),
+                content,
                 GraphJson.String(data, "create"),
                 author,
                 links.LongCount(item => item.id1 == comment.id && item.atype == GraphAssociationType.LikedBy),
                 links.LongCount(item => item.id1 == comment.id && item.atype == GraphAssociationType.HaveComment),
-                viewerLikes.Contains(comment.id)));
+                viewerLikes.Contains(comment.id),
+                mentions));
         }
 
         return new CommentPageResult(result, page.nextCursor, page.nextCursor is not null);

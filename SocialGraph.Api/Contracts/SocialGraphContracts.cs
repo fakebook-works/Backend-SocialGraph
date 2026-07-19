@@ -83,6 +83,11 @@ public sealed record OperationResult(bool Success, string? Message = null);
 
 public sealed record MediaResult(long Id, int Type, string Url);
 
+public sealed record MentionUserResult(
+    long UserId,
+    string Name,
+    bool Available);
+
 public sealed record UserProfileResult(
     long Id,
     string Avatar,
@@ -99,6 +104,11 @@ public sealed record UserProfileResult(
     long FriendCount,
     long FollowerCount,
     long FollowingCount);
+
+public sealed record FriendSuggestionResult(
+    UserProfileResult Profile,
+    int MutualFriendCount,
+    IReadOnlyList<UserSummaryResult> MutualFriends);
 
 public sealed record GroupResult(
     long Id,
@@ -132,7 +142,9 @@ public sealed record FeedPostDetailResult(
     string Create,
     PostAuthorResult Author,
     IReadOnlyList<MediaResult> Media,
-    SharedPostSourceResult? SharedSource = null) : IHomePostResult;
+    SharedPostSourceResult? SharedSource = null,
+    IReadOnlyList<MentionUserResult>? Mentions = null,
+    IReadOnlyList<UserSummaryResult>? TaggedUsers = null) : IHomePostResult;
 
 [GraphQLName("GroupPostDetail")]
 public sealed record GroupPostDetailResult(
@@ -143,7 +155,8 @@ public sealed record GroupPostDetailResult(
     string Create,
     PostAuthorResult Author,
     PostGroupResult Group,
-    IReadOnlyList<MediaResult> Media) : IHomePostResult;
+    IReadOnlyList<MediaResult> Media,
+    IReadOnlyList<MentionUserResult>? Mentions = null) : IHomePostResult;
 
 [GraphQLName("RecommendationItem")]
 public sealed record RecommendationItemResult(
@@ -170,7 +183,8 @@ public sealed record SharedPostSourceResult(
     short? Type,
     string? Content,
     UserSummaryResult? Author,
-    IReadOnlyList<MediaResult> Media);
+    IReadOnlyList<MediaResult> Media,
+    IReadOnlyList<MentionUserResult>? Mentions = null);
 
 public sealed record UserSummaryResult(
     long Id,
@@ -318,7 +332,8 @@ public sealed record CommentThreadItemResult(
     UserSummaryResult Author,
     long LikeCount,
     long ReplyCount,
-    bool ViewerHasLiked);
+    bool ViewerHasLiked,
+    IReadOnlyList<MentionUserResult>? Mentions = null);
 
 public sealed record CommentPageResult(
     IReadOnlyList<CommentThreadItemResult> Items,

@@ -14,6 +14,44 @@ public sealed class ContentProjectionTests
     private const long PostId = 9_000_000_000_000_003;
     private const long SourceId = 9_000_000_000_000_004;
     private const long SourceAuthorId = 9_000_000_000_000_005;
+    private const long MentionedUserId = 9_000_000_000_000_006;
+    private const long LegacyMentionedUserId = 9_000_000_000_000_007;
+
+    [Fact]
+    public async Task CreateFeedPost_DerivesMentionsOnlyFromContentTokens()
+    {
+        await using var context = CreateContext();
+        var content = $"Hello [[mention:{MentionedUserId}]]";
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.AddObjectAsync(GraphObjectType.FeedPost, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson(content, 0)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.AddAssociationAsync(PostId, GraphAssociationType.Mentioned, MentionedUserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
+
+        await service.CreateFeedPostAsync(new CreateFeedPostInput(
+            AuthorId,
+            content,
+            0,
+            null,
+            MentionedUserIds: new[] { LegacyMentionedUserId }));
+
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Mentioned, MentionedUserId, It.IsAny<CancellationToken>()), Times.Once);
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Mentioned, LegacyMentionedUserId, It.IsAny<CancellationToken>()), Times.Never);
+        external.Verify(item => item.NotifyAsync(
+            AuthorId,
+            MentionedUserId,
+            ExternalNotificationAction.Mention,
+            PostId,
+            null,
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
 
     [Fact]
     public async Task CreateReel_ProjectsToSearchAndRecommendation()

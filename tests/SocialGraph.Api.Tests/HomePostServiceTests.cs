@@ -21,15 +21,18 @@ public sealed class HomePostServiceTests
         const long feedPostId = 1_000;
         const long groupPostId = 1_001;
         const long mediaId = 1_100;
+        const long taggedUserId = 202;
         context.ObjectsTb.AddRange(
             User(FeedAuthorId, "Feed Author"),
             User(GroupAuthorId, "Group Author"),
+            User(taggedUserId, "Tagged Friend"),
             Group(GroupId, "Dotnet Vietnam", privacy: 1),
             Post(feedPostId, GraphObjectType.FeedPost, "public feed", privacy: 0),
             Post(groupPostId, GraphObjectType.GroupPost, "member post", privacy: 0),
             Media(mediaId, "https://cdn.example/post.jpg"));
         context.AssociationsTb.AddRange(
             Edge(feedPostId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(feedPostId, GraphAssociationType.Tagged, taggedUserId),
             Edge(groupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
             Edge(groupPostId, GraphAssociationType.PublishedIn, GroupId),
             Edge(groupPostId, GraphAssociationType.Contained, mediaId),
@@ -53,6 +56,7 @@ public sealed class HomePostServiceTests
         var feedPost = Assert.IsType<FeedPostDetailResult>(results[1]);
         Assert.Equal(feedPostId, feedPost.Id);
         Assert.Equal("Feed Author", feedPost.Author.Name);
+        Assert.Equal("Tagged Friend", Assert.Single(feedPost.TaggedUsers!).Name);
     }
 
     [Fact]
