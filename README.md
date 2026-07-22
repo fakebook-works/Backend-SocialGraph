@@ -86,6 +86,8 @@ Story reads are side-effect free: expired/invalid stories are filtered, not dele
 
 `updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
 
+Comments are paged as direct children of either a post/Reel or another comment, so clients can expand reply levels lazily without loading an unbounded tree. `createComment` accepts text, one optional image, or both; non-image comment media is rejected. Comment projections include that image, direct reply count, and batched viewer-relative author follow state. `ContentEngagementResult.commentCount` counts the complete descendant comment tree while each comment's `replyCount` remains direct-only. `ContentEngagementResult.viewCount` reports the number of unique `WatchedBy` users for a Reel.
+
 `inviteGroupUser` is an admin-only notification flow and does not silently add membership; the invited user still uses the normal join/request flow. Feed/story shares enqueue canonical Share notifications for the original author and suppress self-notifications.
 
 ## Configuration

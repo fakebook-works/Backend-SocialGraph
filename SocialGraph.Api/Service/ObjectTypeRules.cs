@@ -11,7 +11,7 @@ internal static class ObjectTypeRules
         [GraphObjectType.Group] = new HashSet<string>(StringComparer.Ordinal) { "avatar", "background", "name", "bio", "privacy" },
         [GraphObjectType.FeedPost] = new HashSet<string>(StringComparer.Ordinal) { "content", "privacy" },
         [GraphObjectType.GroupPost] = new HashSet<string>(StringComparer.Ordinal) { "content" },
-        [GraphObjectType.Reel] = new HashSet<string>(StringComparer.Ordinal),
+        [GraphObjectType.Reel] = new HashSet<string>(StringComparer.Ordinal) { "content", "privacy" },
         [GraphObjectType.Story] = new HashSet<string>(StringComparer.Ordinal),
         [GraphObjectType.Comment] = new HashSet<string>(StringComparer.Ordinal),
         [GraphObjectType.Media] = new HashSet<string>(StringComparer.Ordinal)

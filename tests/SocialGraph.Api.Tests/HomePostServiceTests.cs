@@ -144,6 +144,32 @@ public sealed class HomePostServiceTests
     }
 
     [Fact]
+    public async Task PostDetails_ProjectsVisibleReelAsItsOwnHomePostType()
+    {
+        await using var context = CreateContext();
+        const long reelId = 2_050;
+        const long mediaId = 2_051;
+        context.ObjectsTb.AddRange(
+            User(FeedAuthorId, "Reel Author"),
+            Post(reelId, GraphObjectType.Reel, "reel on home", privacy: 2),
+            Media(mediaId, "https://cdn.example/reel.mp4", GraphMediaType.Video));
+        context.AssociationsTb.AddRange(
+            Edge(reelId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(reelId, GraphAssociationType.Contained, mediaId),
+            Edge(ViewerId, GraphAssociationType.Friend, FeedAuthorId));
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var visible = Assert.IsType<ReelDetailResult>(await service.GetPostDetailAsync(ViewerId, reelId));
+
+        Assert.Equal(GraphObjectType.Reel, visible.Type);
+        Assert.Equal(2, visible.Privacy);
+        Assert.Equal("reel on home", visible.Content);
+        Assert.Equal("https://cdn.example/reel.mp4", Assert.Single(visible.Media).Url);
+        Assert.Null(await service.GetPostDetailAsync(999, reelId));
+    }
+
+    [Fact]
     public async Task PrivateGroupPost_RequiresCurrentMembershipEvenForItsAuthor()
     {
         await using var context = CreateContext();
@@ -190,6 +216,8 @@ public sealed class HomePostServiceTests
         Assert.Equal(sourceId, wrapper.SharedSource.Id);
         Assert.Equal("public source", wrapper.SharedSource.Content);
         Assert.Equal("Source author", wrapper.SharedSource.Author?.Name);
+        Assert.Equal(0, wrapper.SharedSource.Privacy);
+        Assert.False(string.IsNullOrWhiteSpace(wrapper.SharedSource.Create));
         Assert.Equal("https://cdn.example/source.jpg", Assert.Single(wrapper.SharedSource.Media).Url);
     }
 
@@ -285,11 +313,11 @@ public sealed class HomePostServiceTests
         }.ToJsonString()
     };
 
-    private static Objects Media(long id, string url) => new()
+    private static Objects Media(long id, string url, int type = GraphMediaType.Photo) => new()
     {
         id = id,
         otype = GraphObjectType.Media,
-        data = new JsonObject { ["type"] = GraphMediaType.Photo, ["url"] = url }.ToJsonString()
+        data = new JsonObject { ["type"] = type, ["url"] = url }.ToJsonString()
     };
 
     private static Associations Edge(long id1, short type, long id2, long time = 1) => new()

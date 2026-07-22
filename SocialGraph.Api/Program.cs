@@ -77,6 +77,7 @@ builder.Services
     .AddType<ReelRecommendationItemResult>()
     .AddTypeExtension<ReelRecommendationItemResolvers>()
     .AddType<FeedPostDetailResult>()
+    .AddType<ReelDetailResult>()
     .AddType<GroupPostDetailResult>()
     .AddType<NormalStoryResult>()
     .AddType<FeedPostShareStoryResult>()

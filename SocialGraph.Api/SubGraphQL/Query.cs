@@ -114,7 +114,7 @@ public class Query
         foreach (var edge in authored.items)
         {
             processed++;
-            if (detailsById.TryGetValue(edge.id2, out var detail))
+            if (detailsById.TryGetValue(edge.id2, out var detail) && detail is not ReelDetailResult)
             {
                 items.Add(detail);
                 if (items.Count == take)
@@ -136,6 +136,7 @@ public class Query
         int limit,
         string? cursor,
         [Service] IContentGraphService contentGraphService,
+        [Service] ISocialReadModelService readModels,
         [Service] IAssociationService associationService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
@@ -159,7 +160,8 @@ public class Query
         {
             processed++;
             var content = await contentGraphService.GetContentAsync(edge.id2, cancellationToken);
-            if (content?.Type == GraphObjectType.Reel)
+            if (content?.Type == GraphObjectType.Reel &&
+                await readModels.CanViewTargetAsync(viewerId, edge.id2, cancellationToken))
             {
                 items.Add(content);
                 if (items.Count == take)
@@ -237,7 +239,7 @@ public class Query
         [GraphQLType(typeof(NonNullType<IdType>))] long referenceId,
         [Service] IContentGraphService contentGraphService,
         [Service] IUserGraphService userGraphService,
-        [Service] IAssociationService associationService,
+        [Service] ISocialReadModelService readModels,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
@@ -248,9 +250,7 @@ public class Query
             return null;
         }
 
-        if (viewerId != reel.AuthorId &&
-            (await associationService.HasAssociationAsync(viewerId, GraphAssociationType.Blocked, reel.AuthorId, cancellationToken) ||
-             await associationService.HasAssociationAsync(viewerId, GraphAssociationType.BlockedBy, reel.AuthorId, cancellationToken)))
+        if (!await readModels.CanViewTargetAsync(viewerId, referenceId, cancellationToken))
         {
             return null;
         }
@@ -792,6 +792,7 @@ public class Query
     private static long PostId(IHomePostResult post) => post switch
     {
         FeedPostDetailResult feedPost => feedPost.Id,
+        ReelDetailResult reel => reel.Id,
         GroupPostDetailResult groupPost => groupPost.Id,
         _ => throw new InvalidOperationException("Unsupported profile post type.")
     };

@@ -357,12 +357,13 @@ public class Mutation
         CancellationToken cancellationToken)
     {
         var actorId = trustedCaller.RequireUserId();
-        if (!await readModels.CanShareTargetAsync(actorId, input.SharedSourceId, cancellationToken))
+        var sourceId = await contentGraphService.ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
+        if (!await readModels.CanShareTargetAsync(actorId, sourceId, cancellationToken))
         {
             throw Forbidden("Only visible public feed posts and reels can be shared to a story.");
         }
 
-        return await contentGraphService.CreateShareStoryAsync(input with { AuthorId = actorId }, cancellationToken);
+        return await contentGraphService.CreateShareStoryAsync(input with { AuthorId = actorId, SharedSourceId = sourceId }, cancellationToken);
     }
 
     public Task<DeleteStoryPayload> DeleteStoryAsync(
@@ -384,12 +385,13 @@ public class Mutation
     public async Task<ContentResult> SharePostAsync(SharePostInput input, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
         var actorId = trustedCaller.RequireUserId();
-        if (!await readModels.CanShareTargetAsync(actorId, input.SourceId, cancellationToken))
+        var sourceId = await contentGraphService.ResolveCanonicalShareSourceIdAsync(input.SourceId, cancellationToken);
+        if (!await readModels.CanShareTargetAsync(actorId, sourceId, cancellationToken))
         {
             throw Forbidden("Only visible public feed posts and reels can be shared.");
         }
 
-        return await contentGraphService.SharePostAsync(input with { AuthorId = actorId }, cancellationToken);
+        return await contentGraphService.SharePostAsync(input with { AuthorId = actorId, SourceId = sourceId }, cancellationToken);
     }
 
     public async Task<bool> LikeAsync(long userId, long targetId, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)

@@ -57,23 +57,105 @@ public sealed class ContentProjectionTests
     public async Task CreateReel_ProjectsToSearchAndRecommendation()
     {
         await using var context = CreateContext();
+        string? storedData = null;
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.AddObjectAsync(GraphObjectType.Reel, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<short, string, CancellationToken>((_, data, _) => storedData = data)
             .ReturnsAsync(new SocialGraphObjectResult(
                 ReelId,
                 GraphObjectType.Reel,
-                ContentJson("canonical reel")));
+                PostJson("canonical reel", 2)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
         associations.Setup(item => item.AddAssociationAsync(AuthorId, GraphAssociationType.Authored, ReelId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
         var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
 
-        var reel = await service.CreateReelAsync(new CreateReelInput(AuthorId, "canonical reel", null));
+        var reel = await service.CreateReelAsync(new CreateReelInput(AuthorId, "canonical reel", null, Privacy: 2));
 
         Assert.Equal(ReelId, reel.Id);
+        Assert.Equal(2, reel.Privacy);
+        Assert.Equal(2, JsonNode.Parse(storedData!)!["privacy"]!.GetValue<int>());
         external.Verify(item => item.CreateSearchIndexAsync(ReelId, "reel", "canonical reel", It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.CreatePostEmbeddingAsync(ReelId, "canonical reel", It.Is<IReadOnlyList<string>>(urls => urls.Count == 0), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CreateComment_AllowsOneImageAndFinalizesIt()
+    {
+        await using var context = CreateContext();
+        const long commentId = 9_000_000_000_000_008;
+        const long mediaId = 9_000_000_000_000_009;
+        const string mediaUrl = "https://cdn.example/comment.jpg";
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.AddObjectAsync(GraphObjectType.Comment, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(commentId, GraphObjectType.Comment, ContentJson(string.Empty)));
+        objects.Setup(item => item.AddObjectAsync(GraphObjectType.Media, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(mediaId, GraphObjectType.Media, MediaJson(0, mediaUrl)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(Array.Empty<AssociationEdgeResult>(), null));
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
+
+        var comment = await service.CreateCommentAsync(new CreateCommentInput(
+            AuthorId,
+            PostId,
+            string.Empty,
+            new MediaInput(0, mediaUrl)));
+
+        Assert.Equal(mediaId, Assert.Single(comment.Media).Id);
+        associations.Verify(item => item.AddAssociationAsync(
+            commentId,
+            GraphAssociationType.Contained,
+            mediaId,
+            It.IsAny<CancellationToken>()), Times.Once);
+        external.Verify(item => item.FinalizeMediaAsync(
+            It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { mediaUrl })),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task CreateComment_RejectsNonImageMedia(int mediaType)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var service = new ContentGraphService(
+            context,
+            objects.Object,
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.CreateCommentAsync(
+            new CreateCommentInput(AuthorId, PostId, string.Empty, new MediaInput(mediaType, "https://cdn.example/file"))));
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public async Task CreateReel_RejectsPrivacyOutsideTheFourFeedAudiences(int privacy)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var service = new ContentGraphService(
+            context,
+            objects.Object,
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => service.CreateReelAsync(new CreateReelInput(AuthorId, "reel", null, privacy)));
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -138,6 +220,32 @@ public sealed class ContentProjectionTests
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    [Theory]
+    [InlineData(GraphObjectType.FeedPost, -1)]
+    [InlineData(GraphObjectType.FeedPost, 4)]
+    [InlineData(GraphObjectType.Reel, -1)]
+    [InlineData(GraphObjectType.Reel, 4)]
+    public async Task UpdatePost_RejectsPrivacyOutsideTheFourFeedAudiences(short objectType, int privacy)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, objectType, PostJson("post", 0)));
+        var service = new ContentGraphService(
+            context,
+            objects.Object,
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => service.UpdatePostAsync(new UpdatePostInput(PostId, Privacy: privacy)));
+        objects.Verify(item => item.UpdateObjectAsync(
+            It.IsAny<long>(),
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     [Fact]
     public async Task SharePost_NotifiesSourceAuthorButNeverSelfNotifies()
     {
@@ -178,6 +286,79 @@ public sealed class ContentProjectionTests
             SourceId,
             RecommendationInteractionAction.Share,
             It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task SharePost_FlattensAnExistingShareWrapperToItsOriginalSource()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 9_000_000_000_000_008;
+        context.ObjectsTb.Add(new Objects
+        {
+            id = wrapperId,
+            otype = GraphObjectType.FeedPost,
+            data = PostJson("wrapper", 0)
+        });
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = wrapperId,
+            atype = GraphAssociationType.Share,
+            id2 = SourceId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.AddObjectAsync(GraphObjectType.FeedPost, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson("share", 0)));
+        objects.Setup(item => item.RetrieveObjectAsync(SourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(SourceId, GraphObjectType.FeedPost, PostJson("source", 0)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
+        associations.Setup(item => item.RetrieveAssociationAsync(SourceId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(SourceAuthorId, 1) }, null));
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.Contained, null, 100, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(Array.Empty<AssociationEdgeResult>(), null));
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
+
+        await service.SharePostAsync(new SharePostInput(AuthorId, wrapperId, "share", 0));
+
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Share, SourceId, It.IsAny<CancellationToken>()), Times.Once);
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Share, wrapperId, It.IsAny<CancellationToken>()), Times.Never);
+        external.Verify(item => item.RecordRecommendationInteractionAsync(
+            AuthorId, SourceId, RecommendationInteractionAction.Share, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CanonicalShareSource_DoesNotUnwrapAStoryShareEdge()
+    {
+        await using var context = CreateContext();
+        const long storyId = 9_000_000_000_000_009;
+        context.ObjectsTb.Add(new Objects
+        {
+            id = storyId,
+            otype = GraphObjectType.Story,
+            data = ContentJson("story")
+        });
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = storyId,
+            atype = GraphAssociationType.Share,
+            id2 = SourceId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
+        var service = new ContentGraphService(
+            context,
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        Assert.Equal(storyId, await service.ResolveCanonicalShareSourceIdAsync(storyId));
     }
 
     [Fact]

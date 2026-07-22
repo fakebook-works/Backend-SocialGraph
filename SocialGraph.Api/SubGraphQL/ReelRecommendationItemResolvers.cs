@@ -11,7 +11,7 @@ public sealed class ReelRecommendationItemResolvers
     public async Task<ContentResult?> GetReelAsync(
         [Parent] ReelRecommendationItemResult item,
         [Service] IContentGraphService contentGraphService,
-        [Service] IAssociationService associationService,
+        [Service] ISocialReadModelService readModels,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
@@ -22,9 +22,7 @@ public sealed class ReelRecommendationItemResolvers
             return null;
         }
 
-        if (viewerId != reel.AuthorId &&
-            (await associationService.HasAssociationAsync(viewerId, GraphAssociationType.Blocked, reel.AuthorId, cancellationToken) ||
-             await associationService.HasAssociationAsync(viewerId, GraphAssociationType.BlockedBy, reel.AuthorId, cancellationToken)))
+        if (!await readModels.CanViewTargetAsync(viewerId, item.ReelId, cancellationToken))
         {
             return null;
         }

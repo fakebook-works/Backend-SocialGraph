@@ -120,9 +120,14 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default)
     {
         var current = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
-        if (current?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost))
+        if (current?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
         {
             return null;
+        }
+
+        if (current.otype is GraphObjectType.FeedPost or GraphObjectType.Reel && input.Privacy is < 0 or > 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(input), "Feed post and reel privacy must be between 0 and 3.");
         }
 
         var currentData = GraphJson.ParseObject(current.data);
@@ -132,7 +137,7 @@ public sealed class ContentGraphService : IContentGraphService
             current.otype,
             GraphJson.PatchJson(
                 ("content", input.Content),
-                ("privacy", current.otype == GraphObjectType.FeedPost ? input.Privacy : null)),
+                ("privacy", current.otype is GraphObjectType.FeedPost or GraphObjectType.Reel ? input.Privacy : null)),
             cancellationToken);
         if (post is null)
         {
@@ -167,7 +172,13 @@ public sealed class ContentGraphService : IContentGraphService
             await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
             await _externalServiceClient.UpdateSearchIndexAsync(
                 input.Id,
-                current.otype == GraphObjectType.FeedPost ? "feedPost" : "groupPost",
+                current.otype switch
+                {
+                    GraphObjectType.FeedPost => "feedPost",
+                    GraphObjectType.GroupPost => "groupPost",
+                    GraphObjectType.Reel => "reel",
+                    _ => throw new InvalidOperationException("Unsupported content type.")
+                },
                 content,
                 cancellationToken);
         }
@@ -264,7 +275,9 @@ public sealed class ContentGraphService : IContentGraphService
         var posts = await _dbContext.ObjectsTb
             .AsNoTracking()
             .Where(item => orderedPostIds.Contains(item.id) &&
-                (item.otype == GraphObjectType.FeedPost || item.otype == GraphObjectType.GroupPost))
+                (item.otype == GraphObjectType.FeedPost ||
+                 item.otype == GraphObjectType.GroupPost ||
+                 item.otype == GraphObjectType.Reel))
             .ToDictionaryAsync(item => item.id, cancellationToken);
         if (posts.Count == 0)
         {
@@ -392,7 +405,7 @@ public sealed class ContentGraphService : IContentGraphService
                 privacy = GraphJson.Int(GraphJson.ParseObject(group.data), "privacy");
             }
 
-            var canView = post.otype == GraphObjectType.FeedPost
+            var canView = post.otype is GraphObjectType.FeedPost or GraphObjectType.Reel
                 ? viewerId == authorId || privacy switch
                 {
                     0 => true,
@@ -444,6 +457,20 @@ public sealed class ContentGraphService : IContentGraphService
                         GraphJson.String(groupData, "name"),
                         GraphJson.String(groupData, "avatar"),
                         !participatingGroups.Contains(group.id)),
+                    media,
+                    mentions));
+                continue;
+            }
+
+            if (post.otype == GraphObjectType.Reel)
+            {
+                results.Add(new ReelDetailResult(
+                    post.id,
+                    post.otype,
+                    content,
+                    privacy,
+                    create,
+                    postAuthor,
                     media,
                     mentions));
                 continue;
@@ -512,7 +539,9 @@ public sealed class ContentGraphService : IContentGraphService
                                 GraphJson.String(sourceAuthorData, "avatar"),
                                 IsVerifyActive(sourceAuthorData)),
                             sourceMedia,
-                            BuildMentionUsers(sourceContent, relatedObjects));
+                            BuildMentionUsers(sourceContent, relatedObjects),
+                            GraphJson.Int(sourceData, "privacy"),
+                            GraphJson.String(sourceData, "create"));
                     }
                 }
             }
@@ -544,10 +573,24 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default)
     {
-        var comment = await _objectService.AddObjectAsync(GraphObjectType.Comment, GraphJson.ContentJson(input.Content), cancellationToken);
-        var mentionedUserIds = MentionUserIds(input.Content);
+        if (string.IsNullOrWhiteSpace(input.Content) && input.Media is null)
+        {
+            throw new ArgumentException("A comment must contain text or one image.", nameof(input));
+        }
+
+        if (input.Media is not null && (input.Media.Type != 0 || string.IsNullOrWhiteSpace(input.Media.Url)))
+        {
+            throw new ArgumentException("Comment media must be one image with a valid URL.", nameof(input));
+        }
+
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? comment = null;
+        IReadOnlyList<MediaResult> media = Array.Empty<MediaResult>();
         try
         {
+            comment = await _objectService.AddObjectAsync(GraphObjectType.Comment, GraphJson.ContentJson(input.Content), cancellationToken);
+            media = await AttachSingleMediaAsync(comment.id, input.Media, cancellationToken);
+            var mentionedUserIds = MentionUserIds(input.Content);
             var mutations = new List<AssociationMutation>
             {
                 new(input.AuthorId, GraphAssociationType.Authored, comment.id, true),
@@ -558,26 +601,44 @@ public sealed class ContentGraphService : IContentGraphService
             await _associationService.ApplyMutationsAsync(
                 mutations,
                 cancellationToken);
+
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
         }
         catch
         {
-            await _objectService.DeleteObjectAsync(comment.id, cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+            else if (comment is not null)
+            {
+                await _associationService.DeleteObjectAssociationsAsync(comment.id, CancellationToken.None);
+                await _objectService.DeleteObjectAsync(comment.id, CancellationToken.None);
+                await DeleteOrphanMediaAsync(media.Select(item => item.Id).ToArray(), CancellationToken.None, comment.id);
+            }
+
             throw;
         }
 
+        var persistedComment = comment!;
+        var mentionedUserIdsForNotifications = MentionUserIds(input.Content);
         var targetAuthorId = await GetAuthorIdAsync(input.TargetId, cancellationToken);
         if (targetAuthorId > 0 && targetAuthorId != input.AuthorId)
         {
             await _externalServiceClient.NotifyAsync(input.AuthorId, targetAuthorId, ExternalNotificationAction.Comment, input.TargetId, null, cancellationToken);
         }
 
-        foreach (var mentionedUserId in mentionedUserIds.Where(userId => userId != input.AuthorId))
+        foreach (var mentionedUserId in mentionedUserIdsForNotifications.Where(userId => userId != input.AuthorId && userId != targetAuthorId))
         {
             await _externalServiceClient.NotifyAsync(
                 input.AuthorId,
                 mentionedUserId,
                 ExternalNotificationAction.Mention,
-                comment.id,
+                persistedComment.id,
                 null,
                 cancellationToken);
         }
@@ -588,7 +649,7 @@ public sealed class ContentGraphService : IContentGraphService
             RecommendationInteractionAction.Comment,
             cancellationToken);
 
-        return await BuildContentResultAsync(comment, input.AuthorId, Array.Empty<MediaResult>(), cancellationToken);
+        return await BuildContentResultAsync(persistedComment, input.AuthorId, media, cancellationToken);
     }
 
     public async Task<NormalStoryResult> CreateNormalStoryAsync(
@@ -612,14 +673,15 @@ public sealed class ContentGraphService : IContentGraphService
         CreateShareStoryInput input,
         CancellationToken cancellationToken = default)
     {
-        var sharedSource = await RequireStoryShareSourceAsync(input.SharedSourceId, cancellationToken);
+        var sharedSourceId = await ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
+        var sharedSource = await RequireStoryShareSourceAsync(sharedSourceId, cancellationToken);
 
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
-        await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, input.SharedSourceId, cancellationToken);
+        await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, sharedSourceId, cancellationToken);
         await _externalServiceClient.RecordRecommendationInteractionAsync(
             input.AuthorId,
-            input.SharedSourceId,
+            sharedSourceId,
             RecommendationInteractionAction.Share,
             cancellationToken);
 
@@ -635,7 +697,7 @@ public sealed class ContentGraphService : IContentGraphService
                 input.AuthorId,
                 sourceAuthorId,
                 ExternalNotificationAction.Share,
-                input.SharedSourceId,
+                sharedSourceId,
                 new { shareId = story.id, shareType = "story" },
                 cancellationToken);
         }
@@ -740,10 +802,12 @@ public sealed class ContentGraphService : IContentGraphService
                 continue;
             }
 
+            var unseenCount = visibleStories.Count(story => !watchedStoryIds.Contains(story.Story.id));
             resultItems.Add(new HomeStoryBucketResult(
                 author,
                 visibleStories[^1].CreatedAt.ToString("O", CultureInfo.InvariantCulture),
-                visibleStories.Any(story => !watchedStoryIds.Contains(story.Story.id)),
+                unseenCount > 0,
+                unseenCount,
                 visibleStories.Select(story => storyItems[story.Story.id]).ToArray()));
         }
 
@@ -785,6 +849,7 @@ public sealed class ContentGraphService : IContentGraphService
             author,
             orderedStories[^1].CreatedAt.ToString("O", CultureInfo.InvariantCulture),
             false,
+            0,
             orderedStories.Select(story => storyItems[story.Story.id]).ToArray());
     }
 
@@ -822,7 +887,12 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default)
     {
-        var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.ContentJson(input.Content), cancellationToken);
+        if (input.Privacy is < 0 or > 3)
+        {
+            throw new ArgumentOutOfRangeException(nameof(input), "Reel privacy must be between 0 and 3.");
+        }
+
+        var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
         var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
         await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
@@ -831,23 +901,66 @@ public sealed class ContentGraphService : IContentGraphService
         return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
     }
 
+    public async Task<long> ResolveCanonicalShareSourceIdAsync(
+        long sourceId,
+        CancellationToken cancellationToken = default)
+    {
+        var current = sourceId;
+        var visited = new HashSet<long>();
+        const int maxDepth = 32;
+
+        for (var depth = 0; depth < maxDepth; depth++)
+        {
+            if (!visited.Add(current))
+            {
+                throw new InvalidOperationException("A cycle was detected in the share-source chain.");
+            }
+
+            var objectType = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .Where(item => item.id == current)
+                .Select(item => (short?)item.otype)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (objectType != GraphObjectType.FeedPost)
+            {
+                return current;
+            }
+
+            var next = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == current && item.atype == GraphAssociationType.Share)
+                .OrderByDescending(item => item.time)
+                .Select(item => (long?)item.id2)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (next is null or <= 0)
+            {
+                return current;
+            }
+
+            current = next.Value;
+        }
+
+        throw new InvalidOperationException($"The share-source chain exceeds the supported depth of {maxDepth}.");
+    }
+
     public async Task<ContentResult> SharePostAsync(SharePostInput input, CancellationToken cancellationToken = default)
     {
+        var sourceId = await ResolveCanonicalShareSourceIdAsync(input.SourceId, cancellationToken);
         var post = await CreateFeedPostAsync(new CreateFeedPostInput(input.AuthorId, input.Content, input.Privacy, Array.Empty<MediaInput>()), cancellationToken);
-        await _associationService.AddAssociationAsync(post.Id, GraphAssociationType.Share, input.SourceId, cancellationToken);
+        await _associationService.AddAssociationAsync(post.Id, GraphAssociationType.Share, sourceId, cancellationToken);
         await QueueRecommendationInteractionIfContentAsync(
             input.AuthorId,
-            input.SourceId,
+            sourceId,
             RecommendationInteractionAction.Share,
             cancellationToken);
-        var sourceAuthorId = await GetAuthorIdAsync(input.SourceId, cancellationToken);
+        var sourceAuthorId = await GetAuthorIdAsync(sourceId, cancellationToken);
         if (sourceAuthorId > 0 && sourceAuthorId != input.AuthorId)
         {
             await _externalServiceClient.NotifyAsync(
                 input.AuthorId,
                 sourceAuthorId,
                 ExternalNotificationAction.Share,
-                input.SourceId,
+                sourceId,
                 new { shareId = post.Id, shareType = "feedPost" },
                 cancellationToken);
         }
@@ -1055,7 +1168,7 @@ public sealed class ContentGraphService : IContentGraphService
         System.Text.Json.Nodes.JsonObject data,
         CancellationToken cancellationToken)
     {
-        if (item.otype == GraphObjectType.FeedPost)
+        if (item.otype is GraphObjectType.FeedPost or GraphObjectType.Reel)
         {
             return GraphJson.Int(data, "privacy");
         }

@@ -375,8 +375,19 @@ public sealed class SocialReadModelService : ISocialReadModelService
             .Where(item => commentIds.Contains(item.id1) &&
                 (item.atype == GraphAssociationType.AuthoredBy ||
                  item.atype == GraphAssociationType.LikedBy ||
-                 item.atype == GraphAssociationType.HaveComment))
+                 item.atype == GraphAssociationType.HaveComment ||
+                 item.atype == GraphAssociationType.Contained))
             .ToListAsync(cancellationToken);
+        var mediaIds = links
+            .Where(item => item.atype == GraphAssociationType.Contained)
+            .Select(item => item.id2)
+            .Distinct()
+            .ToArray();
+        var mediaById = mediaIds.Length == 0
+            ? new Dictionary<long, Objects>()
+            : await _dbContext.ObjectsTb.AsNoTracking()
+                .Where(item => mediaIds.Contains(item.id) && item.otype == GraphObjectType.Media)
+                .ToDictionaryAsync(item => item.id, cancellationToken);
         var viewerLikes = (await _dbContext.AssociationsTb.AsNoTracking()
             .Where(item => item.id1 == viewerId && item.atype == GraphAssociationType.Liked && commentIds.Contains(item.id2))
             .Select(item => item.id2)
@@ -385,13 +396,29 @@ public sealed class SocialReadModelService : ISocialReadModelService
         var authorByComment = links.Where(item => item.atype == GraphAssociationType.AuthoredBy)
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.First().id2);
+        var likeCountByComment = links
+            .Where(item => item.atype == GraphAssociationType.LikedBy)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.LongCount());
+        var replyCountByComment = links
+            .Where(item => item.atype == GraphAssociationType.HaveComment)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.LongCount());
+        var mediaIdByComment = links
+            .Where(item => item.atype == GraphAssociationType.Contained)
+            .GroupBy(item => item.id1)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderBy(item => item.time).ThenBy(item => item.id2).First().id2);
         var mentionedUserIds = comments.Values
             .SelectMany(comment => MentionTokenCodec.ExtractUserIds(GraphJson.String(GraphJson.ParseObject(comment.data), "content")))
             .Distinct()
             .ToArray();
+        var authorIds = authorByComment.Values.Distinct().ToArray();
         var summaries = await GetUserSummariesAsync(
-            authorByComment.Values.Concat(mentionedUserIds).Distinct().ToArray(),
+            authorIds.Concat(mentionedUserIds).Distinct().ToArray(),
             cancellationToken);
+        var authorViewerStates = await GetCommentAuthorViewerStatesAsync(viewerId, authorIds, cancellationToken);
         var result = new List<CommentThreadItemResult>(page.items.Count);
         foreach (var edge in page.items)
         {
@@ -409,15 +436,29 @@ public sealed class SocialReadModelService : ISocialReadModelService
                     ? new MentionUserResult(userId, mentionedUser.Name, true)
                     : new MentionUserResult(userId, string.Empty, false))
                 .ToArray();
+            MediaResult? media = null;
+            if (mediaIdByComment.TryGetValue(comment.id, out var mediaId) && mediaById.TryGetValue(mediaId, out var mediaObject))
+            {
+                var mediaData = GraphJson.ParseObject(mediaObject.data);
+                media = new MediaResult(
+                    mediaObject.id,
+                    GraphJson.Int(mediaData, "type"),
+                    GraphJson.String(mediaData, "url"));
+            }
+
+            var authorViewerState = authorViewerStates.GetValueOrDefault(authorId);
             result.Add(new CommentThreadItemResult(
                 comment.id,
                 content,
                 GraphJson.String(data, "create"),
                 author,
-                links.LongCount(item => item.id1 == comment.id && item.atype == GraphAssociationType.LikedBy),
-                links.LongCount(item => item.id1 == comment.id && item.atype == GraphAssociationType.HaveComment),
+                likeCountByComment.GetValueOrDefault(comment.id),
+                replyCountByComment.GetValueOrDefault(comment.id),
                 viewerLikes.Contains(comment.id),
-                mentions));
+                authorViewerState.CanFollow,
+                authorViewerState.IsFollowing,
+                mentions,
+                media));
         }
 
         return new CommentPageResult(result, page.nextCursor, page.nextCursor is not null);
@@ -433,14 +474,33 @@ public sealed class SocialReadModelService : ISocialReadModelService
             return null;
         }
 
+        var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
+        var commentCount = await CountCommentTreeAsync(targetId, cancellationToken);
+        var rows = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item =>
+                item.id1 == targetId &&
+                (item.atype == GraphAssociationType.LikedBy ||
+                 item.atype == GraphAssociationType.SharedBy ||
+                 item.atype == GraphAssociationType.WatchedBy) ||
+                item.id1 == viewerId && item.id2 == targetId &&
+                (item.atype == GraphAssociationType.Liked ||
+                 item.atype == GraphAssociationType.Saved ||
+                 item.atype == GraphAssociationType.Watched))
+            .Select(item => new { item.id1, item.atype })
+            .ToListAsync(cancellationToken);
+
         return new ContentEngagementResult(
             targetId,
-            await _associationService.CountAssociationAsync(targetId, GraphAssociationType.LikedBy, cancellationToken),
-            await _associationService.CountAssociationAsync(targetId, GraphAssociationType.HaveComment, cancellationToken),
-            await _associationService.CountAssociationAsync(targetId, GraphAssociationType.SharedBy, cancellationToken),
-            await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Liked, targetId, cancellationToken),
-            await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Saved, targetId, cancellationToken),
-            await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Watched, targetId, cancellationToken));
+            rows.LongCount(item => item.id1 == targetId && item.atype == GraphAssociationType.LikedBy),
+            commentCount,
+            rows.LongCount(item => item.id1 == targetId && item.atype == GraphAssociationType.SharedBy),
+            target?.otype == GraphObjectType.Reel
+                ? rows.LongCount(item => item.id1 == targetId && item.atype == GraphAssociationType.WatchedBy)
+                : 0,
+            rows.Any(item => item.id1 == viewerId && item.atype == GraphAssociationType.Liked),
+            rows.Any(item => item.id1 == viewerId && item.atype == GraphAssociationType.Saved),
+            rows.Any(item => item.id1 == viewerId && item.atype == GraphAssociationType.Watched));
     }
 
     public async Task<SavedContentPageResult> GetSavedContentAsync(
@@ -565,12 +625,136 @@ public sealed class SocialReadModelService : ISocialReadModelService
         var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
         if (target?.otype == GraphObjectType.Reel)
         {
-            return await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
+            return GraphJson.Int(GraphJson.ParseObject(target.data), "privacy") == 0 &&
+                   await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
         }
 
         return target?.otype == GraphObjectType.FeedPost &&
                GraphJson.Int(GraphJson.ParseObject(target.data), "privacy") == 0 &&
                await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
+    }
+
+    private async Task<Dictionary<long, (bool CanFollow, bool IsFollowing)>> GetCommentAuthorViewerStatesAsync(
+        long viewerId,
+        IReadOnlyCollection<long> authorIds,
+        CancellationToken cancellationToken)
+    {
+        if (authorIds.Count == 0)
+        {
+            return new Dictionary<long, (bool CanFollow, bool IsFollowing)>();
+        }
+
+        var authorRows = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => authorIds.Contains(item.id) && item.otype == GraphObjectType.User)
+            .Select(item => new { item.id, item.data })
+            .ToListAsync(cancellationToken);
+        var viewerLinks = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == viewerId &&
+                authorIds.Contains(item.id2) &&
+                (item.atype == GraphAssociationType.Friend ||
+                 item.atype == GraphAssociationType.Followed ||
+                 item.atype == GraphAssociationType.Blocked ||
+                 item.atype == GraphAssociationType.BlockedBy))
+            .Select(item => new { item.atype, item.id2 })
+            .ToListAsync(cancellationToken);
+        var friends = viewerLinks
+            .Where(item => item.atype == GraphAssociationType.Friend)
+            .Select(item => item.id2)
+            .ToHashSet();
+        var followed = viewerLinks
+            .Where(item => item.atype == GraphAssociationType.Followed)
+            .Select(item => item.id2)
+            .ToHashSet();
+        var blocked = viewerLinks
+            .Where(item => item.atype is GraphAssociationType.Blocked or GraphAssociationType.BlockedBy)
+            .Select(item => item.id2)
+            .ToHashSet();
+
+        return authorRows.ToDictionary(
+            item => item.id,
+            item =>
+            {
+                var isFollowing = followed.Contains(item.id);
+                var canFollow = item.id != viewerId &&
+                    GraphJson.Int(GraphJson.ParseObject(item.data), "privacy") == 1 &&
+                    !friends.Contains(item.id) &&
+                    !isFollowing &&
+                    !blocked.Contains(item.id);
+                return (CanFollow: canFollow, IsFollowing: isFollowing);
+            });
+    }
+
+    private async Task<long> CountCommentTreeAsync(long targetId, CancellationToken cancellationToken)
+    {
+        if (_dbContext.Database.IsRelational())
+        {
+            return await _dbContext.Database.SqlQuery<long>($"""
+                SELECT (
+                    WITH RECURSIVE comment_tree(comment_id) AS (
+                        SELECT association.id2
+                        FROM social_graph.associations AS association
+                        INNER JOIN social_graph.objects AS comment
+                            ON comment.id = association.id2 AND comment.otype = {GraphObjectType.Comment}
+                        WHERE association.id1 = {targetId}
+                          AND association.atype = {GraphAssociationType.HaveComment}
+
+                        UNION
+
+                        SELECT association.id2
+                        FROM social_graph.associations AS association
+                        INNER JOIN comment_tree AS parent ON parent.comment_id = association.id1
+                        INNER JOIN social_graph.objects AS comment
+                            ON comment.id = association.id2 AND comment.otype = {GraphObjectType.Comment}
+                        WHERE association.atype = {GraphAssociationType.HaveComment}
+                    )
+                    SELECT COUNT(*)::bigint
+                    FROM comment_tree
+                ) AS "Value"
+                """)
+                .SingleAsync(cancellationToken);
+        }
+
+        var validCommentIds = (await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => item.otype == GraphObjectType.Comment)
+            .Select(item => item.id)
+            .ToListAsync(cancellationToken))
+            .ToHashSet();
+        var commentLinks = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.atype == GraphAssociationType.HaveComment)
+            .Select(item => new { item.id1, item.id2 })
+            .ToListAsync(cancellationToken);
+        var childrenByParent = commentLinks
+            .Where(item => validCommentIds.Contains(item.id2))
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.Select(item => item.id2).Distinct().ToArray());
+        var seen = new HashSet<long> { targetId };
+        var pending = new Queue<long>();
+        pending.Enqueue(targetId);
+        long count = 0;
+        while (pending.TryDequeue(out var parentId))
+        {
+            if (!childrenByParent.TryGetValue(parentId, out var children))
+            {
+                continue;
+            }
+
+            foreach (var childId in children)
+            {
+                if (!seen.Add(childId))
+                {
+                    continue;
+                }
+
+                count++;
+                pending.Enqueue(childId);
+            }
+        }
+
+        return count;
     }
 
     private async Task<bool> CanViewGroupAsync(long viewerId, long groupId, CancellationToken cancellationToken)
@@ -647,9 +831,23 @@ public sealed class SocialReadModelService : ISocialReadModelService
             return false;
         }
 
-        if (target.otype == GraphObjectType.Reel || viewerId == authorId)
+        if (viewerId == authorId)
         {
             return true;
+        }
+
+        if (target.otype == GraphObjectType.Reel)
+        {
+            var reelPrivacy = GraphJson.Int(GraphJson.ParseObject(target.data), "privacy");
+            return reelPrivacy switch
+            {
+                0 => true,
+                1 => await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Friend, authorId, cancellationToken) ||
+                     await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Followed, authorId, cancellationToken),
+                2 => await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Friend, authorId, cancellationToken),
+                3 => false,
+                _ => false
+            };
         }
 
         var authorObject = await _objectService.RetrieveObjectAsync(authorId, cancellationToken);

@@ -37,6 +37,7 @@ public sealed class HomePostByIdDataLoader : BatchDataLoader<long, IHomePostResu
     private static long GetPostId(IHomePostResult post) => post switch
     {
         FeedPostDetailResult feedPost => feedPost.Id,
+        ReelDetailResult reel => reel.Id,
         GroupPostDetailResult groupPost => groupPost.Id,
         _ => throw new InvalidOperationException("Unsupported home post result type.")
     };

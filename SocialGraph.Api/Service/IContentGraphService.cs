@@ -20,6 +20,7 @@ public interface IContentGraphService
     Task<HomeStoryBucketResult?> GetMyStoriesAsync(long userId, CancellationToken cancellationToken = default);
     Task<int> CleanupExpiredStoriesAsync(int limit, CancellationToken cancellationToken = default);
     Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default);
+    Task<long> ResolveCanonicalShareSourceIdAsync(long sourceId, CancellationToken cancellationToken = default);
     Task<ContentResult> SharePostAsync(SharePostInput input, CancellationToken cancellationToken = default);
     Task<bool> LikeAsync(long userId, long targetId, CancellationToken cancellationToken = default);
     Task<bool> UnlikeAsync(long userId, long targetId, CancellationToken cancellationToken = default);

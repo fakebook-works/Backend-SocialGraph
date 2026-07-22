@@ -22,7 +22,16 @@ public sealed class RecommendationHydrationTests
                 It.IsAny<CancellationToken>()))
             .Callback<long, IReadOnlyList<long>, CancellationToken>((_, ids, _) => capturedIds = ids.ToArray())
             .ReturnsAsync((long _, IReadOnlyList<long> ids, CancellationToken _) =>
-                ids.Select(id => (IHomePostResult)new FeedPostDetailResult(
+                ids.Select(id => id == 1002
+                    ? (IHomePostResult)new ReelDetailResult(
+                        id,
+                        GraphObjectType.Reel,
+                        $"reel-{id}",
+                        0,
+                        "2026-07-12T00:00:00Z",
+                        new PostAuthorResult(7, "Author", "", false, false),
+                        Array.Empty<MediaResult>())
+                    : new FeedPostDetailResult(
                         id,
                         GraphObjectType.FeedPost,
                         $"post-{id}",
@@ -44,6 +53,7 @@ public sealed class RecommendationHydrationTests
             .AddType<RecommendationItemResult>()
             .AddTypeExtension<RecommendationItemResolvers>()
             .AddType<FeedPostDetailResult>()
+            .AddType<ReelDetailResult>()
             .AddType<GroupPostDetailResult>()
             .AddType<NormalStoryResult>()
             .AddType<FeedPostShareStoryResult>()
@@ -67,7 +77,7 @@ public sealed class RecommendationHydrationTests
               second: recommendationItem(postId: "1002") {
                 postId
                 post {
-                  ... on FeedPostDetail { id content }
+                  ... on ReelDetail { id content }
                 }
               }
             }

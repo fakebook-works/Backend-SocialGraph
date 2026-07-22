@@ -18,6 +18,7 @@ public sealed class StorySchemaTests
             .AddType<RecommendationItemResult>()
             .AddTypeExtension<RecommendationItemResolvers>()
             .AddType<FeedPostDetailResult>()
+            .AddType<ReelDetailResult>()
             .AddType<GroupPostDetailResult>()
             .AddType<NormalStoryResult>()
             .AddType<FeedPostShareStoryResult>()
@@ -29,7 +30,7 @@ public sealed class StorySchemaTests
         var executor = await resolver.GetExecutorAsync();
         var schema = executor.Schema.ToString();
 
-        Assert.Contains("union HomePost = FeedPostDetail | GroupPostDetail", schema);
+        Assert.Contains("union HomePost = FeedPostDetail | ReelDetail | GroupPostDetail", schema);
         Assert.Contains("recommendationItem(postId: ID!): RecommendationItem", schema);
         Assert.Contains("post: HomePost", schema);
         Assert.Contains("union HomeStory = NormalStory | FeedPostShareStory | ReelShareStory", schema);
@@ -39,6 +40,7 @@ public sealed class StorySchemaTests
         Assert.Contains("homeStories", schema);
         Assert.Contains("myStories", schema);
         Assert.Contains("hasUnseen", schema);
+        Assert.Contains("unseenCount", schema);
         Assert.Contains("recordGroupVisit", schema);
         Assert.Contains("incomingFriendRequests", schema);
         Assert.Contains("groupJoinRequests", schema);
@@ -88,6 +90,7 @@ public sealed class StorySchemaTests
         Assert.Contains("content: String", schema);
         Assert.Contains("media: [MediaInput!]", schema);
         Assert.Contains("privacy: Int", schema);
+        Assert.Contains("input CreateReelInput", schema);
         Assert.Contains("createNormalStory", schema);
         Assert.Contains("createShareStory", schema);
         Assert.Contains("deleteStory", schema);

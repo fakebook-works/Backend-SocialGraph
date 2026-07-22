@@ -23,9 +23,13 @@ birthdate: DateOnly 1, location: String 1, verify: DateTime 0, privacy: Short(0/
 
     privacy phụ thuộc vào group
       
--- 4  reel {content: String, create: DateTime}
+-- 4  reel {content: String 1, privacy: Short(0/1/2/3) 1, create: DateTime}
+
+    privacy giống hệt post feed: 0 public, 1 friends and follow, 2 friends only, 3 private (chỉ mình tôi)
 -- 5  story {content: String, create: DateTime, expire: DateTime}
--- 6  comment {content: String, create: DateTime}
+-- 6  comment {content: String, create: DateTime}; comment may contain at most one image through association 28.
+Comment pages return direct children for lazy expansion, per-comment like/reply counts, and batched viewer-relative
+`canFollowAuthor` / `isFollowingAuthor` state. The post/Reel engagement `commentCount` includes every descendant reply.
 
 -- 7  media {type: Short(0/1/2/3/4), url: Url} 
 
@@ -113,6 +117,8 @@ những trường không đánh dấu là không được sửa đổi khi đã 
 
     postfeed1 -(23)-> postfeed2: post1 chia sẻ postfeed/reel nào
     postfeed2 -(24)-> postfeed1: postfeed2 được chia sẻ bởi những postfeed/story nào
+    * source của share luôn được chuẩn hoá về bài gốc: nếu chia sẻ một postfeed đã là wrapper chia sẻ thì cạnh (23) mới trỏ thẳng tới postfeed/reel gốc, không tạo chuỗi wrapper lồng nhau
+    * projection SharedPostSource trả thêm privacy và create của bài gốc để frontend hiển thị metadata giống bài đăng thường
 
 -- 25  tagged (post feed->user)
 
@@ -129,7 +135,7 @@ những trường không đánh dấu là không được sửa đổi khi đã 
     user1 -(27)-> post1: user1 đã lưu những post/reel nào
     * không cần inverse vì không cần biết post1 được lưu bởi những user nào
 
--- 28 contained (post/reel/story->media)
+-- 28 contained (post/reel/story/comment->media; comment accepts one image only)
 
     post1 -(28)-> media1: post1 có những media nào
     * không cần inverse vì không cần biết media1 thuộc về những post/reel/story nào
@@ -173,7 +179,9 @@ CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 -- ** Typed GraphQL additions ** --
 -----------------------------------
 Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng.
-updatePost(input: { id, privacy?, content?, media? }) giữ nguyên field bị omit; media=[] detach toàn bộ và garbage-collect media không còn parent.
+updatePost(input: { id, privacy?, content?, media? }) áp dụng cho feed post, group post và reel; feed post/reel dùng cùng privacy 0/1/2/3. Field bị omit được giữ nguyên; media=[] detach toàn bộ và garbage-collect media không còn parent.
+Home post candidates gồm feed post, group post và reel. Reel được hydrate thành `ReelDetail` trong union `HomePost` và frontend dùng chung card hiển thị với feed post.
+Mỗi bucket của `homeStories` trả thêm `unseenCount`, được tính chính xác từ các story chưa có association `Watched` của viewer; `hasUnseen` tương đương `unseenCount > 0`.
 userPhotos(userId, cursor, limit) lấy ảnh từ feed post của user mà viewer được xem.
 groupPhotos(groupId, cursor, limit) lấy ảnh từ group post của group mà viewer được xem.
 groupUserPhotos(groupId, userId, cursor, limit) lấy ảnh từ group post do user tạo trong group.

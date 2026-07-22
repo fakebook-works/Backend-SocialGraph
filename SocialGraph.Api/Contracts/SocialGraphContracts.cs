@@ -63,7 +63,11 @@ public sealed record UpdatePostInput(
     string? Content = null,
     IReadOnlyList<MediaInput>? Media = null);
 
-public sealed record CreateCommentInput(long AuthorId, long TargetId, string Content);
+public sealed record CreateCommentInput(
+    long AuthorId,
+    long TargetId,
+    string Content,
+    MediaInput? Media = null);
 
 public sealed record CreateNormalStoryInput(long AuthorId, string Content, MediaInput? Media);
 
@@ -75,7 +79,7 @@ public sealed record DeleteStoryPayload(bool Success, string? Message = null);
 
 public sealed record StoryCleanupPayload(int Deleted);
 
-public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media);
+public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media, int Privacy = 0);
 
 public sealed record SharePostInput(long AuthorId, long SourceId, string Content, int Privacy);
 
@@ -146,6 +150,17 @@ public sealed record FeedPostDetailResult(
     IReadOnlyList<MentionUserResult>? Mentions = null,
     IReadOnlyList<UserSummaryResult>? TaggedUsers = null) : IHomePostResult;
 
+[GraphQLName("ReelDetail")]
+public sealed record ReelDetailResult(
+    long Id,
+    short Type,
+    string Content,
+    int Privacy,
+    string Create,
+    PostAuthorResult Author,
+    IReadOnlyList<MediaResult> Media,
+    IReadOnlyList<MentionUserResult>? Mentions = null) : IHomePostResult;
+
 [GraphQLName("GroupPostDetail")]
 public sealed record GroupPostDetailResult(
     long Id,
@@ -184,7 +199,9 @@ public sealed record SharedPostSourceResult(
     string? Content,
     UserSummaryResult? Author,
     IReadOnlyList<MediaResult> Media,
-    IReadOnlyList<MentionUserResult>? Mentions = null);
+    IReadOnlyList<MentionUserResult>? Mentions = null,
+    int? Privacy = null,
+    string? Create = null);
 
 public sealed record UserSummaryResult(
     long Id,
@@ -251,6 +268,7 @@ public sealed record HomeStoryBucketResult(
     UserSummaryResult Author,
     string LatestCreate,
     bool HasUnseen,
+    int UnseenCount,
     IReadOnlyList<IHomeStoryResult> Stories);
 
 public sealed record HomeStoryPageResult(
@@ -333,7 +351,10 @@ public sealed record CommentThreadItemResult(
     long LikeCount,
     long ReplyCount,
     bool ViewerHasLiked,
-    IReadOnlyList<MentionUserResult>? Mentions = null);
+    bool CanFollowAuthor,
+    bool IsFollowingAuthor,
+    IReadOnlyList<MentionUserResult>? Mentions = null,
+    MediaResult? Media = null);
 
 public sealed record CommentPageResult(
     IReadOnlyList<CommentThreadItemResult> Items,
@@ -345,6 +366,7 @@ public sealed record ContentEngagementResult(
     long LikeCount,
     long CommentCount,
     long ShareCount,
+    long ViewCount,
     bool ViewerHasLiked,
     bool ViewerHasSaved,
     bool ViewerHasWatched);

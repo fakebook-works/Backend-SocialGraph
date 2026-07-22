@@ -104,5 +104,5 @@ public static class GraphAssociationRules
     private static bool IsShareTarget(short value) => value is GraphObjectType.FeedPost or GraphObjectType.Reel;
     private static bool IsMentionSource(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story or GraphObjectType.Comment;
     private static bool IsSaveable(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel;
-    private static bool IsMediaContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story;
+    private static bool IsMediaContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story or GraphObjectType.Comment;
 }

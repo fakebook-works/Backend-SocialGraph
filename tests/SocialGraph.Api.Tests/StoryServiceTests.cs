@@ -86,12 +86,14 @@ public sealed class StoryServiceTests
         var partlyWatched = Assert.Single((await service.GetHomeStoriesAsync(ViewerId, 20, null)).Items);
 
         Assert.True(partlyWatched.HasUnseen);
+        Assert.Equal(1, partlyWatched.UnseenCount);
 
         context.AssociationsTb.Add(Edge(ViewerId, GraphAssociationType.Watched, secondStoryId));
         await context.SaveChangesAsync();
 
         var fullyWatched = Assert.Single((await service.GetHomeStoriesAsync(ViewerId, 20, null)).Items);
         Assert.False(fullyWatched.HasUnseen);
+        Assert.Equal(0, fullyWatched.UnseenCount);
     }
 
     [Fact]

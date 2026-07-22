@@ -50,8 +50,8 @@ public sealed class CandidateService : ICandidateService
         var blocked = await GetBlockedUserIdsAsync(userId, cancellationToken);
         var candidates = new Dictionary<long, CandidateItemResult>();
 
-        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 200, cancellationToken), GraphObjectType.Reel, "friend", blocked, take, cancellationToken);
-        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.Reel, "followed", blocked, take, cancellationToken);
+        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 200, cancellationToken), GraphObjectType.Reel, "friend", blocked, take, maxVisiblePrivacy: 2, cancellationToken: cancellationToken);
+        await AddAuthorCandidatesAsync(candidates, await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 200, cancellationToken), GraphObjectType.Reel, "followed", blocked, take, maxVisiblePrivacy: 1, cancellationToken: cancellationToken);
         await AddRecentCandidatesAsync(candidates, GraphObjectType.Reel, "recent_public", blocked, take, cancellationToken);
 
         return candidates.Values
@@ -78,7 +78,7 @@ public sealed class CandidateService : ICandidateService
             join post in _dbContext.ObjectsTb.AsNoTracking() on authored.id2 equals post.id
             where authorIds.Contains(authored.id1) &&
                 authored.atype == GraphAssociationType.Authored &&
-                post.otype == GraphObjectType.FeedPost
+                (post.otype == GraphObjectType.FeedPost || post.otype == GraphObjectType.Reel)
             orderby post.id descending
             select new { PostId = post.id, AuthorId = authored.id1, post.data })
             .Take(limit * 3)
@@ -141,7 +141,7 @@ public sealed class CandidateService : ICandidateService
         var rows = await (
             from post in _dbContext.ObjectsTb.AsNoTracking()
             join authoredBy in _dbContext.AssociationsTb.AsNoTracking() on post.id equals authoredBy.id1
-            where post.otype == GraphObjectType.FeedPost &&
+            where (post.otype == GraphObjectType.FeedPost || post.otype == GraphObjectType.Reel) &&
                 authoredBy.atype == GraphAssociationType.AuthoredBy
             orderby post.id descending
             select new { PostId = post.id, AuthorId = authoredBy.id2, post.data })
@@ -204,6 +204,7 @@ public sealed class CandidateService : ICandidateService
         string source,
         ISet<long> blocked,
         int limit,
+        int maxVisiblePrivacy,
         CancellationToken cancellationToken)
     {
         foreach (var authorId in authorIds.Where(id => !blocked.Contains(id)))
@@ -221,6 +222,12 @@ public sealed class CandidateService : ICandidateService
 
             foreach (var row in rows)
             {
+                var privacy = GraphJson.Int(GraphJson.ParseObject(row.data), "privacy");
+                if (privacy < 0 || privacy > maxVisiblePrivacy)
+                {
+                    continue;
+                }
+
                 AddCandidate(candidates, row.id, row.AuthorId, row.data, source, blocked);
             }
         }
@@ -244,7 +251,8 @@ public sealed class CandidateService : ICandidateService
         foreach (var row in rows)
         {
             var data = GraphJson.ParseObject(row.data);
-            if (objectType == GraphObjectType.FeedPost && GraphJson.Int(data, "privacy") != 0)
+            if ((objectType == GraphObjectType.FeedPost || objectType == GraphObjectType.Reel) &&
+                GraphJson.Int(data, "privacy") != 0)
             {
                 continue;
             }

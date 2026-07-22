@@ -143,6 +143,10 @@ public sealed class AssociationContractTests
             GraphAssociationType.HaveComment,
             GraphObjectType.FeedPost,
             GraphObjectType.Comment));
+        Assert.True(GraphAssociationRules.IsValidForObjectTypes(
+            GraphAssociationType.Contained,
+            GraphObjectType.Comment,
+            GraphObjectType.Media));
         Assert.False(GraphAssociationRules.IsValidForObjectTypes(
             GraphAssociationType.Contained,
             GraphObjectType.User,
