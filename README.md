@@ -108,6 +108,8 @@ InternalServices__Notification__BaseUrl=http://localhost:1005
 InternalServices__Notification__SharedSecret=<notification-target-secret>
 InternalServices__Messaging__BaseUrl=http://localhost:1006
 InternalServices__Messaging__SharedSecret=<messaging-target-secret>
+InternalServices__Upload__BaseUrl=http://localhost:4001
+InternalServices__Upload__SharedSecret=<upload-target-secret>
 InternalServices__TimeoutSeconds=10
 IntegrationOutbox__PayloadEncryptionKey=<at-least-32-bytes>
 IntegrationOutbox__PollMilliseconds=500
@@ -138,6 +140,8 @@ Current internal endpoints:
 GET /internal/recommendation/post-candidate-ids
 GET /internal/recommendation/reel-candidates
 POST /internal/messaging/permissions/check
+GET /internal/users/{userId}/friend-ids
+GET /internal/users/{userId}/profile-connection-ids?associationType=<code>
 PUT /internal/users/{userId}/verify
 DELETE /internal/stories/expired?limit=100
 GET /internal/outbox/dead-letters?limit=50
@@ -163,7 +167,7 @@ The default HTTP launch URL is `http://localhost:1002`; GraphQL is at `/graphql`
 dotnet test .\SocialGraphService.sln
 ```
 
-The suite verifies the 0..30 association contract and migration mapping, precedence rules, relationship/group flows, exact downstream projection contracts, dedicated internal authentication, trusted viewer enforcement, Redis fallback, candidate/privacy filtering, typed group/comment/engagement read models, Story behavior, Fusion hydration, and GraphQL schema compatibility.
+The suite verifies the 0..29 association contract and migration mapping, precedence rules, relationship/group flows, exact downstream projection contracts, dedicated internal authentication, trusted viewer enforcement, Redis fallback, candidate/privacy filtering, typed group/comment/engagement read models, Story behavior, Fusion hydration, and GraphQL schema compatibility.
 
 ## Durable integration outbox
 
