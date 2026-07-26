@@ -49,6 +49,13 @@ CREATE INDEX IF NOT EXISTS idx_associations_time
 CREATE INDEX IF NOT EXISTS idx_objects_type_id
     ON social_graph.objects (otype, id);
 
+-- Orphan-media cleanup asks whether another media object points at the same uploaded file
+-- before deleting it from disk. otype 7 is GraphObjectType.Media; the literal is required
+-- because a partial index predicate cannot reference application constants.
+CREATE INDEX IF NOT EXISTS idx_objects_media_url
+    ON social_graph.objects ((lower(data ->> 'url')))
+    WHERE otype = 7;
+
 -- Identical to the primary key. Dropped after the replacements above exist, so the table
 -- is never left without an index the read paths were relying on.
 DROP INDEX IF EXISTS social_graph.idx_associations;

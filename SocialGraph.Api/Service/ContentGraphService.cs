@@ -1461,6 +1461,74 @@ public sealed class ContentGraphService : IContentGraphService
         }
     }
 
+    /// <summary>
+    /// Whether another media object pointing at the same uploaded asset is still attached to
+    /// something, which decides whether the physical file may be removed.
+    /// </summary>
+    /// <remarks>
+    /// This used to load every media id ever attached anywhere in the system, then read the
+    /// jsonb of all of them and compare URLs in memory — a scan of both tables for every
+    /// media row being removed. Deleting a post with ten images scanned them ten times, and
+    /// DeleteUserAsync multiplied that by the user's post count inside a single transaction.
+    /// The database answers the same question with one EXISTS.
+    /// </remarks>
+    private async Task<bool> IsSameAssetStillContainedAsync(
+        long mediaId,
+        string? mediaUrl,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(mediaUrl))
+        {
+            return false;
+        }
+
+        if (IsInMemory())
+        {
+            // The in-memory provider cannot evaluate jsonb, so tests fall back to comparing
+            // client-side over their own small fixtures.
+            var containedMediaIds = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.atype == GraphAssociationType.Contained && item.id2 != mediaId)
+                .Select(item => item.id2)
+                .Distinct()
+                .ToArrayAsync(cancellationToken);
+            if (containedMediaIds.Length == 0)
+            {
+                return false;
+            }
+
+            var candidates = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .Where(item => containedMediaIds.Contains(item.id) && item.otype == GraphObjectType.Media)
+                .Select(item => item.data)
+                .ToListAsync(cancellationToken);
+            return candidates.Any(data => string.Equals(
+                GraphJson.String(GraphJson.ParseObject(data), "url"),
+                mediaUrl,
+                StringComparison.OrdinalIgnoreCase));
+        }
+
+        // lower() on both sides preserves the case-insensitive comparison this replaced.
+        return await _dbContext.Database
+            .SqlQuery<bool>($"""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM social_graph.objects o
+                    JOIN social_graph.associations a
+                        ON a.id2 = o.id AND a.atype = {GraphAssociationType.Contained}
+                    WHERE o.otype = {GraphObjectType.Media}
+                      AND o.id <> {mediaId}
+                      AND lower(o.data ->> 'url') = lower({mediaUrl})
+                ) AS "Value"
+                """)
+            .SingleAsync(cancellationToken);
+    }
+
+    private bool IsInMemory() => string.Equals(
+        _dbContext.Database.ProviderName,
+        "Microsoft.EntityFrameworkCore.InMemory",
+        StringComparison.Ordinal);
+
     private async Task DeleteOrphanMediaAsync(
         IEnumerable<long> mediaIds,
         CancellationToken cancellationToken,
@@ -1489,23 +1557,10 @@ public sealed class ContentGraphService : IContentGraphService
             }
 
             var mediaUrl = GraphJson.String(GraphJson.ParseObject(media.data), "url");
-            var otherContainedMediaIds = await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => item.atype == GraphAssociationType.Contained && item.id2 != mediaId)
-                .Select(item => item.id2)
-                .Distinct()
-                .ToArrayAsync(cancellationToken);
-            var sameAssetStillContained = !string.IsNullOrWhiteSpace(mediaUrl) &&
-                otherContainedMediaIds.Length > 0 &&
-                (await _dbContext.ObjectsTb
-                    .AsNoTracking()
-                    .Where(item => otherContainedMediaIds.Contains(item.id) && item.otype == GraphObjectType.Media)
-                    .Select(item => item.data)
-                    .ToListAsync(cancellationToken))
-                .Any(data => string.Equals(
-                    GraphJson.String(GraphJson.ParseObject(data), "url"),
-                    mediaUrl,
-                    StringComparison.OrdinalIgnoreCase));
+            var sameAssetStillContained = await IsSameAssetStillContainedAsync(
+                mediaId,
+                mediaUrl,
+                cancellationToken);
             await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
             if (await _objectService.DeleteObjectAsync(mediaId, cancellationToken) &&
                 !string.IsNullOrWhiteSpace(mediaUrl) &&
