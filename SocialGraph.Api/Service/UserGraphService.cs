@@ -12,20 +12,33 @@ public sealed class UserGraphService : IUserGraphService
     private readonly IExternalServiceClient _externalServiceClient;
     private readonly MyDbContext? _dbContext;
     private readonly IContentGraphService? _contentGraphService;
+    private readonly IMediaOwnershipGuard? _mediaOwnershipGuard;
 
     public UserGraphService(
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient,
         MyDbContext? dbContext = null,
-        IContentGraphService? contentGraphService = null)
+        IContentGraphService? contentGraphService = null,
+        IMediaOwnershipGuard? mediaOwnershipGuard = null)
     {
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
         _dbContext = dbContext;
         _contentGraphService = contentGraphService;
+        _mediaOwnershipGuard = mediaOwnershipGuard;
     }
+
+    /// <summary>
+    /// Refuses client-supplied media URLs that <paramref name="ownerUserId"/> does not own.
+    /// Stored URLs drive permanent deletion, so accepting a foreign URL here would let any
+    /// user destroy another user's media by replacing their own avatar twice.
+    /// </summary>
+    private Task EnsureMediaOwnedAsync(long ownerUserId, IEnumerable<string?> urls, CancellationToken cancellationToken) =>
+        _mediaOwnershipGuard is null
+            ? Task.CompletedTask
+            : _mediaOwnershipGuard.EnsureOwnedAsync(ownerUserId, urls, cancellationToken);
 
     public async Task<CreateUserPayload> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
@@ -142,7 +155,8 @@ public sealed class UserGraphService : IUserGraphService
             if (deleted)
             {
                 await _externalServiceClient.DeleteUserAsync(userId, cancellationToken);
-                await _externalServiceClient.DeleteMediaAsync(profileMedia, cancellationToken);
+                // Cascade cleanup of stored profile artwork; ownership was validated when it was set.
+                await _externalServiceClient.DeleteMediaAsync(profileMedia, null, cancellationToken);
             }
 
             if (transaction is not null)
@@ -736,6 +750,8 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentOutOfRangeException(nameof(privacy), "Feed privacy must be between 0 and 3.");
         }
 
+        await EnsureMediaOwnedAsync(userId, new[] { avatarUrl, originalUrl }, cancellationToken);
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         var currentData = GraphJson.ParseObject(currentUser.data);
         var previousUrl = GraphJson.String(currentData, "avatar");
@@ -749,12 +765,12 @@ public sealed class UserGraphService : IUserGraphService
         {
             if (!string.IsNullOrWhiteSpace(avatarUrl))
             {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, cancellationToken);
+                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, userId, cancellationToken);
             }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, userId, cancellationToken);
             }
         }
 
@@ -817,6 +833,8 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentOutOfRangeException(nameof(privacy), "Feed privacy must be between 0 and 3.");
         }
 
+        await EnsureMediaOwnedAsync(userId, new[] { backgroundUrl, originalUrl }, cancellationToken);
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         var currentData = GraphJson.ParseObject(currentUser.data);
         var previousUrl = GraphJson.String(currentData, "background");
@@ -830,12 +848,12 @@ public sealed class UserGraphService : IUserGraphService
         {
             if (!string.IsNullOrWhiteSpace(backgroundUrl))
             {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, cancellationToken);
+                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, userId, cancellationToken);
             }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, userId, cancellationToken);
             }
         }
 

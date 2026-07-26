@@ -198,19 +198,20 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
             cancellationToken);
     }
 
-    public Task FinalizeMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default)
+    public Task FinalizeMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default)
     {
-        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaFinalize, urls, cancellationToken);
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaFinalize, urls, ownerUserId, cancellationToken);
     }
 
-    public Task DeleteMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default)
+    public Task DeleteMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default)
     {
-        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaDelete, urls, cancellationToken);
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaDelete, urls, ownerUserId, cancellationToken);
     }
 
     private Task EnqueueMediaLifecycleAsync(
         string eventType,
         IReadOnlyList<string> urls,
+        long? ownerUserId,
         CancellationToken cancellationToken)
     {
         var normalized = urls
@@ -219,7 +220,7 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
             .ToArray();
         return normalized.Length == 0
             ? Task.CompletedTask
-            : EnqueueAsync(eventType, null, new MediaLifecycleEvent(normalized), cancellationToken);
+            : EnqueueAsync(eventType, null, new MediaLifecycleEvent(normalized, ownerUserId), cancellationToken);
     }
 
     private Task UpsertSearchAsync(

@@ -17,17 +17,45 @@ public sealed class ContentGraphService : IContentGraphService
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
 
+    private readonly IMediaOwnershipGuard? _mediaOwnershipGuard;
+
     public ContentGraphService(
         MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
-        IExternalServiceClient externalServiceClient)
+        IExternalServiceClient externalServiceClient,
+        IMediaOwnershipGuard? mediaOwnershipGuard = null)
     {
         _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
+        _mediaOwnershipGuard = mediaOwnershipGuard;
     }
+
+    /// <summary>
+    /// Refuses client-supplied media URLs that <paramref name="ownerUserId"/> does not own, so a
+    /// caller cannot attach — and subsequently destroy — media belonging to another user.
+    /// </summary>
+    private Task EnsureMediaOwnedAsync(
+        long ownerUserId,
+        IEnumerable<MediaInput>? media,
+        CancellationToken cancellationToken)
+    {
+        if (_mediaOwnershipGuard is null || media is null) return Task.CompletedTask;
+        return _mediaOwnershipGuard.EnsureOwnedAsync(
+            ownerUserId,
+            media.Select(item => item.Url),
+            cancellationToken);
+    }
+
+    private Task EnsureMediaOwnedAsync(
+        long ownerUserId,
+        MediaInput? media,
+        CancellationToken cancellationToken) =>
+        media is null
+            ? Task.CompletedTask
+            : EnsureMediaOwnedAsync(ownerUserId, new[] { media }, cancellationToken);
 
     public async Task<ContentResult> CreateFeedPostAsync(CreateFeedPostInput input, CancellationToken cancellationToken = default)
     {
@@ -35,6 +63,8 @@ public sealed class ContentGraphService : IContentGraphService
         {
             throw new ArgumentOutOfRangeException(nameof(input), "Feed privacy must be between 0 and 3.");
         }
+
+        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         try
@@ -60,7 +90,7 @@ public sealed class ContentGraphService : IContentGraphService
 
             await _externalServiceClient.CreateSearchIndexAsync(post.id, "feedPost", input.Content, cancellationToken);
             await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
             if (transaction is not null)
             {
                 await transaction.CommitAsync(cancellationToken);
@@ -81,6 +111,8 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, CancellationToken cancellationToken = default)
     {
+        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         try
         {
@@ -98,7 +130,7 @@ public sealed class ContentGraphService : IContentGraphService
 
             await _externalServiceClient.CreateSearchIndexAsync(post.id, "groupPost", input.Content, cancellationToken);
             await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
             if (transaction is not null)
             {
                 await transaction.CommitAsync(cancellationToken);
@@ -132,6 +164,7 @@ public sealed class ContentGraphService : IContentGraphService
 
         var currentData = GraphJson.ParseObject(current.data);
         var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
+        await EnsureMediaOwnedAsync(authorId, input.Media, cancellationToken);
         var post = await _objectService.UpdateObjectAsync(
             input.Id,
             current.otype,
@@ -162,7 +195,7 @@ public sealed class ContentGraphService : IContentGraphService
             }
 
             media = await AttachMediaAsync(input.Id, input.Media, cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), authorId, cancellationToken);
             await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
         }
 
@@ -583,6 +616,8 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentException("Comment media must be one image with a valid URL.", nameof(input));
         }
 
+        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? comment = null;
         IReadOnlyList<MediaResult> media = Array.Empty<MediaResult>();
@@ -602,7 +637,7 @@ public sealed class ContentGraphService : IContentGraphService
                 mutations,
                 cancellationToken);
 
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
             if (transaction is not null)
             {
                 await transaction.CommitAsync(cancellationToken);
@@ -656,10 +691,11 @@ public sealed class ContentGraphService : IContentGraphService
         CreateNormalStoryInput input,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
         var media = await AttachSingleMediaAsync(story.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
-        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
 
         var data = GraphJson.ParseObject(story.data);
         return new NormalStoryResult(
@@ -892,10 +928,11 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentOutOfRangeException(nameof(input), "Reel privacy must be between 0 and 3.");
         }
 
+        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
         var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
-        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), cancellationToken);
+        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
         await _externalServiceClient.CreateSearchIndexAsync(reel.id, "reel", input.Content, cancellationToken);
         await _externalServiceClient.CreatePostEmbeddingAsync(reel.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
         return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
@@ -1327,7 +1364,9 @@ public sealed class ContentGraphService : IContentGraphService
                 !string.IsNullOrWhiteSpace(mediaUrl) &&
                 !sameAssetStillContained)
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { mediaUrl }, cancellationToken);
+                // Cascade cleanup: the URL comes from stored graph state (already ownership-checked
+                // when it was written), not from the current request, so no owner filter applies.
+                await _externalServiceClient.DeleteMediaAsync(new[] { mediaUrl }, null, cancellationToken);
             }
         }
     }

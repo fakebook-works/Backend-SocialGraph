@@ -112,6 +112,7 @@ public sealed class ContentProjectionTests
             It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.FinalizeMediaAsync(
             It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { mediaUrl })),
+            It.IsAny<long?>(),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 

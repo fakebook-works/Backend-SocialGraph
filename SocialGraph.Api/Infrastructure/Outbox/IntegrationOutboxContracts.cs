@@ -73,7 +73,9 @@ public sealed record RecommendationInteractionEvent(long UserId, long TargetId, 
 
 public sealed record MessagingUserEvent(long UserId);
 
-public sealed record MediaLifecycleEvent(IReadOnlyList<string> Urls);
+// OwnerUserId is optional so outbox rows written before owner-scoped media lifecycle
+// still deserialize; a null owner means the Upload service applies no ownership filter.
+public sealed record MediaLifecycleEvent(IReadOnlyList<string> Urls, long? OwnerUserId = null);
 
 public interface IIntegrationOutboxStore
 {

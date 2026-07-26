@@ -13,20 +13,32 @@ public sealed class GroupGraphService : IGroupGraphService
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
     private readonly IContentGraphService? _contentGraphService;
+    private readonly IMediaOwnershipGuard? _mediaOwnershipGuard;
 
     public GroupGraphService(
         MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient,
-        IContentGraphService? contentGraphService = null)
+        IContentGraphService? contentGraphService = null,
+        IMediaOwnershipGuard? mediaOwnershipGuard = null)
     {
         _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
         _contentGraphService = contentGraphService;
+        _mediaOwnershipGuard = mediaOwnershipGuard;
     }
+
+    /// <summary>
+    /// Refuses group media URLs that the acting admin does not own, so group artwork cannot be
+    /// pointed at another user's asset and then destroyed by replacing it.
+    /// </summary>
+    private Task EnsureMediaOwnedAsync(long actorId, IEnumerable<string?> urls, CancellationToken cancellationToken) =>
+        _mediaOwnershipGuard is null
+            ? Task.CompletedTask
+            : _mediaOwnershipGuard.EnsureOwnedAsync(actorId, urls, cancellationToken);
 
     public async Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default)
     {
@@ -96,7 +108,8 @@ public sealed class GroupGraphService : IGroupGraphService
         if (deleted)
         {
             await _externalServiceClient.DeleteSearchIndexAsync(groupId, cancellationToken);
-            await _externalServiceClient.DeleteMediaAsync(profileMedia, cancellationToken);
+            // Cascade cleanup of stored group artwork; ownership was validated when it was set.
+            await _externalServiceClient.DeleteMediaAsync(profileMedia, null, cancellationToken);
         }
 
         return deleted;
@@ -135,18 +148,21 @@ public sealed class GroupGraphService : IGroupGraphService
         {
             return null;
         }
+        await EnsureMediaOwnedAsync(actorId, new[] { avatarUrl, originalUrl }, cancellationToken);
         var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "avatar");
         var updated = await _objectService.UpdateObjectAsync(groupId, GraphObjectType.Group, GraphJson.PatchJson(("avatar", avatarUrl)), cancellationToken);
         if (updated is not null)
         {
             if (!string.IsNullOrWhiteSpace(avatarUrl))
             {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, cancellationToken);
+                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, actorId, cancellationToken);
             }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+                // Previous artwork may have been set by a different admin, so it is removed as
+                // stored state rather than under the acting admin's ownership.
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, null, cancellationToken);
             }
         }
         if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
@@ -176,6 +192,7 @@ public sealed class GroupGraphService : IGroupGraphService
             return null;
         }
 
+        await EnsureMediaOwnedAsync(actorId, new[] { backgroundUrl, originalUrl }, cancellationToken);
         var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "background");
 
         var updated = await _objectService.UpdateObjectAsync(
@@ -188,12 +205,14 @@ public sealed class GroupGraphService : IGroupGraphService
         {
             if (!string.IsNullOrWhiteSpace(backgroundUrl))
             {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, cancellationToken);
+                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, actorId, cancellationToken);
             }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, cancellationToken);
+                // Previous artwork may have been set by a different admin, so it is removed as
+                // stored state rather than under the acting admin's ownership.
+                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, null, cancellationToken);
             }
         }
 

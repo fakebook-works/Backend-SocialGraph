@@ -113,8 +113,8 @@ public sealed class IntegrationOutboxPublisherTests
             new HttpContextAccessor { HttpContext = context },
             new OutboxPayloadProtector(configuration));
 
-        await publisher.FinalizeMediaAsync(new[] { "/media/files/a.jpg", "/media/files/a.jpg" });
-        await publisher.DeleteMediaAsync(new[] { "/media/files/b.jpg" });
+        await publisher.FinalizeMediaAsync(new[] { "/media/files/a.jpg", "/media/files/a.jpg" }, 42);
+        await publisher.DeleteMediaAsync(new[] { "/media/files/b.jpg" }, 42);
 
         var messages = await dbContext.IntegrationOutboxTb.OrderBy(item => item.event_type).ToListAsync();
         Assert.Equal(2, messages.Count);

@@ -66,6 +66,7 @@ builder.Services.AddScoped<IContentGraphService, ContentGraphService>();
 builder.Services.AddScoped<ICandidateService, CandidateService>();
 builder.Services.AddScoped<ISocialReadModelService, SocialReadModelService>();
 builder.Services.AddScoped<IMessagingPermissionService, MessagingPermissionService>();
+builder.Services.AddScoped<IMediaOwnershipGuard, UploadMediaOwnershipGuard>();
 builder.Services.AddDataLoader<HomePostByIdDataLoader>();
 builder.Services.AddHostedService<OutboxSchemaHostedService>();
 builder.Services.AddHostedService<IntegrationOutboxWorker>();
@@ -74,6 +75,7 @@ builder.Services.AddHostedService<StoryCleanupBackgroundService>();
 // 3. Đăng ký bộ điều phối GraphQL Subgraph
 builder.Services
     .AddGraphQLServer()
+    .AddErrorFilter<MediaOwnershipErrorFilter>()
     .AddQueryType<Query>()
     .AddMutationType<Mutation>()
     .AddType<RecommendationItemResult>()

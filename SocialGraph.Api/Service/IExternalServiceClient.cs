@@ -22,6 +22,11 @@ public interface IExternalServiceClient
     Task RecordRecommendationInteractionAsync(long userId, long targetId, string action, CancellationToken cancellationToken = default);
     Task CreateMessengerUserAsync(long userId, CancellationToken cancellationToken = default);
     Task DeleteMessengerUserAsync(long userId, CancellationToken cancellationToken = default);
-    Task FinalizeMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default);
-    Task DeleteMediaAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken = default);
+    /// <param name="ownerUserId">
+    /// When supplied, the Upload service only acts on assets owned by this user. Callers pass it
+    /// wherever the acting user is necessarily the media owner (avatars, covers, authored content)
+    /// so a stored URL can never be used to finalize or delete somebody else's asset.
+    /// </param>
+    Task FinalizeMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default);
+    Task DeleteMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default);
 }
