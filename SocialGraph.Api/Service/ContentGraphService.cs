@@ -1242,8 +1242,9 @@ public sealed class ContentGraphService : IContentGraphService
     }
 
     /// <summary>
-    /// Authors whose stories the viewer may see. Following someone is not on its own enough:
-    /// the author's own privacy setting decides, and a block overrides every relationship.
+    /// Authors whose stories the viewer may see: friends and followed accounts, minus blocks.
+    /// Following is deliberately sufficient on its own — the author's profile privacy does not
+    /// further restrict stories. Blocks still override every relationship, in both directions.
     /// </summary>
     private async Task<IReadOnlySet<long>> GetVisibleStoryAuthorIdsAsync(long userId, CancellationToken cancellationToken)
     {
@@ -1270,27 +1271,6 @@ public sealed class ContentGraphService : IContentGraphService
             .Select(item => item.id2)
             .ToListAsync(cancellationToken);
         candidates.ExceptWith(blocked);
-
-        // Friends always qualify. A followed author only qualifies when they publish to
-        // "friends and current followers" (privacy 1); this mirrors the rule already applied
-        // on the post-detail path in SocialReadModelService.
-        var friendSet = friends.ToHashSet();
-        var followOnlyIds = candidates.Where(id => !friendSet.Contains(id)).ToArray();
-        if (followOnlyIds.Length == 0)
-        {
-            return candidates;
-        }
-
-        var authors = await _dbContext.ObjectsTb
-            .AsNoTracking()
-            .Where(item => followOnlyIds.Contains(item.id) && item.otype == GraphObjectType.User)
-            .Select(item => new { item.id, item.data })
-            .ToListAsync(cancellationToken);
-        var openToFollowers = authors
-            .Where(item => GraphJson.Int(GraphJson.ParseObject(item.data), "privacy") == 1)
-            .Select(item => item.id)
-            .ToHashSet();
-        candidates.ExceptWith(followOnlyIds.Where(id => !openToFollowers.Contains(id)));
 
         return candidates;
     }

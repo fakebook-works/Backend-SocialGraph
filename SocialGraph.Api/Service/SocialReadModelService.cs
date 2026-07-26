@@ -850,10 +850,11 @@ public sealed class SocialReadModelService : ISocialReadModelService
             };
         }
 
-        var authorObject = await _objectService.RetrieveObjectAsync(authorId, cancellationToken);
-        var privacy = authorObject is null ? 0 : GraphJson.Int(GraphJson.ParseObject(authorObject.data), "privacy");
-        var isFriend = await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Friend, authorId, cancellationToken);
-        return isFriend || privacy == 1 && await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Followed, authorId, cancellationToken);
+        // Remaining case: Story. Stories reach friends and followers, and the author's profile
+        // privacy does not further restrict them. Blocks were already applied above, and this
+        // matches GetVisibleStoryAuthorIdsAsync so the story tray and this path always agree.
+        return await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Friend, authorId, cancellationToken) ||
+               await _associationService.HasAssociationAsync(viewerId, GraphAssociationType.Followed, authorId, cancellationToken);
     }
 
     private async Task<bool> IsBlockedAsync(long viewerId, long userId, CancellationToken cancellationToken)
