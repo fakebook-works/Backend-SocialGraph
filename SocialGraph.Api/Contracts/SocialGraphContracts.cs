@@ -114,6 +114,10 @@ public sealed record FriendSuggestionResult(
     int MutualFriendCount,
     IReadOnlyList<UserSummaryResult> MutualFriends);
 
+public sealed record FriendProfileWithMutualCountResult(
+    UserProfileResult Profile,
+    int MutualFriendCount);
+
 public sealed record GroupResult(
     long Id,
     string Avatar,

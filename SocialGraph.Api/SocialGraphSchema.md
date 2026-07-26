@@ -209,5 +209,7 @@ Nếu user đã bị xóa hoặc không còn khả dụng, token vẫn được 
 Khi render, frontend bỏ ký tự `@`, hiển thị tên đậm và cho phép nhấn để mở `/profile/<userId>` nếu `available: true`.
 Không cần migration hay bảng mới; cơ chế này tái sử dụng association type 26 hiện có.
 
+Profile collections dùng `profileConnections(userId, associationType, limit)` để tải danh sách hiển thị ban đầu cho association `0/3/4`. Việc nhập từ khóa không được xử lý tại SocialGraph GraphQL: SearchService gọi REST nội bộ `GET /internal/users/{userId}/profile-connection-ids?associationType=0|3|4`, giới hạn search trong tập ID đó, rồi Gateway Fusion hydrate profile. Frontend chỉ gọi GraphQL qua Gateway.
+
 Feed post detail trả thêm `taggedUsers { id name avatar isVerified }`. Danh sách này được hydrate cùng batch association/object của trang feed, không gọi query riêng cho từng post.
 

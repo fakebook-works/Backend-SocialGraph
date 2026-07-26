@@ -10,7 +10,10 @@ public interface IUserGraphService
     Task<UserProfileResult?> GetProfileAsync(long userId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<UserProfileResult>> GetProfilesForViewerAsync(long viewerId, IReadOnlyCollection<long> userIds, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<long>> GetFriendIdsAsync(long userId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<long>> GetProfileConnectionIdsAsync(long userId, short associationType, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<UserProfileResult>> GetFriendRelationProfilesAsync(long userId, short associationType, int limit, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetFriendProfilesWithMutualCountsAsync(long userId, int limit, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileConnectionsAsync(long userId, short associationType, int limit, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FriendSuggestionResult>> GetFriendSuggestionsAsync(long userId, int limit, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl = null, int privacy = 0, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl, CancellationToken cancellationToken);

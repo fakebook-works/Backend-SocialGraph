@@ -61,6 +61,29 @@ public class Query
         return userGraphService.GetFriendRelationProfilesAsync(userId, associationType, limit, cancellationToken);
     }
 
+    public Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetFriendProfilesWithMutualCountsAsync(
+        long userId,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return userGraphService.GetFriendProfilesWithMutualCountsAsync(userId, limit, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileConnectionsAsync(
+        long userId,
+        short associationType,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return userGraphService.GetProfileConnectionsAsync(userId, associationType, limit, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<GroupResult>> GetGroupsAsync(
         IReadOnlyList<long> groupIds,
         [Service] IGroupGraphService groupGraphService,

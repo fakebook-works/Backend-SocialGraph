@@ -188,6 +188,88 @@ public sealed class UserGraphServiceTests
     }
 
     [Fact]
+    public async Task GetFriendProfilesWithMutualCounts_ReturnsProfilesAndBulkMutualCounts()
+    {
+        const long viewerId = 181;
+        const long firstFriendId = 182;
+        const long secondFriendId = 183;
+        const long firstMutualId = 184;
+        const long secondMutualId = 185;
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        context.ObjectsTb.AddRange(
+            User(viewerId, "Viewer"),
+            User(firstFriendId, "First Friend"),
+            User(secondFriendId, "Second Friend"),
+            User(firstMutualId, "First Mutual"),
+            User(secondMutualId, "Second Mutual"));
+        context.AssociationsTb.AddRange(
+            Edge(viewerId, GraphAssociationType.Friend, firstFriendId),
+            Edge(viewerId, GraphAssociationType.Friend, secondFriendId),
+            Edge(viewerId, GraphAssociationType.Friend, firstMutualId),
+            Edge(viewerId, GraphAssociationType.Friend, secondMutualId),
+            Edge(firstFriendId, GraphAssociationType.Friend, viewerId),
+            Edge(firstFriendId, GraphAssociationType.Friend, firstMutualId),
+            Edge(firstFriendId, GraphAssociationType.Friend, secondMutualId),
+            Edge(secondFriendId, GraphAssociationType.Friend, viewerId),
+            Edge(secondFriendId, GraphAssociationType.Friend, firstMutualId));
+        await context.SaveChangesAsync();
+        var service = new UserGraphService(
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>(),
+            context);
+
+        var results = await service.GetFriendProfilesWithMutualCountsAsync(viewerId, 100);
+
+        Assert.Equal(4, results.Count);
+        Assert.Equal(2, results.Single(item => item.Profile.Id == firstFriendId).MutualFriendCount);
+        Assert.Equal(1, results.Single(item => item.Profile.Id == secondFriendId).MutualFriendCount);
+    }
+
+    [Fact]
+    public async Task GetProfileConnections_LoadsFriendsFollowingAndFollowersForSearchScoping()
+    {
+        const long viewerId = 191;
+        const long friendId = 192;
+        const long followingId = 193;
+        const long followerId = 194;
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        context.ObjectsTb.AddRange(
+            User(viewerId, "Viewer"),
+            User(friendId, "Ánh Friend"),
+            User(followingId, "Theo Dõi"),
+            User(followerId, "Follower"));
+        context.AssociationsTb.AddRange(
+            Edge(viewerId, GraphAssociationType.Friend, friendId),
+            Edge(viewerId, GraphAssociationType.Followed, followingId),
+            Edge(viewerId, GraphAssociationType.FollowedBy, followerId));
+        await context.SaveChangesAsync();
+        var service = new UserGraphService(
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>(),
+            context);
+
+        var friendIds = await service.GetProfileConnectionIdsAsync(viewerId, GraphAssociationType.Friend);
+        var followingIds = await service.GetProfileConnectionIdsAsync(viewerId, GraphAssociationType.Followed);
+        var followerIds = await service.GetProfileConnectionIdsAsync(viewerId, GraphAssociationType.FollowedBy);
+        var friends = await service.GetProfileConnectionsAsync(viewerId, GraphAssociationType.Friend, 20);
+        var following = await service.GetProfileConnectionsAsync(viewerId, GraphAssociationType.Followed, 20);
+        var followers = await service.GetProfileConnectionsAsync(viewerId, GraphAssociationType.FollowedBy, 20);
+
+        Assert.Equal(friendId, Assert.Single(friendIds));
+        Assert.Equal(followingId, Assert.Single(followingIds));
+        Assert.Equal(followerId, Assert.Single(followerIds));
+        Assert.Equal(friendId, Assert.Single(friends).Profile.Id);
+        Assert.Equal(followingId, Assert.Single(following).Profile.Id);
+        Assert.Equal(followerId, Assert.Single(followers).Profile.Id);
+    }
+
+    [Fact]
     public async Task GetFriendSuggestions_RanksMutualFriendsAndExcludesExistingRelationships()
     {
         const long viewerId = 201;
