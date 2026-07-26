@@ -21,14 +21,19 @@ public class MyDbContext : DbContext
             entity.Property(e => e.id).ValueGeneratedNever();
             entity.Property(e => e.otype).IsRequired();
             entity.Property(e => e.data).HasColumnType("jsonb");
+            // Reel candidate selection and the story cleanup sweep filter on otype.
+            entity.HasIndex(e => new { e.otype, e.id }).HasDatabaseName("idx_objects_type_id");
         });
 
         modelBuilder.Entity<Associations>(entity =>
         {
             entity.ToTable("associations");
             entity.HasKey(e => new { e.id1, e.atype, e.id2 });
-            entity.HasIndex(e => new { e.id1, e.atype, e.id2 }).HasDatabaseName("idx_associations");
+            // No index on (id1, atype, id2): that is the primary key, and declaring it
+            // again produced a second B-tree maintained on every write for no benefit.
             entity.HasIndex(e => new { e.id2, e.atype, e.id1 }).HasDatabaseName("idx_associations_inverse");
+            // Paged reads order by time within a bucket; see migrations/20260727_add_hot_path_indexes.sql.
+            entity.HasIndex(e => new { e.id1, e.atype, e.time, e.id2 }).HasDatabaseName("idx_associations_time");
             entity.Property(e => e.time).IsRequired();
         });
 
