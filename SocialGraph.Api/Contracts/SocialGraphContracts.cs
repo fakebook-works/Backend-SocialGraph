@@ -69,6 +69,14 @@ public sealed record CreateCommentInput(
     string Content,
     MediaInput? Media = null);
 
+// Media is tri-state: null leaves the existing attachment alone, a value replaces it, and
+// ClearMedia removes it — a nullable MediaInput alone cannot express "remove".
+public sealed record UpdateCommentInput(
+    long Id,
+    string? Content = null,
+    MediaInput? Media = null,
+    bool ClearMedia = false);
+
 public sealed record CreateNormalStoryInput(long AuthorId, string Content, MediaInput? Media);
 
 public sealed record CreateShareStoryInput(long AuthorId, string Content, long SharedSourceId);

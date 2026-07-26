@@ -322,6 +322,12 @@ public class Mutation
         return await contentGraphService.UpdatePostAsync(input, cancellationToken);
     }
 
+    public async Task<ContentResult?> UpdateCommentAsync(UpdateCommentInput input, [Service] IContentGraphService contentGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
+    {
+        await RequireContentAuthorAsync(trustedCaller.RequireUserId(), input.Id, contentGraphService, cancellationToken);
+        return await contentGraphService.UpdateCommentAsync(input, cancellationToken);
+    }
+
     public async Task<bool> DeleteContentAsync(long contentId, [Service] IContentGraphService contentGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
         await RequireContentAuthorAsync(trustedCaller.RequireUserId(), contentId, contentGraphService, cancellationToken);

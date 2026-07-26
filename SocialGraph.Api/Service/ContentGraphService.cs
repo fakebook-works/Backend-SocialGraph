@@ -12,6 +12,9 @@ public sealed class ContentGraphService : IContentGraphService
 {
     public const int MaxPostDetailIds = 100;
 
+    /// <summary>Matches the recursion bound used by the visibility checks in SocialReadModelService.</summary>
+    private const int MaxCommentChainDepth = 20;
+
     private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
@@ -228,6 +231,114 @@ public sealed class ContentGraphService : IContentGraphService
         return await BuildContentResultAsync(post, authorId, media, cancellationToken);
     }
 
+    public async Task<ContentResult?> UpdateCommentAsync(
+        UpdateCommentInput input,
+        CancellationToken cancellationToken = default)
+    {
+        var current = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+        if (current?.otype != GraphObjectType.Comment)
+        {
+            return null;
+        }
+
+        if (input.Media is not null && (input.Media.Type != 0 || string.IsNullOrWhiteSpace(input.Media.Url)))
+        {
+            throw new ArgumentException("Comment media must be one image with a valid URL.", nameof(input));
+        }
+
+        var currentData = GraphJson.ParseObject(current.data);
+        var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
+        await EnsureMediaOwnedAsync(authorId, input.Media, cancellationToken);
+
+        var comment = input.Content is null
+            ? current
+            : await _objectService.UpdateObjectAsync(
+                input.Id,
+                GraphObjectType.Comment,
+                GraphJson.PatchJson(("content", input.Content)),
+                cancellationToken);
+        if (comment is null)
+        {
+            return null;
+        }
+
+        IReadOnlyList<MediaResult> media;
+        if (input.Media is null && !input.ClearMedia)
+        {
+            media = await GetMediaAsync(input.Id, cancellationToken);
+        }
+        else
+        {
+            var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
+            foreach (var mediaId in existingMediaIds)
+            {
+                await _associationService.DeleteOneAssociationAsync(
+                    input.Id,
+                    GraphAssociationType.Contained,
+                    mediaId,
+                    cancellationToken);
+            }
+
+            media = await AttachSingleMediaAsync(input.Id, input.Media, cancellationToken);
+            await _externalServiceClient.FinalizeMediaAsync(
+                media.Select(item => item.Url).ToArray(),
+                authorId,
+                cancellationToken);
+            await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
+        }
+
+        var content = input.Content ?? GraphJson.String(currentData, "content");
+        if (input.Content is not null)
+        {
+            await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
+        }
+
+        return await BuildContentResultAsync(comment, authorId, media, cancellationToken);
+    }
+
+    /// <summary>
+    /// Walks a comment up to the post, group post or reel it belongs to, following the chain for
+    /// replies. Returns 0 when the chain cannot be resolved.
+    /// </summary>
+    public async Task<long> ResolveRootPostIdAsync(long contentId, CancellationToken cancellationToken = default)
+    {
+        var currentId = contentId;
+        for (var depth = 0; depth < MaxCommentChainDepth; depth++)
+        {
+            var current = await _objectService.RetrieveObjectAsync(currentId, cancellationToken);
+            if (current is null)
+            {
+                return 0;
+            }
+
+            if (current.otype is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel)
+            {
+                return current.id;
+            }
+
+            if (current.otype != GraphObjectType.Comment)
+            {
+                return 0;
+            }
+
+            var parent = await _associationService.RetrieveAssociationAsync(
+                currentId,
+                GraphAssociationType.Comment,
+                null,
+                1,
+                cancellationToken);
+            var parentId = parent.items.FirstOrDefault()?.id2 ?? 0;
+            if (parentId <= 0)
+            {
+                return 0;
+            }
+
+            currentId = parentId;
+        }
+
+        return 0;
+    }
+
     public async Task<bool> DeleteContentAsync(long contentId, CancellationToken cancellationToken = default)
     {
         var item = await _objectService.RetrieveObjectAsync(contentId, cancellationToken);
@@ -281,7 +392,20 @@ public sealed class ContentGraphService : IContentGraphService
         long postId,
         CancellationToken cancellationToken = default)
     {
-        return (await GetPostDetailsAsync(viewerId, new[] { postId }, cancellationToken)).FirstOrDefault();
+        var detail = (await GetPostDetailsAsync(viewerId, new[] { postId }, cancellationToken)).FirstOrDefault();
+        if (detail is not null)
+        {
+            return detail;
+        }
+
+        // Notifications for a like or a mention on a comment carry the comment's id, so opening
+        // one used to land on an "unavailable content" screen. Resolving the comment to the post
+        // that contains it makes the deep link work; visibility is still decided entirely by the
+        // normal post-detail path below.
+        var rootPostId = await ResolveRootPostIdAsync(postId, cancellationToken);
+        return rootPostId <= 0 || rootPostId == postId
+            ? null
+            : (await GetPostDetailsAsync(viewerId, new[] { rootPostId }, cancellationToken)).FirstOrDefault();
     }
 
     public async Task<IReadOnlyList<IHomePostResult>> GetPostDetailsAsync(
