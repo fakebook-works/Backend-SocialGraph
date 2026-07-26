@@ -70,9 +70,10 @@ public sealed class ContentGraphService : IContentGraphService
         await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? post = null;
         try
         {
-            var post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
+            post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
             foreach (var userId in NormalizeUserIds(input.TaggedUserIds))
@@ -103,11 +104,10 @@ public sealed class ContentGraphService : IContentGraphService
         }
         catch
         {
-            if (transaction is not null)
-            {
-                await transaction.RollbackAsync(CancellationToken.None);
-            }
-
+            // Objects and edges are written through Redis before the transaction commits, so
+            // rolling back without invalidating left content that does not exist in the cache,
+            // and the read paths prefer the cache over PostgreSQL.
+            await RollbackAndInvalidateAsync(transaction, post?.id);
             throw;
         }
     }
@@ -117,9 +117,10 @@ public sealed class ContentGraphService : IContentGraphService
         await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? post = null;
         try
         {
-            var post = await _objectService.AddObjectAsync(GraphObjectType.GroupPost, GraphJson.GroupPostJson(input.Content), cancellationToken);
+            post = await _objectService.AddObjectAsync(GraphObjectType.GroupPost, GraphJson.GroupPostJson(input.Content), cancellationToken);
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
             await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
@@ -143,11 +144,10 @@ public sealed class ContentGraphService : IContentGraphService
         }
         catch
         {
-            if (transaction is not null)
-            {
-                await transaction.RollbackAsync(CancellationToken.None);
-            }
-
+            // Objects and edges are written through Redis before the transaction commits, so
+            // rolling back without invalidating left content that does not exist in the cache,
+            // and the read paths prefer the cache over PostgreSQL.
+            await RollbackAndInvalidateAsync(transaction, post?.id);
             throw;
         }
     }
@@ -771,7 +771,9 @@ public sealed class ContentGraphService : IContentGraphService
         {
             if (transaction is not null)
             {
-                await transaction.RollbackAsync(CancellationToken.None);
+                // The comment was written through Redis before the commit, so the rollback has
+                // to drop it from the cache as well or reads would keep returning it.
+                await RollbackAndInvalidateAsync(transaction, comment?.id);
             }
             else if (comment is not null)
             {
@@ -1445,11 +1447,10 @@ public sealed class ContentGraphService : IContentGraphService
         }
         catch
         {
-            if (transaction is not null)
-            {
-                await transaction.RollbackAsync(CancellationToken.None);
-            }
-
+            // Objects and edges are written through Redis before the transaction commits, so
+            // rolling back without invalidating left content that does not exist in the cache,
+            // and the read paths prefer the cache over PostgreSQL.
+            await RollbackAndInvalidateAsync(transaction, storyId);
             throw;
         }
         finally
@@ -1522,6 +1523,23 @@ public sealed class ContentGraphService : IContentGraphService
                 ) AS "Value"
                 """)
             .SingleAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Rolls the transaction back and drops anything the failed attempt left in the cache.
+    /// </summary>
+    private async Task RollbackAndInvalidateAsync(IDbContextTransaction? transaction, long? objectId)
+    {
+        if (transaction is null)
+        {
+            return;
+        }
+
+        await transaction.RollbackAsync(CancellationToken.None);
+        if (objectId is { } id)
+        {
+            await _objectService.InvalidateObjectCacheAsync(id);
+        }
     }
 
     private bool IsInMemory() => string.Equals(

@@ -12,11 +12,20 @@ public sealed class AssociationService : IAssociationService
 {
     private const string CacheKeyPrefix = "socialgraph:v2:association";
 
+    /// <summary>Marker value meaning the bucket is fully present in the sorted set.</summary>
+    private const string CachedMarker = "1";
+
+    /// <summary>Marker value meaning the bucket is too large to cache and is read from PostgreSQL.</summary>
+    private const string BypassMarker = "0";
+
     private readonly MyDbContext _dbContext;
     private readonly IConnectionMultiplexer _redisConnection;
     private readonly IDatabase _redis;
     private readonly ILogger<AssociationService> _logger;
     private readonly bool _cacheEnabled;
+    private readonly TimeSpan _entryTtl;
+    private readonly TimeSpan _bypassTtl;
+    private readonly int _maxCachedEntries;
     private long _lastRedisWarningTicks;
 
     public AssociationService(
@@ -29,7 +38,11 @@ public sealed class AssociationService : IAssociationService
         _redisConnection = redis;
         _redis = redis.GetDatabase();
         _logger = logger;
-        _cacheEnabled = cacheOptions?.Value.Enabled ?? true;
+        var options = cacheOptions?.Value ?? new SocialGraphCacheOptions();
+        _cacheEnabled = options.Enabled;
+        _entryTtl = TimeSpan.FromMinutes(Math.Clamp(options.EntryTtlMinutes, 1, 24 * 60));
+        _bypassTtl = TimeSpan.FromMinutes(Math.Clamp(options.BypassMarkerTtlMinutes, 1, 24 * 60));
+        _maxCachedEntries = Math.Clamp(options.MaxCachedAssociationEntries, 1, 1_000_000);
     }
 
     public async Task<bool> AddAssociationAsync(
@@ -298,7 +311,11 @@ public sealed class AssociationService : IAssociationService
 
         try
         {
-            await EnsureAssociationCacheAsync(id1, atype, cancellationToken);
+            if (!await EnsureAssociationCacheAsync(id1, atype, cancellationToken))
+            {
+                // Bucket is too large to cache; PostgreSQL pages it with the same contract.
+                return await RetrieveFromPostgresAsync(id1, atype, skip, take, cancellationToken);
+            }
 
             var key = AssociationKey(id1, atype);
             var entries = await _redis.SortedSetRangeByRankWithScoresAsync(
@@ -366,25 +383,61 @@ public sealed class AssociationService : IAssociationService
             cancellationToken);
     }
 
-    private async Task EnsureAssociationCacheAsync(long id1, short atype, CancellationToken cancellationToken)
+    /// <returns>True when the sorted set holds the whole bucket and may be read.</returns>
+    private async Task<bool> EnsureAssociationCacheAsync(long id1, short atype, CancellationToken cancellationToken)
     {
-        if (await _redis.KeyExistsAsync(AssociationMarkerKey(id1, atype)))
+        var marker = await _redis.StringGetAsync(AssociationMarkerKey(id1, atype));
+        if (marker == CachedMarker)
         {
-            return;
+            return true;
         }
 
-        await HydrateAssociationCacheAsync(id1, atype, cancellationToken);
+        if (marker == BypassMarker)
+        {
+            return false;
+        }
+
+        return await HydrateAssociationCacheAsync(id1, atype, cancellationToken);
     }
 
-    private async Task HydrateAssociationCacheAsync(long id1, short atype, CancellationToken cancellationToken)
+    /// <summary>
+    /// Loads a bucket into Redis, or marks it as one to read straight from PostgreSQL.
+    /// </summary>
+    /// <returns>True when the bucket is cached and the sorted set may be read.</returns>
+    /// <remarks>
+    /// The size is measured before anything is read, because this used to pull an entire
+    /// bucket into memory regardless of how large it was — reading the first page for an
+    /// account with a million followers fetched a million rows. Oversized buckets are marked
+    /// and bypassed rather than cached partially: the read path derives the next cursor from
+    /// the cached length, so a truncated bucket would end pagination early and silently drop
+    /// the rest.
+    /// </remarks>
+    private async Task<bool> HydrateAssociationCacheAsync(long id1, short atype, CancellationToken cancellationToken)
     {
+        var key = AssociationKey(id1, atype);
+        var markerKey = AssociationMarkerKey(id1, atype);
+
+        var total = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .CountAsync(item => item.id1 == id1 && item.atype == atype, cancellationToken);
+        if (total > _maxCachedEntries)
+        {
+            _logger.LogDebug(
+                "Association bucket {Id1}/{Atype} holds {Total} edges and is served from PostgreSQL.",
+                id1,
+                atype,
+                total);
+            await _redis.KeyDeleteAsync(key);
+            await _redis.StringSetAsync(markerKey, BypassMarker, _bypassTtl);
+            return false;
+        }
+
         var rows = await _dbContext.AssociationsTb
             .AsNoTracking()
             .Where(item => item.id1 == id1 && item.atype == atype)
             .Select(item => new { item.id2, item.time })
             .ToListAsync(cancellationToken);
 
-        var key = AssociationKey(id1, atype);
         await _redis.KeyDeleteAsync(key);
 
         if (rows.Count > 0)
@@ -394,9 +447,11 @@ public sealed class AssociationService : IAssociationService
                 .ToArray();
 
             await _redis.SortedSetAddAsync(key, entries);
+            await _redis.KeyExpireAsync(key, _entryTtl);
         }
 
-        await _redis.StringSetAsync(AssociationMarkerKey(id1, atype), "1");
+        await _redis.StringSetAsync(markerKey, CachedMarker, _entryTtl);
+        return true;
     }
 
     private async Task AddToCacheOrHydrateAsync(
@@ -406,9 +461,22 @@ public sealed class AssociationService : IAssociationService
         long time,
         CancellationToken cancellationToken)
     {
-        if (await _redis.KeyExistsAsync(AssociationMarkerKey(id1, atype)))
+        var markerKey = AssociationMarkerKey(id1, atype);
+        var marker = await _redis.StringGetAsync(markerKey);
+        if (marker == CachedMarker)
         {
-            await _redis.SortedSetAddAsync(AssociationKey(id1, atype), ToRedisValue(id2), time);
+            var key = AssociationKey(id1, atype);
+            await _redis.SortedSetAddAsync(key, ToRedisValue(id2), time);
+            // Refresh both lifetimes so an actively written bucket does not expire underneath
+            // itself, leaving a marker that claims a set which Redis has already reclaimed.
+            await _redis.KeyExpireAsync(key, _entryTtl);
+            await _redis.KeyExpireAsync(markerKey, _entryTtl);
+            return;
+        }
+
+        if (marker == BypassMarker)
+        {
+            // Bucket is served from PostgreSQL; there is nothing cached to update.
             return;
         }
 
@@ -417,7 +485,7 @@ public sealed class AssociationService : IAssociationService
 
     private async Task RemoveFromCacheIfLoadedAsync(long id1, short atype, long id2)
     {
-        if (!await _redis.KeyExistsAsync(AssociationMarkerKey(id1, atype)))
+        if (await _redis.StringGetAsync(AssociationMarkerKey(id1, atype)) != CachedMarker)
         {
             return;
         }

@@ -19,6 +19,7 @@ public sealed class ObjectService : IObjectService
     private readonly IDatabase _redis;
     private readonly ILogger<ObjectService> _logger;
     private readonly bool _cacheEnabled;
+    private readonly TimeSpan _entryTtl;
     private long _lastRedisWarningTicks;
 
     public ObjectService(
@@ -31,7 +32,12 @@ public sealed class ObjectService : IObjectService
         _redisConnection = redis;
         _redis = redis.GetDatabase();
         _logger = logger;
-        _cacheEnabled = cacheOptions?.Value.Enabled ?? true;
+        var options = cacheOptions?.Value ?? new SocialGraphCacheOptions();
+        _cacheEnabled = options.Enabled;
+        // Cached objects had no lifetime, so Redis grew for as long as the process ran and
+        // an entry written by a transaction that later rolled back stayed authoritative,
+        // because reads prefer the cache.
+        _entryTtl = TimeSpan.FromMinutes(Math.Clamp(options.EntryTtlMinutes, 1, 24 * 60));
     }
 
     public async Task<SocialGraphObjectResult> AddObjectAsync(
@@ -167,7 +173,7 @@ public sealed class ObjectService : IObjectService
             ["data"] = JsonNode.Parse(item.data)
         }.ToJsonString();
 
-        await TryRedisWriteAsync(() => _redis.StringSetAsync(ObjectKey(item.id), payload));
+        await TryRedisWriteAsync(() => _redis.StringSetAsync(ObjectKey(item.id), payload, _entryTtl));
     }
 
     private async Task PatchCachedObjectAsync(long id, JsonObject patch)
@@ -199,7 +205,7 @@ public sealed class ObjectService : IObjectService
                 data[item.Key] = item.Value?.DeepClone();
             }
 
-            await _redis.StringSetAsync(key, root.ToJsonString());
+            await _redis.StringSetAsync(key, root.ToJsonString(), _entryTtl);
         }
         catch (RedisException exception)
         {
