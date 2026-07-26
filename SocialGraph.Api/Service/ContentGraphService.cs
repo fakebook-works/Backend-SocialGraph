@@ -1241,15 +1241,58 @@ public sealed class ContentGraphService : IContentGraphService
             .ToHashSet();
     }
 
+    /// <summary>
+    /// Authors whose stories the viewer may see. Following someone is not on its own enough:
+    /// the author's own privacy setting decides, and a block overrides every relationship.
+    /// </summary>
     private async Task<IReadOnlySet<long>> GetVisibleStoryAuthorIdsAsync(long userId, CancellationToken cancellationToken)
     {
         var friends = await GetAssociationIdsAsync(userId, GraphAssociationType.Friend, 500, cancellationToken);
         var followed = await GetAssociationIdsAsync(userId, GraphAssociationType.Followed, 500, cancellationToken);
 
-        return friends
+        var candidates = friends
             .Concat(followed)
             .Where(id => id != userId)
             .ToHashSet();
+        if (candidates.Count == 0)
+        {
+            return candidates;
+        }
+
+        // Block wins in both directions.
+        var candidateIds = candidates.ToArray();
+        var blocked = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == userId &&
+                candidateIds.Contains(item.id2) &&
+                (item.atype == GraphAssociationType.Blocked ||
+                 item.atype == GraphAssociationType.BlockedBy))
+            .Select(item => item.id2)
+            .ToListAsync(cancellationToken);
+        candidates.ExceptWith(blocked);
+
+        // Friends always qualify. A followed author only qualifies when they publish to
+        // "friends and current followers" (privacy 1); this mirrors the rule already applied
+        // on the post-detail path in SocialReadModelService.
+        var friendSet = friends.ToHashSet();
+        var followOnlyIds = candidates.Where(id => !friendSet.Contains(id)).ToArray();
+        if (followOnlyIds.Length == 0)
+        {
+            return candidates;
+        }
+
+        var authors = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => followOnlyIds.Contains(item.id) && item.otype == GraphObjectType.User)
+            .Select(item => new { item.id, item.data })
+            .ToListAsync(cancellationToken);
+        var openToFollowers = authors
+            .Where(item => GraphJson.Int(GraphJson.ParseObject(item.data), "privacy") == 1)
+            .Select(item => item.id)
+            .ToHashSet();
+        candidates.ExceptWith(followOnlyIds.Where(id => !openToFollowers.Contains(id)));
+
+        return candidates;
     }
 
     private async Task<IReadOnlyList<long>> GetAssociationIdsAsync(long id1, short atype, int limit, CancellationToken cancellationToken)
@@ -1753,13 +1796,15 @@ public sealed class ContentGraphService : IContentGraphService
 
     private static bool IsStoryShareSourceVisible(short objectType, string rawData)
     {
-        if (objectType == GraphObjectType.Reel)
+        // Only public sources are shareable. Reels carry the same 0..3 privacy domain as
+        // feed posts and can be made private after being shared, so they are subject to the
+        // same check; treating every reel as visible leaked private reels to story viewers.
+        if (objectType is not (GraphObjectType.FeedPost or GraphObjectType.Reel))
         {
-            return true;
+            return false;
         }
 
-        return objectType == GraphObjectType.FeedPost &&
-               GraphJson.Int(GraphJson.ParseObject(rawData), "privacy") == 0;
+        return GraphJson.Int(GraphJson.ParseObject(rawData), "privacy") == 0;
     }
 
     private static UserSummaryResult BuildUserSummary(Objects user)
