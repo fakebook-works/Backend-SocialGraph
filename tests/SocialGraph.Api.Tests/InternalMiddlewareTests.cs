@@ -95,7 +95,7 @@ public sealed class InternalMiddlewareTests
         var values = new Dictionary<string, string?>();
         if (expectedSecret is not null)
         {
-            values["Gateway:InternalSharedSecret"] = expectedSecret;
+            values["InternalServices:SocialGraph:SharedSecret"] = expectedSecret;
         }
 
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
@@ -104,7 +104,7 @@ public sealed class InternalMiddlewareTests
         context.Response.Body = new MemoryStream();
         if (providedSecret is not null)
         {
-            context.Request.Headers[InternalApiAuthenticationMiddleware.SecretHeaderName] = providedSecret;
+            context.Request.Headers["X-Internal-SocialGraphService-Secret"] = providedSecret;
         }
 
         var called = false;

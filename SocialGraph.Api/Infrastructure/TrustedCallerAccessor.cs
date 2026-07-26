@@ -29,7 +29,7 @@ public sealed class TrustedCallerAccessor : ITrustedCallerAccessor
         var context = _httpContextAccessor.HttpContext ??
             throw Error("UNAUTHENTICATED", "Trusted caller context is unavailable.");
 
-        var authentication = InternalCallerAuthentication.Validate(_configuration, context.Request.Headers);
+        var authentication = InternalCallerAuthentication.ValidateGateway(_configuration, context.Request.Headers);
         if (authentication == InternalAuthenticationResult.NotConfigured)
         {
             throw Error(

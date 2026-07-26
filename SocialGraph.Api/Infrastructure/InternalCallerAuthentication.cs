@@ -34,16 +34,28 @@ internal static class InternalCallerAuthentication
         return configured ? InternalAuthenticationResult.Invalid : InternalAuthenticationResult.NotConfigured;
     }
 
+    public static InternalAuthenticationResult ValidateGateway(
+        IConfiguration configuration,
+        IHeaderDictionary headers)
+    {
+        var secret = configuration["Gateway:InternalSharedSecret"] ?? string.Empty;
+        if (Encoding.UTF8.GetByteCount(secret) < 32)
+        {
+            return InternalAuthenticationResult.NotConfigured;
+        }
+
+        return SecretsMatch(
+            secret,
+            headers[InternalApiAuthenticationMiddleware.SecretHeaderName].ToString())
+            ? InternalAuthenticationResult.Valid
+            : InternalAuthenticationResult.Invalid;
+    }
+
     private static IEnumerable<(string Header, string Secret)> GetCandidates(IConfiguration configuration)
     {
         yield return (
             ServiceSecretHeaderName,
             configuration["InternalServices:SocialGraph:SharedSecret"] ?? string.Empty);
-        yield return (
-            InternalApiAuthenticationMiddleware.SecretHeaderName,
-            configuration["Gateway:InternalSharedSecret"] ??
-            configuration["InternalServices:SharedSecret"] ??
-            string.Empty);
     }
 
     private static bool SecretsMatch(string expected, string actual)

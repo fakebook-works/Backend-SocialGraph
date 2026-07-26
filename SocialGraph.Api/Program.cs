@@ -13,6 +13,10 @@ using SocialGraph.Api.SubGraphQL;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddInternalRequestSigning(
+    builder.Configuration,
+    "InternalServices:SocialGraph:SharedSecret",
+    InternalCallerAuthentication.ServiceSecretHeaderName);
 builder.Services.AddHttpClient("external-services", client =>
 {
     var timeoutSeconds = Math.Clamp(
@@ -20,7 +24,7 @@ builder.Services.AddHttpClient("external-services", client =>
         1,
         60);
     client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
-});
+}).AddHttpMessageHandler<InternalRequestSigningHandler>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITrustedCallerAccessor, TrustedCallerAccessor>();
 builder.Services.Configure<SocialGraphCacheOptions>(options =>
@@ -97,6 +101,7 @@ if (AssociationContractMigrationCommand.IsRequested(args))
 }
 
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<InternalRequestSignatureMiddleware>();
 app.UseMiddleware<InternalApiAuthenticationMiddleware>();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet(
