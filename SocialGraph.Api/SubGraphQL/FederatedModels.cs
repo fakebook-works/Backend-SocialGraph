@@ -53,19 +53,17 @@ public sealed class FederatedUser
     public int Privacy { get; }
 
     [ReferenceResolver]
-    public static Task<FederatedUser?> ResolveReferenceAsync(
+    /// <remarks>
+    /// Goes through a DataLoader because Fusion calls this once per representation in
+    /// _entities. Resolving each one on its own meant two block checks and a profile read
+    /// per user — about a hundred and twenty queries to render an inbox of thirty people.
+    /// </remarks>
+    public static async Task<FederatedUser?> ResolveReferenceAsync(
         long id,
-        [Service] IUserGraphService userGraphService,
-        [Service] IAssociationService associationService,
-        [Service] ITrustedCallerAccessor trustedCaller,
+        FederatedUserByIdDataLoader userById,
         CancellationToken cancellationToken)
     {
-        return ResolveForViewerAsync(
-            trustedCaller.RequireUserId(),
-            id,
-            userGraphService,
-            associationService,
-            cancellationToken);
+        return await userById.LoadAsync(id, cancellationToken);
     }
 
     internal static async Task<FederatedUser?> ResolveForViewerAsync(

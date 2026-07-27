@@ -68,6 +68,7 @@ builder.Services.AddScoped<ISocialReadModelService, SocialReadModelService>();
 builder.Services.AddScoped<IMessagingPermissionService, MessagingPermissionService>();
 builder.Services.AddScoped<IMediaOwnershipGuard, UploadMediaOwnershipGuard>();
 builder.Services.AddDataLoader<HomePostByIdDataLoader>();
+builder.Services.AddDataLoader<FederatedUserByIdDataLoader>();
 builder.Services.AddHostedService<OutboxSchemaHostedService>();
 builder.Services.AddHostedService<IntegrationOutboxWorker>();
 builder.Services.AddHostedService<StoryCleanupBackgroundService>();

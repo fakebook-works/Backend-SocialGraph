@@ -207,31 +207,94 @@ public sealed class CandidateService : ICandidateService
         int maxVisiblePrivacy,
         CancellationToken cancellationToken)
     {
-        foreach (var authorId in authorIds.Where(id => !blocked.Contains(id)))
+        var eligibleAuthors = authorIds.Where(id => !blocked.Contains(id)).Distinct().ToArray();
+        if (eligibleAuthors.Length == 0)
         {
-            var rows = await (
-                from association in _dbContext.AssociationsTb.AsNoTracking()
-                join obj in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals obj.id
-                where association.id1 == authorId &&
-                    association.atype == GraphAssociationType.Authored &&
-                    obj.otype == objectType
-                orderby association.time descending
-                select new { obj.id, obj.data, AuthorId = authorId })
-                .Take(Math.Max(5, limit / 2))
-                .ToListAsync(cancellationToken);
+            return;
+        }
 
-            foreach (var row in rows)
+        var perAuthor = Math.Max(5, limit / 2);
+        var rows = await GetNewestPerAuthorAsync(
+            eligibleAuthors,
+            objectType,
+            perAuthor,
+            cancellationToken);
+
+        foreach (var row in rows)
+        {
+            var privacy = GraphJson.Int(GraphJson.ParseObject(row.Data), "privacy");
+            if (privacy < 0 || privacy > maxVisiblePrivacy)
             {
-                var privacy = GraphJson.Int(GraphJson.ParseObject(row.data), "privacy");
-                if (privacy < 0 || privacy > maxVisiblePrivacy)
-                {
-                    continue;
-                }
-
-                AddCandidate(candidates, row.id, row.AuthorId, row.data, source, blocked);
+                continue;
             }
+
+            AddCandidate(candidates, row.Id, row.AuthorId, row.Data, source, blocked);
         }
     }
+
+    private sealed record AuthoredCandidateRow(long Id, string Data, long AuthorId);
+
+    /// <summary>
+    /// The newest <paramref name="perAuthor"/> objects of the given type for each author.
+    /// </summary>
+    /// <remarks>
+    /// This ran one query per author, and the caller passes up to a few hundred of them for a
+    /// single feed request. A window function answers the whole set at once while keeping the
+    /// per-author limit exact, so one prolific author cannot crowd everyone else out — which a
+    /// single globally-ordered query with one overall limit would allow.
+    /// </remarks>
+    private async Task<IReadOnlyList<AuthoredCandidateRow>> GetNewestPerAuthorAsync(
+        long[] authorIds,
+        short objectType,
+        int perAuthor,
+        CancellationToken cancellationToken)
+    {
+        if (IsInMemory())
+        {
+            // The in-memory provider cannot translate a window function; tests run against
+            // fixtures small enough that the original per-author queries are fine.
+            var results = new List<AuthoredCandidateRow>();
+            foreach (var authorId in authorIds)
+            {
+                var authored = await (
+                    from association in _dbContext.AssociationsTb.AsNoTracking()
+                    join obj in _dbContext.ObjectsTb.AsNoTracking() on association.id2 equals obj.id
+                    where association.id1 == authorId &&
+                        association.atype == GraphAssociationType.Authored &&
+                        obj.otype == objectType
+                    orderby association.time descending
+                    select new AuthoredCandidateRow(obj.id, obj.data, authorId))
+                    .Take(perAuthor)
+                    .ToListAsync(cancellationToken);
+                results.AddRange(authored);
+            }
+
+            return results;
+        }
+
+        return await _dbContext.Database
+            .SqlQuery<AuthoredCandidateRow>($"""
+                SELECT "Id", "Data", "AuthorId"
+                FROM (
+                    SELECT o.id AS "Id",
+                           o.data AS "Data",
+                           a.id1 AS "AuthorId",
+                           ROW_NUMBER() OVER (PARTITION BY a.id1 ORDER BY a."time" DESC) AS rn
+                    FROM social_graph.associations a
+                    JOIN social_graph.objects o ON o.id = a.id2
+                    WHERE a.atype = {GraphAssociationType.Authored}
+                      AND a.id1 = ANY({authorIds})
+                      AND o.otype = {objectType}
+                ) ranked
+                WHERE rn <= {perAuthor}
+                """)
+            .ToListAsync(cancellationToken);
+    }
+
+    private bool IsInMemory() => string.Equals(
+        _dbContext.Database.ProviderName,
+        "Microsoft.EntityFrameworkCore.InMemory",
+        StringComparison.Ordinal);
 
     private async Task AddRecentCandidatesAsync(
         Dictionary<long, CandidateItemResult> candidates,
@@ -248,18 +311,54 @@ public sealed class CandidateService : ICandidateService
             .Take(limit * 3)
             .ToListAsync(cancellationToken);
 
-        foreach (var row in rows)
+        var eligible = rows
+            .Where(row => objectType is not (GraphObjectType.FeedPost or GraphObjectType.Reel) ||
+                          GraphJson.Int(GraphJson.ParseObject(row.data), "privacy") == 0)
+            .ToList();
+        if (eligible.Count == 0)
         {
-            var data = GraphJson.ParseObject(row.data);
-            if ((objectType == GraphObjectType.FeedPost || objectType == GraphObjectType.Reel) &&
-                GraphJson.Int(data, "privacy") != 0)
-            {
-                continue;
-            }
-
-            var authorId = await GetAuthorIdAsync(row.id, cancellationToken);
-            AddCandidate(candidates, row.id, authorId, row.data, source, blocked);
+            return;
         }
+
+        // One lookup for the whole page. This used to resolve the author inside the loop, so
+        // a single feed request issued up to limit * 3 sequential round trips — 1500 for a
+        // 500-item page — against a database on the far side of a tailnet.
+        var authorByObject = await GetAuthorIdsAsync(
+            eligible.Select(row => row.id).ToArray(),
+            cancellationToken);
+
+        foreach (var row in eligible)
+        {
+            AddCandidate(
+                candidates,
+                row.id,
+                authorByObject.TryGetValue(row.id, out var authorId) ? authorId : 0,
+                row.data,
+                source,
+                blocked);
+        }
+    }
+
+    /// <summary>Resolves the author of many objects in a single query.</summary>
+    private async Task<IReadOnlyDictionary<long, long>> GetAuthorIdsAsync(
+        IReadOnlyCollection<long> objectIds,
+        CancellationToken cancellationToken)
+    {
+        if (objectIds.Count == 0)
+        {
+            return new Dictionary<long, long>();
+        }
+
+        var ids = objectIds.Distinct().ToArray();
+        var links = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.atype == GraphAssociationType.AuthoredBy && ids.Contains(item.id1))
+            .Select(item => new { item.id1, item.id2 })
+            .ToListAsync(cancellationToken);
+
+        return links
+            .GroupBy(link => link.id1)
+            .ToDictionary(group => group.Key, group => group.First().id2);
     }
 
     private static void AddCandidate(
