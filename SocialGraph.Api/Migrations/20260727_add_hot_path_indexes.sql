@@ -28,8 +28,8 @@
 -- HOW TO APPLY
 --
 --   .\scripts\stop-local.ps1
---   .\scriptspply-migrations.ps1 -WritersStopped -File `
---       .\SocialGraphService\SocialGraph.Api\migrations60727_add_hot_path_indexes.sql
+--   .\scripts\apply-migrations.ps1 -WritersStopped -File `
+--       .\SocialGraphService\SocialGraph.Api\migrations\20260727_add_hot_path_indexes.sql
 --
 -- psql is not installed on every workstation, and when it is missing the command fails in
 -- a way that looks like it applied. The script above goes through Fakebook.Maintenance,
