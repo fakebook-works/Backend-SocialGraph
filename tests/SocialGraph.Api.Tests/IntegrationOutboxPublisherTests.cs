@@ -13,7 +13,7 @@ public sealed class IntegrationOutboxPublisherTests
     private const string EncryptionKey = "integration-outbox-test-key-at-least-32-bytes";
 
     [Fact]
-    public async Task CreateUser_QueuesIndependentServiceEventsAndEncryptsCredentials()
+    public async Task CreateUser_QueuesOnlyAuthGateAndEncryptsCredentials()
     {
         await using var dbContext = CreateDbContext();
         var store = new PostgresIntegrationOutboxStore(
@@ -33,13 +33,8 @@ public sealed class IntegrationOutboxPublisherTests
         await publisher.CreateUserAsync(123, "a@example.com", "plain-password", "Nguyen A", "2000-01-01", true);
 
         var messages = await dbContext.IntegrationOutboxTb.OrderBy(item => item.event_type).ToListAsync();
-        Assert.Equal(4, messages.Count);
-        Assert.Equal(4, messages.Select(item => item.idempotency_key).Distinct().Count());
-        Assert.Contains(messages, item => item.event_type == IntegrationEventType.SearchUpsert);
-        Assert.Contains(messages, item => item.event_type == IntegrationEventType.RecommendationUserUpsert);
-        Assert.Contains(messages, item => item.event_type == IntegrationEventType.MessagingUserCreate);
-
-        var auth = Assert.Single(messages, item => item.event_type == IntegrationEventType.UserCreate);
+        var auth = Assert.Single(messages);
+        Assert.Equal(IntegrationEventType.UserCreate, auth.event_type);
         Assert.DoesNotContain("plain-password", auth.payload, StringComparison.Ordinal);
         Assert.DoesNotContain("a@example.com", auth.payload, StringComparison.Ordinal);
         var decrypted = JsonSerializer.Deserialize<UserCreateEvent>(

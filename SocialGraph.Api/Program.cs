@@ -11,6 +11,7 @@ using SocialGraph.Api.Service;
 using SocialGraph.Api.SubGraphQL;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddFakebookServiceDefaults(builder.Configuration, "fakebook-social-graph");
 
 builder.Services.AddControllers();
 builder.Services.AddInternalRequestSigning(
@@ -52,6 +53,7 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
 
 builder.Services.AddScoped<IObjectService, ObjectService>();
 builder.Services.AddScoped<IAssociationService, AssociationService>();
+builder.Services.AddScoped<IBlockVisibilityService, BlockVisibilityService>();
 builder.Services.Configure<IntegrationOutboxOptions>(
     builder.Configuration.GetSection(IntegrationOutboxOptions.SectionName));
 builder.Services.AddSingleton<IOutboxPayloadProtector, OutboxPayloadProtector>();
@@ -60,6 +62,7 @@ builder.Services.AddScoped<IExternalServiceClient, IntegrationOutboxPublisher>()
 builder.Services.AddScoped<IExternalServiceTransport, ExternalServiceClient>();
 builder.Services.AddScoped<IIntegrationOutboxDispatcher, IntegrationOutboxDispatcher>();
 builder.Services.AddSingleton<IIntegrationOutboxMessageProcessor, IntegrationOutboxMessageProcessor>();
+builder.Services.AddScoped<IUserProvisioningCoordinator, UserProvisioningCoordinator>();
 builder.Services.AddScoped<IUserGraphService, UserGraphService>();
 builder.Services.AddScoped<IGroupGraphService, GroupGraphService>();
 builder.Services.AddScoped<IContentGraphService, ContentGraphService>();
@@ -109,17 +112,19 @@ app.UseMiddleware<InternalApiAuthenticationMiddleware>();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet(
     "/health/ready",
-    async (MyDbContext dbContext, IConnectionMultiplexer redis, CancellationToken cancellationToken) =>
+    async (MyDbContext dbContext, IConnectionMultiplexer redis, IInternalNonceStore nonceStore, CancellationToken cancellationToken) =>
     {
         var readiness = await HealthProbe.CheckReadinessAsync(dbContext, redis, cancellationToken);
+        var securityRedis = await nonceStore.IsAvailableAsync(cancellationToken);
         return Results.Json(
             new
             {
                 status = readiness.Ready ? "ready" : "not-ready",
                 postgres = readiness.PostgreSql,
-                redis = readiness.Redis
+                redis = readiness.Redis,
+                securityRedis
             },
-            statusCode: readiness.Ready
+            statusCode: readiness.Ready && securityRedis
                 ? StatusCodes.Status200OK
                 : StatusCodes.Status503ServiceUnavailable);
     });

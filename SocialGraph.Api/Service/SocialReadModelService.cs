@@ -11,17 +11,20 @@ public sealed class SocialReadModelService : ISocialReadModelService
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IContentGraphService _contentGraphService;
+    private readonly IBlockVisibilityService _blockVisibility;
 
     public SocialReadModelService(
         MyDbContext dbContext,
         IObjectService objectService,
         IAssociationService associationService,
-        IContentGraphService contentGraphService)
+        IContentGraphService contentGraphService,
+        IBlockVisibilityService? blockVisibility = null)
     {
         _dbContext = dbContext;
         _objectService = objectService;
         _associationService = associationService;
         _contentGraphService = contentGraphService;
+        _blockVisibility = blockVisibility ?? new BlockVisibilityService(dbContext);
     }
 
     public async Task<UserRelationshipStateResult?> GetUserRelationshipStateAsync(
@@ -119,6 +122,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         }
 
         return await GetAssociatedUsersAsync(
+            viewerId,
             groupId,
             admins ? GraphAssociationType.HaveAdmin : GraphAssociationType.HaveMember,
             cursor,
@@ -415,8 +419,15 @@ public sealed class SocialReadModelService : ISocialReadModelService
             .Distinct()
             .ToArray();
         var authorIds = authorByComment.Values.Distinct().ToArray();
+        var blockedUserIds = await _blockVisibility.GetBlockedUserIdsAsync(
+            viewerId,
+            authorIds.Concat(mentionedUserIds),
+            cancellationToken);
         var summaries = await GetUserSummariesAsync(
-            authorIds.Concat(mentionedUserIds).Distinct().ToArray(),
+            authorIds.Concat(mentionedUserIds)
+                .Where(userId => userId == viewerId || !blockedUserIds.Contains(userId))
+                .Distinct()
+                .ToArray(),
             cancellationToken);
         var authorViewerStates = await GetCommentAuthorViewerStatesAsync(viewerId, authorIds, cancellationToken);
         var result = new List<CommentThreadItemResult>(page.items.Count);
@@ -424,6 +435,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         {
             if (!comments.TryGetValue(edge.id2, out var comment) ||
                 !authorByComment.TryGetValue(edge.id2, out var authorId) ||
+                (authorId != viewerId && blockedUserIds.Contains(authorId)) ||
                 !summaries.TryGetValue(authorId, out var author))
             {
                 continue;
@@ -552,7 +564,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
     public async Task<UserSummaryPageResult> GetLikedUsersAsync(long viewerId, long targetId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {
         return await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken)
-            ? await GetAssociatedUsersAsync(targetId, GraphAssociationType.LikedBy, cursor, limit, cancellationToken)
+            ? await GetAssociatedUsersAsync(viewerId, targetId, GraphAssociationType.LikedBy, cursor, limit, cancellationToken)
             : EmptyUsers();
     }
 
@@ -565,20 +577,20 @@ public sealed class SocialReadModelService : ISocialReadModelService
             return EmptyUsers();
         }
 
-        return await GetAssociatedUsersAsync(storyId, GraphAssociationType.WatchedBy, cursor, limit, cancellationToken);
+        return await GetAssociatedUsersAsync(viewerId, storyId, GraphAssociationType.WatchedBy, cursor, limit, cancellationToken);
     }
 
     public async Task<UserSummaryPageResult> GetTaggedUsersAsync(long viewerId, long postId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {
         return await CanViewTargetCoreAsync(viewerId, postId, 0, cancellationToken)
-            ? await GetAssociatedUsersAsync(postId, GraphAssociationType.Tagged, cursor, limit, cancellationToken)
+            ? await GetAssociatedUsersAsync(viewerId, postId, GraphAssociationType.Tagged, cursor, limit, cancellationToken)
             : EmptyUsers();
     }
 
     public async Task<UserSummaryPageResult> GetMentionedUsersAsync(long viewerId, long sourceId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {
         return await CanViewTargetCoreAsync(viewerId, sourceId, 0, cancellationToken)
-            ? await GetAssociatedUsersAsync(sourceId, GraphAssociationType.Mentioned, cursor, limit, cancellationToken)
+            ? await GetAssociatedUsersAsync(viewerId, sourceId, GraphAssociationType.Mentioned, cursor, limit, cancellationToken)
             : EmptyUsers();
     }
 
@@ -1066,6 +1078,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
     }
 
     private async Task<UserSummaryPageResult> GetAssociatedUsersAsync(
+        long viewerId,
         long sourceId,
         short associationType,
         string? cursor,
@@ -1078,7 +1091,12 @@ public sealed class SocialReadModelService : ISocialReadModelService
             cursor,
             Math.Clamp(limit, 1, 50),
             cancellationToken);
-        var summaries = await GetUserSummariesAsync(page.items.Select(item => item.id2).ToArray(), cancellationToken);
+        var candidateIds = page.items.Select(item => item.id2).Distinct().ToArray();
+        var blockedUserIds = await _blockVisibility.GetBlockedUserIdsAsync(viewerId, candidateIds, cancellationToken);
+        var visibleIds = candidateIds
+            .Where(userId => userId == viewerId || !blockedUserIds.Contains(userId))
+            .ToArray();
+        var summaries = await GetUserSummariesAsync(visibleIds, cancellationToken);
         var items = page.items
             .Where(item => summaries.ContainsKey(item.id2))
             .Select(item => summaries[item.id2])

@@ -108,7 +108,14 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             case IntegrationEventType.SearchUpsert:
                 {
                     var payload = Deserialize<SearchUpsertEvent>(message.payload);
-                    await DispatchSearchUpsertAsync(payload, message.idempotency_key, cancellationToken);
+                    if (string.IsNullOrWhiteSpace(payload.Text))
+                    {
+                        await DispatchSearchDeleteAsync(payload.ObjectId, message.idempotency_key, cancellationToken);
+                    }
+                    else
+                    {
+                        await DispatchSearchUpsertAsync(payload, message.idempotency_key, cancellationToken);
+                    }
                     break;
                 }
             case IntegrationEventType.SearchDelete:
@@ -132,30 +139,31 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             case IntegrationEventType.RecommendationContentUpsert:
                 {
                     var payload = Deserialize<ContentEmbeddingEvent>(message.payload);
-                    await SendOutboxRequiredAsync(
-                        "RecommendationServiceUpsertPostEmbedding",
-                        HttpMethod.Put,
-                        GetInternalServiceUrl("Recommendation", $"internal/recommendation/posts/{FormatId(payload.ContentId)}/embedding"),
-                        new { content = payload.Content, mediaUrls = payload.MediaUrls },
-                        RecommendationSecretHeader,
-                        "InternalServices:Recommendation:SharedSecret",
-                        message.idempotency_key,
-                        cancellationToken);
+                    if (string.IsNullOrWhiteSpace(payload.Content) && payload.MediaUrls.Count == 0)
+                    {
+                        await DispatchContentEmbeddingDeleteAsync(payload.ContentId, message.idempotency_key, cancellationToken);
+                    }
+                    else
+                    {
+                        await SendOutboxRequiredAsync(
+                            "RecommendationServiceUpsertPostEmbedding",
+                            HttpMethod.Put,
+                            GetInternalServiceUrl("Recommendation", $"internal/recommendation/posts/{FormatId(payload.ContentId)}/embedding"),
+                            new { content = payload.Content, mediaUrls = payload.MediaUrls },
+                            RecommendationSecretHeader,
+                            "InternalServices:Recommendation:SharedSecret",
+                            message.idempotency_key,
+                            cancellationToken);
+                    }
                     break;
                 }
             case IntegrationEventType.RecommendationContentDelete:
                 {
                     var payload = Deserialize<ContentProjectionDeleteEvent>(message.payload);
-                    await SendOutboxRequiredAsync(
-                        "RecommendationServiceDeletePostEmbedding",
-                        HttpMethod.Delete,
-                        GetInternalServiceUrl("Recommendation", $"internal/recommendation/posts/{FormatId(payload.ContentId)}/embedding"),
-                        null,
-                        RecommendationSecretHeader,
-                        "InternalServices:Recommendation:SharedSecret",
+                    await DispatchContentEmbeddingDeleteAsync(
+                        payload.ContentId,
                         message.idempotency_key,
-                        cancellationToken,
-                        notFoundIsSuccess: true);
+                        cancellationToken);
                     break;
                 }
             case IntegrationEventType.RecommendationInteraction:
@@ -613,6 +621,23 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             idempotencyKey,
             cancellationToken,
             notFoundIsSuccess: !create);
+    }
+
+    private Task DispatchContentEmbeddingDeleteAsync(
+        long contentId,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        return SendOutboxRequiredAsync(
+            "RecommendationServiceDeletePostEmbedding",
+            HttpMethod.Delete,
+            GetInternalServiceUrl("Recommendation", $"internal/recommendation/posts/{FormatId(contentId)}/embedding"),
+            null,
+            RecommendationSecretHeader,
+            "InternalServices:Recommendation:SharedSecret",
+            idempotencyKey,
+            cancellationToken,
+            notFoundIsSuccess: true);
     }
 
     private Task DispatchMessagingUserAsync(

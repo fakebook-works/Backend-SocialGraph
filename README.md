@@ -152,7 +152,9 @@ Operational probes are public to the container/orchestrator: `GET /health/live` 
 
 ## Run
 
-Prerequisites: .NET SDK 8 and PostgreSQL. Redis is optional: startup uses `AbortOnConnectFail=false`, reads fall back to PostgreSQL, and cache writes are best-effort.
+Prerequisites: .NET SDK 10 and PostgreSQL. SocialGraph's application cache may fall back
+to PostgreSQL, but the separate shared security Redis connection is required and
+fail-closed when internal signature enforcement is enabled.
 
 ```powershell
 dotnet restore .\SocialGraphService.sln

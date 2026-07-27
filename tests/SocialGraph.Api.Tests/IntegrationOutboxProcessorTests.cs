@@ -24,6 +24,54 @@ public sealed class IntegrationOutboxProcessorTests
     }
 
     [Fact]
+    public async Task UserCreateSuccess_CompletesTheProvisioningSagaAtomically()
+    {
+        var store = new Mock<IIntegrationOutboxStore>(MockBehavior.Strict);
+        var dispatcher = new Mock<IIntegrationOutboxDispatcher>(MockBehavior.Strict);
+        var coordinator = new Mock<IUserProvisioningCoordinator>(MockBehavior.Strict);
+        var message = Message(attempts: 1, maxAttempts: 3, eventType: IntegrationEventType.UserCreate);
+        dispatcher.Setup(item => item.DispatchAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        coordinator.Setup(item => item.CompleteAsync(store.Object, message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+
+        await Processor().ProcessAsync(
+            store.Object,
+            dispatcher.Object,
+            message,
+            userProvisioning: coordinator.Object);
+
+        coordinator.VerifyAll();
+        dispatcher.VerifyAll();
+        store.Verify(item => item.MarkCompletedAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task UserCreatePermanentFailure_CompensatesInsteadOfLeavingAGhostProfile()
+    {
+        var store = new Mock<IIntegrationOutboxStore>(MockBehavior.Strict);
+        var dispatcher = new Mock<IIntegrationOutboxDispatcher>(MockBehavior.Strict);
+        var coordinator = new Mock<IUserProvisioningCoordinator>(MockBehavior.Strict);
+        var message = Message(attempts: 1, maxAttempts: 10, eventType: IntegrationEventType.UserCreate);
+        dispatcher.Setup(item => item.DispatchAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new PermanentOutboxException("duplicate email"));
+        coordinator.Setup(item => item.CompensateAsync(
+                store.Object,
+                message,
+                "duplicate email",
+                CancellationToken.None))
+            .Returns(Task.CompletedTask);
+
+        await Processor().ProcessAsync(
+            store.Object,
+            dispatcher.Object,
+            message,
+            userProvisioning: coordinator.Object);
+
+        coordinator.VerifyAll();
+        store.Verify(item => item.MarkFailedAsync(
+            It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<TimeSpan>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task TransientFailure_SchedulesExponentialRetry()
     {
         var store = new Mock<IIntegrationOutboxStore>(MockBehavior.Strict);
@@ -124,12 +172,16 @@ public sealed class IntegrationOutboxProcessorTests
             NullLogger<IntegrationOutboxMessageProcessor>.Instance);
     }
 
-    private static IntegrationOutboxMessage Message(int attempts, int maxAttempts)
+    private static IntegrationOutboxMessage Message(
+        int attempts,
+        int maxAttempts,
+        string eventType = "test.v1")
     {
         return new IntegrationOutboxMessage
         {
             id = Guid.NewGuid(),
-            event_type = "test.v1",
+            event_type = eventType,
+            aggregate_id = eventType == IntegrationEventType.UserCreate ? 123 : null,
             idempotency_key = "test-key",
             payload = "{}",
             created_at = DateTimeOffset.UtcNow,

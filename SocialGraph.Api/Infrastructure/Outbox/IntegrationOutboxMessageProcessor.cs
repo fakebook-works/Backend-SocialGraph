@@ -20,12 +20,20 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
         IIntegrationOutboxStore store,
         IIntegrationOutboxDispatcher dispatcher,
         IntegrationOutboxMessage message,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IUserProvisioningCoordinator? userProvisioning = null)
     {
         try
         {
             await dispatcher.DispatchAsync(message, cancellationToken);
-            await store.MarkCompletedAsync(message.id, cancellationToken);
+            if (message.event_type == IntegrationEventType.UserCreate && userProvisioning is not null)
+            {
+                await userProvisioning.CompleteAsync(store, message, cancellationToken);
+            }
+            else
+            {
+                await store.MarkCompletedAsync(message.id, cancellationToken);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -34,12 +42,7 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
         }
         catch (PermanentOutboxException exception)
         {
-            await store.MarkFailedAsync(
-                message.id,
-                exception.Message,
-                TimeSpan.Zero,
-                deadLetter: true,
-                CancellationToken.None);
+            await DeadLetterAsync(store, message, exception.Message, userProvisioning);
             _logger.LogError(
                 exception,
                 "Integration event {EventId} ({EventType}) moved to dead-letter after a permanent failure.",
@@ -50,12 +53,19 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
         {
             var deadLetter = message.attempts >= message.max_attempts;
             var delay = deadLetter ? TimeSpan.Zero : CalculateBackoff(message);
-            await store.MarkFailedAsync(
-                message.id,
-                exception.Message,
-                delay,
-                deadLetter,
-                CancellationToken.None);
+            if (deadLetter)
+            {
+                await DeadLetterAsync(store, message, exception.Message, userProvisioning);
+            }
+            else
+            {
+                await store.MarkFailedAsync(
+                    message.id,
+                    exception.Message,
+                    delay,
+                    deadLetter: false,
+                    CancellationToken.None);
+            }
             if (deadLetter)
             {
                 _logger.LogError(
@@ -76,6 +86,22 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
                     DateTimeOffset.UtcNow + delay);
             }
         }
+    }
+
+    private static Task DeadLetterAsync(
+        IIntegrationOutboxStore store,
+        IntegrationOutboxMessage message,
+        string error,
+        IUserProvisioningCoordinator? userProvisioning)
+    {
+        return message.event_type == IntegrationEventType.UserCreate && userProvisioning is not null
+            ? userProvisioning.CompensateAsync(store, message, error, CancellationToken.None)
+            : store.MarkFailedAsync(
+                message.id,
+                error,
+                TimeSpan.Zero,
+                deadLetter: true,
+                CancellationToken.None);
     }
 
     private TimeSpan CalculateBackoff(IntegrationOutboxMessage message)

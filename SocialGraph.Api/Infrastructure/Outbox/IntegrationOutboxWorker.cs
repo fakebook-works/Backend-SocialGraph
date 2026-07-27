@@ -30,7 +30,7 @@ public sealed class IntegrationOutboxWorker : BackgroundService
         var idlePollMilliseconds = pollMilliseconds;
         var lockTimeout = TimeSpan.FromMinutes(Math.Clamp(_options.LockTimeoutMinutes, 1, 120));
         var lastCleanup = DateTimeOffset.MinValue;
-        var schemaInitialized = false;
+        var schemaInitialized = !_options.EnsureSchemaOnStartup;
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -55,9 +55,10 @@ public sealed class IntegrationOutboxWorker : BackgroundService
                 {
                     var dispatcher = scope.ServiceProvider.GetRequiredService<IIntegrationOutboxDispatcher>();
                     var processor = scope.ServiceProvider.GetRequiredService<IIntegrationOutboxMessageProcessor>();
+                    var userProvisioning = scope.ServiceProvider.GetRequiredService<IUserProvisioningCoordinator>();
                     foreach (var message in messages)
                     {
-                        await processor.ProcessAsync(store, dispatcher, message, stoppingToken);
+                        await processor.ProcessAsync(store, dispatcher, message, stoppingToken, userProvisioning);
                         processed++;
                     }
                 }
@@ -75,7 +76,7 @@ public sealed class IntegrationOutboxWorker : BackgroundService
             }
             catch (Exception exception)
             {
-                schemaInitialized = false;
+                schemaInitialized = !_options.EnsureSchemaOnStartup;
                 _logger.LogError(exception, "Integration outbox worker iteration failed.");
             }
 

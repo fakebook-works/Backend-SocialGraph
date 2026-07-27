@@ -67,24 +67,6 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
             cancellationToken,
             protectPayload: true,
             operationId: operationId);
-        await EnqueueAsync(
-            IntegrationEventType.SearchUpsert,
-            userId,
-            new SearchUpsertEvent(userId, "user", name),
-            cancellationToken,
-            operationId: operationId);
-        await EnqueueAsync(
-            IntegrationEventType.RecommendationUserUpsert,
-            userId,
-            new UserEmbeddingEvent(userId),
-            cancellationToken,
-            operationId: operationId);
-        await EnqueueAsync(
-            IntegrationEventType.MessagingUserCreate,
-            userId,
-            new MessagingUserEvent(userId),
-            cancellationToken,
-            operationId: operationId);
     }
 
     public async Task DeleteUserAsync(long userId, CancellationToken cancellationToken = default)
@@ -151,6 +133,13 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
 
     public Task CreatePostEmbeddingAsync(long postId, string content, IReadOnlyList<string> mediaUrls, CancellationToken cancellationToken = default)
     {
+        if (string.IsNullOrWhiteSpace(content) && mediaUrls.Count == 0)
+        {
+            // Text-less shared/placeholder posts are valid graph content but have no
+            // recommendation representation. A delete also clears a stale embedding on edit.
+            return DeletePostEmbeddingAsync(postId, cancellationToken);
+        }
+
         return EnqueueAsync(
             IntegrationEventType.RecommendationContentUpsert,
             postId,
@@ -229,6 +218,13 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
         string text,
         CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            // Search rejects empty text. Treat it as "not indexable" and clear a previous
+            // projection instead of creating a permanent dead letter.
+            return DeleteSearchIndexAsync(objectId, cancellationToken);
+        }
+
         return EnqueueAsync(
             IntegrationEventType.SearchUpsert,
             objectId,

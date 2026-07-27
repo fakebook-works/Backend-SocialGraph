@@ -56,6 +56,38 @@ public sealed class ExternalServiceOutboxDispatchTests
     }
 
     [Fact]
+    public async Task EmptySearchProjection_IsDispatchedAsIdempotentDelete()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var client = CreateClient(handler);
+        var message = Message(
+            IntegrationEventType.SearchUpsert,
+            JsonSerializer.Serialize(new SearchUpsertEvent(123, "feedPost", "  ")));
+
+        await client.DispatchAsync(message);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Delete, request.Method);
+        Assert.Equal("/internal/search/indexes/123", request.Uri.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task EmptyRecommendationProjection_IsDispatchedAsIdempotentDelete()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+        var client = CreateClient(handler);
+        var message = Message(
+            IntegrationEventType.RecommendationContentUpsert,
+            JsonSerializer.Serialize(new ContentEmbeddingEvent(123, "", Array.Empty<string>())));
+
+        await client.DispatchAsync(message);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Delete, request.Method);
+        Assert.Equal("/internal/recommendation/posts/123/embedding", request.Uri.AbsolutePath);
+    }
+
+    [Fact]
     public async Task AuthUserCreate_DecryptsCredentialsAndDispatchesOnlyAuthEvent()
     {
         var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));

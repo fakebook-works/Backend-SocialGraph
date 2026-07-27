@@ -32,6 +32,7 @@ public sealed class IntegrationOutboxOptions
 {
     public const string SectionName = "IntegrationOutbox";
 
+    public bool EnsureSchemaOnStartup { get; set; } = true;
     public int PollMilliseconds { get; set; } = 500;
     public int MaxIdlePollMilliseconds { get; set; } = 2_000;
     public int BatchSize { get; set; } = 20;
@@ -112,6 +113,21 @@ public interface IIntegrationOutboxMessageProcessor
         IIntegrationOutboxStore store,
         IIntegrationOutboxDispatcher dispatcher,
         IntegrationOutboxMessage message,
+        CancellationToken cancellationToken = default,
+        IUserProvisioningCoordinator? userProvisioning = null);
+}
+
+public interface IUserProvisioningCoordinator
+{
+    Task CompleteAsync(
+        IIntegrationOutboxStore store,
+        IntegrationOutboxMessage message,
+        CancellationToken cancellationToken = default);
+
+    Task CompensateAsync(
+        IIntegrationOutboxStore store,
+        IntegrationOutboxMessage message,
+        string error,
         CancellationToken cancellationToken = default);
 }
 
