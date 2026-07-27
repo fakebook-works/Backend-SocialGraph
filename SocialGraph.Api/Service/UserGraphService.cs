@@ -123,33 +123,35 @@ public sealed class UserGraphService : IUserGraphService
         return await GetProfileAsync(input.Id, cancellationToken);
     }
 
+    /// <summary>Maximum authored items removed per transaction when deleting a user.</summary>
+    private const int DeleteContentBatchSize = 100;
+
     public async Task<bool> DeleteUserAsync(long userId, CancellationToken cancellationToken = default)
     {
+        var current = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        var currentData = current is null ? null : GraphJson.ParseObject(current.data);
+        var profileMedia = currentData is null
+            ? Array.Empty<string>()
+            : new[]
+            {
+                GraphJson.String(currentData, "avatar"),
+                GraphJson.String(currentData, "background")
+            }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+        // Authored content is removed in bounded batches, each committing on its own.
+        // Previously the whole deletion ran in a single transaction: one iteration per item
+        // the user had ever written, each cascading into association and orphan-media
+        // cleanup. For an account with thousands of posts that transaction ran for minutes
+        // while holding locks on objects and associations — the two tables every other
+        // request needs. Deleting the user object stays transactional below.
+        //
+        // Partial progress is now possible if a batch fails, which is safe: the pass is
+        // idempotent and re-running the mutation picks up whatever is left.
+        await DeleteAuthoredContentAsync(userId, cancellationToken);
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         try
         {
-            var current = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
-            var currentData = current is null ? null : GraphJson.ParseObject(current.data);
-            var profileMedia = currentData is null
-                ? Array.Empty<string>()
-                : new[]
-                {
-                    GraphJson.String(currentData, "avatar"),
-                    GraphJson.String(currentData, "background")
-                }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (_contentGraphService is not null && _dbContext is not null)
-            {
-                var authoredContentIds = await _dbContext.AssociationsTb
-                    .AsNoTracking()
-                    .Where(item => item.id1 == userId && item.atype == GraphAssociationType.Authored)
-                    .Select(item => item.id2)
-                    .Distinct()
-                    .ToArrayAsync(cancellationToken);
-                foreach (var contentId in authoredContentIds)
-                {
-                    await _contentGraphService.DeleteContentAsync(contentId, cancellationToken);
-                }
-            }
             await _associationService.DeleteObjectAssociationsAsync(userId, cancellationToken);
             var deleted = await _objectService.DeleteObjectAsync(userId, cancellationToken);
             if (deleted)
@@ -1043,6 +1045,70 @@ public sealed class UserGraphService : IUserGraphService
     {
         var raw = GraphJson.String(data, "verify");
         return DateTimeOffset.TryParse(raw, out var expiresAt) && expiresAt > DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Removes everything the user authored, committing a bounded batch at a time.
+    /// </summary>
+    /// <remarks>
+    /// Each batch re-reads the remaining authored ids rather than paging a snapshot, because
+    /// deleting content removes the very rows a cursor would sit on. Progress is guaranteed:
+    /// a batch that deletes nothing ends the loop, so a stubborn item cannot spin forever.
+    /// </remarks>
+    private async Task DeleteAuthoredContentAsync(long userId, CancellationToken cancellationToken)
+    {
+        if (_contentGraphService is null || _dbContext is null)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            var batch = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == userId && item.atype == GraphAssociationType.Authored)
+                .Select(item => item.id2)
+                .Distinct()
+                .Take(DeleteContentBatchSize)
+                .ToArrayAsync(cancellationToken);
+            if (batch.Length == 0)
+            {
+                return;
+            }
+
+            await using var batchTransaction = await BeginTransactionAsync(cancellationToken);
+            var removed = 0;
+            try
+            {
+                foreach (var contentId in batch)
+                {
+                    if (await _contentGraphService.DeleteContentAsync(contentId, cancellationToken))
+                    {
+                        removed++;
+                    }
+                }
+
+                if (batchTransaction is not null)
+                {
+                    await batchTransaction.CommitAsync(cancellationToken);
+                }
+            }
+            catch
+            {
+                if (batchTransaction is not null)
+                {
+                    await batchTransaction.RollbackAsync(CancellationToken.None);
+                }
+
+                throw;
+            }
+
+            if (removed == 0)
+            {
+                // Nothing in this batch could be deleted; stop rather than loop on it.
+                return;
+            }
+        }
     }
 
     private async Task<IDbContextTransaction?> BeginTransactionAsync(CancellationToken cancellationToken)
