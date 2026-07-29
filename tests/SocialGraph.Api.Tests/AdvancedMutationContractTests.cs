@@ -9,6 +9,40 @@ using SocialGraph.Api.SubGraphQL;
 public sealed class AdvancedMutationContractTests
 {
     [Fact]
+    public async Task ChangeUserAvatar_UsesTrustedOwnerAndForwardsExactSourcePair()
+    {
+        const long userId = 100;
+        const long contentId = 9_000_000_000_000_121;
+        const long mediaId = 9_000_000_000_000_122;
+        var users = new Mock<IUserGraphService>(MockBehavior.Strict);
+        users.Setup(item => item.ChangeUserAvatarAsync(
+                userId,
+                "/media/cropped.jpg",
+                null,
+                0,
+                contentId,
+                mediaId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync((UserProfileResult?)null);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId(userId)).Returns(userId);
+
+        await new Mutation().ChangeUserAvatarAsync(
+            userId,
+            "/media/cropped.jpg",
+            null,
+            0,
+            contentId,
+            mediaId,
+            users.Object,
+            trusted.Object,
+            CancellationToken.None);
+
+        users.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
     public async Task RemoveUserAvatar_UsesTrustedOwnerAndEmptyUrlSemantics()
     {
         const long userId = 100;

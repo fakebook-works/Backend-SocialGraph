@@ -87,7 +87,14 @@ public sealed record DeleteStoryPayload(bool Success, string? Message = null);
 
 public sealed record StoryCleanupPayload(int Deleted);
 
-public sealed record CreateReelInput(long AuthorId, string Content, MediaInput? Media, int Privacy = 0);
+public sealed record CreateReelInput(
+    long AuthorId,
+    string Content,
+    MediaInput? Media,
+    int Privacy = 0,
+    double? AspectRatio = null,
+    double? FocalPointX = null,
+    double? FocalPointY = null);
 
 public sealed record SharePostInput(long AuthorId, long SourceId, string Content, int Privacy);
 
@@ -117,6 +124,12 @@ public sealed record UserProfileResult(
     long FollowerCount,
     long FollowingCount);
 
+public sealed record ProfileContactResult(string Email);
+
+public sealed record ProfileAvatarSourceResult(
+    [property: GraphQLType(typeof(NonNullType<IdType>))] long ContentId,
+    [property: GraphQLType(typeof(NonNullType<IdType>))] long MediaId);
+
 public sealed record FriendSuggestionResult(
     UserProfileResult Profile,
     int MutualFriendCount,
@@ -144,7 +157,10 @@ public sealed record ContentResult(
     int Privacy,
     string Create,
     long AuthorId,
-    IReadOnlyList<MediaResult> Media);
+    IReadOnlyList<MediaResult> Media,
+    double? AspectRatio = null,
+    double? FocalPointX = null,
+    double? FocalPointY = null);
 
 [UnionType("HomePost")]
 public interface IHomePostResult;
@@ -169,6 +185,9 @@ public sealed record ReelDetailResult(
     string Content,
     int Privacy,
     string Create,
+    double? AspectRatio,
+    double? FocalPointX,
+    double? FocalPointY,
     PostAuthorResult Author,
     IReadOnlyList<MediaResult> Media,
     IReadOnlyList<MentionUserResult>? Mentions = null) : IHomePostResult;

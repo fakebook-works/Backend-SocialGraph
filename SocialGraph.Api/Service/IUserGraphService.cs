@@ -14,7 +14,10 @@ public interface IUserGraphService
     Task<IReadOnlyList<UserProfileResult>> GetFriendRelationProfilesAsync(long userId, short associationType, int limit, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetFriendProfilesWithMutualCountsAsync(long userId, int limit, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileConnectionsAsync(long userId, short associationType, int limit, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileFriendsForViewerAsync(long targetUserId, long viewerId, int limit, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FriendSuggestionResult>> GetFriendSuggestionsAsync(long userId, int limit, CancellationToken cancellationToken = default);
+    Task<ProfileAvatarSourceResult?> GetAvatarSourceAsync(long userId, CancellationToken cancellationToken = default);
+    Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl, int privacy, long? sourceContentId, long? sourceMediaId, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl = null, int privacy = 0, CancellationToken cancellationToken = default);
     Task<UserProfileResult?> ChangeUserAvatarAsync(long userId, string avatarUrl, string? originalUrl, CancellationToken cancellationToken);
     Task<UserProfileResult?> ChangeUserBackgroundAsync(long userId, string backgroundUrl, string? originalUrl = null, int privacy = 0, CancellationToken cancellationToken = default);

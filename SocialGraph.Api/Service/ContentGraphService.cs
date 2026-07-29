@@ -11,6 +11,9 @@ using SocialGraph.Api.Database;
 public sealed class ContentGraphService : IContentGraphService
 {
     public const int MaxPostDetailIds = 100;
+    public const double MinReelAspectRatio = 9d / 16d;
+    public const double MaxReelAspectRatio = 16d / 9d;
+    private const double ReelPresentationEpsilon = 0.000001d;
 
     /// <summary>Matches the recursion bound used by the visibility checks in SocialReadModelService.</summary>
     private const int MaxCommentChainDepth = 20;
@@ -652,6 +655,9 @@ public sealed class ContentGraphService : IContentGraphService
                     content,
                     privacy,
                     create,
+                    GraphJson.NullableDouble(postData, "aspectRatio"),
+                    GraphJson.NullableDouble(postData, "focalPointX"),
+                    GraphJson.NullableDouble(postData, "focalPointY"),
                     postAuthor,
                     media,
                     mentions));
@@ -1080,9 +1086,40 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentOutOfRangeException(nameof(input), "Reel privacy must be between 0 and 3.");
         }
 
+        if (input.AspectRatio is { } aspectRatio &&
+            (!double.IsFinite(aspectRatio) ||
+             aspectRatio < MinReelAspectRatio - ReelPresentationEpsilon ||
+             aspectRatio > MaxReelAspectRatio + ReelPresentationEpsilon))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(input),
+                $"Reel aspect ratio must be between {MinReelAspectRatio} and {MaxReelAspectRatio}.");
+        }
+
+        ValidateReelFocalPoint(input.FocalPointX, nameof(input.FocalPointX));
+        ValidateReelFocalPoint(input.FocalPointY, nameof(input.FocalPointY));
+
         await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         await EnsureReferencesAllowedAsync(input.AuthorId, MentionUserIds(input.Content), cancellationToken);
-        var reel = await _objectService.AddObjectAsync(GraphObjectType.Reel, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
+        double? normalizedAspectRatio = input.AspectRatio is { } value
+            ? Math.Clamp(Math.Round(value, 6), MinReelAspectRatio, MaxReelAspectRatio)
+            : null;
+        var hasFocalPoint = input.FocalPointX.HasValue || input.FocalPointY.HasValue;
+        double? normalizedFocalPointX = hasFocalPoint
+            ? Math.Round(input.FocalPointX ?? 0.5d, 6)
+            : null;
+        double? normalizedFocalPointY = hasFocalPoint
+            ? Math.Round(input.FocalPointY ?? 0.5d, 6)
+            : null;
+        var reel = await _objectService.AddObjectAsync(
+            GraphObjectType.Reel,
+            GraphJson.ReelJson(
+                input.Content,
+                input.Privacy,
+                normalizedAspectRatio,
+                normalizedFocalPointX,
+                normalizedFocalPointY),
+            cancellationToken);
         var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
         foreach (var userId in MentionUserIds(input.Content))
@@ -1367,7 +1404,18 @@ public sealed class ContentGraphService : IContentGraphService
             privacy,
             GraphJson.String(data, "create"),
             authorId,
-            media);
+            media,
+            item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "aspectRatio") : null,
+            item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "focalPointX") : null,
+            item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "focalPointY") : null);
+    }
+
+    private static void ValidateReelFocalPoint(double? focalPoint, string parameterName)
+    {
+        if (focalPoint is { } value && (!double.IsFinite(value) || value is < 0d or > 1d))
+        {
+            throw new ArgumentOutOfRangeException(parameterName, "Reel focal points must be between 0 and 1.");
+        }
     }
 
     private async Task<int> GetContentPrivacyAsync(

@@ -84,6 +84,28 @@ public class Query
         return userGraphService.GetProfileConnectionsAsync(userId, associationType, limit, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileFriendsAsync(
+        long targetUserId,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] IBlockVisibilityService blockVisibility,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        var viewerId = trustedCaller.RequireUserId();
+        if (await blockVisibility.IsBlockedEitherDirectionAsync(viewerId, targetUserId, cancellationToken) ||
+            await userGraphService.GetProfileAsync(targetUserId, cancellationToken) is null)
+        {
+            return Array.Empty<FriendProfileWithMutualCountResult>();
+        }
+
+        return await userGraphService.GetProfileFriendsForViewerAsync(
+            targetUserId,
+            viewerId,
+            limit,
+            cancellationToken);
+    }
+
     public async Task<IReadOnlyList<GroupResult>> GetGroupsAsync(
         IReadOnlyList<long> groupIds,
         [Service] IGroupGraphService groupGraphService,
@@ -137,7 +159,7 @@ public class Query
         foreach (var edge in authored.items)
         {
             processed++;
-            if (detailsById.TryGetValue(edge.id2, out var detail) && detail is not ReelDetailResult)
+            if (detailsById.TryGetValue(edge.id2, out var detail))
             {
                 items.Add(detail);
                 if (items.Count == take)
@@ -315,6 +337,56 @@ public class Query
         }
 
         return await userGraphService.GetProfileAsync(userId, cancellationToken);
+    }
+
+    public async Task<ProfileAvatarSourceResult?> GetProfileAvatarSourceAsync(
+        long userId,
+        [Service] IUserGraphService userGraphService,
+        [Service] IContentGraphService contentGraphService,
+        [Service] IBlockVisibilityService blockVisibility,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        var viewerId = trustedCaller.RequireUserId();
+        if (await blockVisibility.IsBlockedEitherDirectionAsync(viewerId, userId, cancellationToken))
+        {
+            return null;
+        }
+
+        var source = await userGraphService.GetAvatarSourceAsync(userId, cancellationToken);
+        if (source is null)
+        {
+            return null;
+        }
+
+        // Stored provenance is only a pointer. Rehydrate through the normal visibility kernel
+        // and verify the owner plus Contained media relation again on every read.
+        var visible = await contentGraphService.GetPostDetailAsync(viewerId, source.ContentId, cancellationToken);
+        return visible is FeedPostDetailResult post &&
+               post.Id == source.ContentId &&
+               post.Author.Id == userId &&
+               post.Media.Any(media => media.Id == source.MediaId && media.Type == GraphMediaType.Photo)
+            ? source
+            : null;
+    }
+
+    public async Task<ProfileContactResult?> GetProfileContactAsync(
+        long userId,
+        [Service] IUserGraphService userGraphService,
+        [Service] IAuthenticationContactClient authenticationContactClient,
+        [Service] IBlockVisibilityService blockVisibility,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        var viewerId = trustedCaller.RequireUserId();
+        if (await blockVisibility.IsBlockedEitherDirectionAsync(viewerId, userId, cancellationToken) ||
+            await userGraphService.GetProfileAsync(userId, cancellationToken) is null)
+        {
+            return null;
+        }
+
+        var email = await authenticationContactClient.GetEmailAsync(userId, cancellationToken);
+        return string.IsNullOrWhiteSpace(email) ? null : new ProfileContactResult(email);
     }
 
     public Task<GroupResult?> GetGroupAsync(

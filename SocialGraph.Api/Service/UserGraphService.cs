@@ -1,5 +1,7 @@
 namespace SocialGraph.Api.Service;
 
+using System.Globalization;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using SocialGraph.Api.Contracts;
@@ -7,6 +9,8 @@ using SocialGraph.Api.Database;
 
 public sealed class UserGraphService : IUserGraphService
 {
+    private const string AvatarPhotoActivityContent = "đã cập nhật ảnh đại diện";
+    private const string CoverPhotoActivityContent = "tôi đã cập nhật ảnh bìa của mình";
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
@@ -80,8 +84,9 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default)
     {
+        await EnsureMediaOwnedAsync(input.Id, new[] { input.Avatar, input.Background }, cancellationToken);
         await using var transaction = await BeginTransactionAsync(cancellationToken);
-        var patch = GraphJson.PatchJson(
+        var patchData = GraphJson.ParseObject(GraphJson.PatchJson(
             ("avatar", input.Avatar),
             ("background", input.Background),
             ("name", input.Name),
@@ -89,7 +94,14 @@ public sealed class UserGraphService : IUserGraphService
             ("gender", input.Gender is null ? null : input.Gender.Value ? 1 : 0),
             ("birthdate", input.Birthdate),
             ("location", input.Location),
-            ("privacy", input.Privacy));
+            ("privacy", input.Privacy)));
+        if (input.Avatar is not null)
+        {
+            // The generic profile mutation cannot assert which post/media produced a URL.
+            // Clear stale provenance instead of letting it point at a different avatar.
+            patchData["avatarSource"] = null;
+        }
+        var patch = patchData.ToJsonString();
 
         try
         {
@@ -183,6 +195,21 @@ public sealed class UserGraphService : IUserGraphService
         }
 
         return await GetProfileFromServicesAsync(userId, cancellationToken);
+    }
+
+    public async Task<ProfileAvatarSourceResult?> GetAvatarSourceAsync(
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (userId <= 0)
+        {
+            return null;
+        }
+
+        var user = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+        return user is null || user.otype != GraphObjectType.User
+            ? null
+            : ReadAvatarSource(GraphJson.ParseObject(user.data));
     }
 
     public async Task<IReadOnlyList<UserProfileResult>> GetProfilesForViewerAsync(
@@ -440,6 +467,72 @@ public sealed class UserGraphService : IUserGraphService
         var mutualCounts = associationType == GraphAssociationType.Friend
             ? await GetMutualFriendCountsAsync(userId, selected.Select(profile => profile.Id).ToArray(), cancellationToken)
             : new Dictionary<long, int>();
+        return selected
+            .Select(profile => new FriendProfileWithMutualCountResult(profile, mutualCounts.GetValueOrDefault(profile.Id)))
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<FriendProfileWithMutualCountResult>> GetProfileFriendsForViewerAsync(
+        long targetUserId,
+        long viewerId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (targetUserId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetUserId));
+        }
+        if (viewerId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(viewerId));
+        }
+
+        var take = Math.Clamp(limit, 1, 200);
+        IReadOnlyList<long> relationIds;
+        if (_dbContext is not null)
+        {
+            relationIds = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => item.id1 == targetUserId && item.atype == GraphAssociationType.Friend)
+                .OrderByDescending(item => item.time)
+                .ThenByDescending(item => item.id2)
+                .Select(item => item.id2)
+                .Take(1000)
+                .ToArrayAsync(cancellationToken);
+        }
+        else
+        {
+            var ids = new List<long>();
+            string? cursor = null;
+            do
+            {
+                var page = await _associationService.RetrieveAssociationAsync(
+                    targetUserId,
+                    GraphAssociationType.Friend,
+                    cursor,
+                    100,
+                    cancellationToken);
+                ids.AddRange(page.items.Select(item => item.id2));
+                cursor = page.nextCursor;
+            }
+            while (cursor is not null && ids.Count < 1000);
+            relationIds = ids;
+        }
+
+        if (relationIds.Count == 0)
+        {
+            return Array.Empty<FriendProfileWithMutualCountResult>();
+        }
+
+        var visibleProfiles = await GetProfilesForViewerAsync(
+            viewerId,
+            relationIds.Where(id => id > 0 && id != targetUserId).Distinct().ToArray(),
+            cancellationToken);
+        var selected = visibleProfiles.Take(take).ToArray();
+        var mutualCounts = await GetMutualFriendCountsAsync(
+            viewerId,
+            selected.Select(profile => profile.Id).ToArray(),
+            cancellationToken);
         return selected
             .Select(profile => new FriendProfileWithMutualCountResult(profile, mutualCounts.GetValueOrDefault(profile.Id)))
             .ToArray();
@@ -737,8 +830,10 @@ public sealed class UserGraphService : IUserGraphService
     public async Task<UserProfileResult?> ChangeUserAvatarAsync(
         long userId,
         string avatarUrl,
-        string? originalUrl = null,
-        int privacy = 0,
+        string? originalUrl,
+        int privacy,
+        long? sourceContentId,
+        long? sourceMediaId,
         CancellationToken cancellationToken = default)
     {
         var currentUser = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
@@ -752,19 +847,73 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentOutOfRangeException(nameof(privacy), "Feed privacy must be between 0 and 3.");
         }
 
+        var hasContentSource = sourceContentId.HasValue;
+        var hasMediaSource = sourceMediaId.HasValue;
+        if (hasContentSource != hasMediaSource ||
+            hasContentSource && (sourceContentId <= 0 || sourceMediaId <= 0) ||
+            hasContentSource && string.IsNullOrWhiteSpace(avatarUrl) ||
+            hasContentSource && !string.IsNullOrWhiteSpace(originalUrl))
+        {
+            throw new ArgumentException("Avatar source is invalid.");
+        }
+
         await EnsureMediaOwnedAsync(userId, new[] { avatarUrl, originalUrl }, cancellationToken);
 
-        await using var transaction = await BeginTransactionAsync(cancellationToken);
-        var currentData = GraphJson.ParseObject(currentUser.data);
-        var previousUrl = GraphJson.String(currentData, "avatar");
-        var updated = await _objectService.UpdateObjectAsync(
-            userId,
-            GraphObjectType.User,
-            GraphJson.PatchJson(("avatar", avatarUrl)),
-            cancellationToken);
-
-        if (updated is not null)
+        ProfileAvatarSourceResult? avatarSource = null;
+        if (hasContentSource)
         {
+            avatarSource = await ValidateAvatarSourceAsync(
+                userId,
+                sourceContentId!.Value,
+                sourceMediaId!.Value,
+                cancellationToken);
+        }
+
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        long? createdActivityId = null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(originalUrl))
+            {
+                if (_contentGraphService is null)
+                {
+                    throw new InvalidOperationException("Avatar activity service is unavailable.");
+                }
+
+                var activity = await _contentGraphService.CreateFeedPostAsync(
+                    new CreateFeedPostInput(
+                        userId,
+                        AvatarPhotoActivityContent,
+                        0,
+                        new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
+                    cancellationToken);
+                createdActivityId = activity.Id;
+                var originalMedia = activity.Media.SingleOrDefault(media =>
+                    media.Type == GraphMediaType.Photo &&
+                    string.Equals(media.Url, originalUrl, StringComparison.OrdinalIgnoreCase));
+                if (activity.Type != GraphObjectType.FeedPost ||
+                    activity.AuthorId != userId ||
+                    originalMedia is null)
+                {
+                    throw new InvalidOperationException("Avatar activity could not be created safely.");
+                }
+
+                avatarSource = new ProfileAvatarSourceResult(activity.Id, originalMedia.Id);
+            }
+
+            var currentData = GraphJson.ParseObject(currentUser.data);
+            var previousUrl = GraphJson.String(currentData, "avatar");
+            var updated = await _objectService.UpdateObjectAsync(
+                userId,
+                GraphObjectType.User,
+                AvatarPatchJson(avatarUrl, avatarSource),
+                cancellationToken);
+
+            if (updated is null)
+            {
+                throw new InvalidOperationException("Profile avatar could not be updated safely.");
+            }
+
             if (!string.IsNullOrWhiteSpace(avatarUrl))
             {
                 await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, userId, cancellationToken);
@@ -774,33 +923,122 @@ public sealed class UserGraphService : IUserGraphService
             {
                 await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, userId, cancellationToken);
             }
-        }
 
-        if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            return await GetProfileAsync(userId, cancellationToken);
+        }
+        catch
         {
-            await _contentGraphService.CreateFeedPostAsync(
-                new CreateFeedPostInput(
-                    userId,
-                    "đã cập nhật ảnh đại diện.",
-                    privacy,
-                    new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
-                cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                await _objectService.InvalidateObjectCacheAsync(userId);
+                if (createdActivityId is { } activityId)
+                {
+                    await _objectService.InvalidateObjectCacheAsync(activityId);
+                }
+            }
+            throw;
         }
-
-        if (transaction is not null)
-        {
-            await transaction.CommitAsync(cancellationToken);
-        }
-
-        return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
     }
+
+    public Task<UserProfileResult?> ChangeUserAvatarAsync(
+        long userId,
+        string avatarUrl,
+        string? originalUrl = null,
+        int privacy = 0,
+        CancellationToken cancellationToken = default) =>
+        ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, privacy, null, null, cancellationToken);
 
     public Task<UserProfileResult?> ChangeUserAvatarAsync(
         long userId,
         string avatarUrl,
         string? originalUrl,
         CancellationToken cancellationToken) =>
-        ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, 0, cancellationToken);
+        ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, 0, null, null, cancellationToken);
+
+    private async Task<ProfileAvatarSourceResult> ValidateAvatarSourceAsync(
+        long userId,
+        long contentId,
+        long mediaId,
+        CancellationToken cancellationToken)
+    {
+        if (_contentGraphService is null)
+        {
+            throw new InvalidOperationException("Avatar source validation is unavailable.");
+        }
+
+        var isAuthor = await _contentGraphService.IsAuthorAsync(userId, contentId, cancellationToken);
+        var content = isAuthor
+            ? await _contentGraphService.GetContentAsync(contentId, cancellationToken)
+            : null;
+        var media = content?.Media.SingleOrDefault(item => item.Id == mediaId);
+        if (content is null ||
+            content.Type != GraphObjectType.FeedPost ||
+            content.AuthorId != userId ||
+            !isAuthor ||
+            media is null ||
+            media.Type != GraphMediaType.Photo)
+        {
+            // Keep one public failure shape so probing arbitrary IDs reveals no ownership detail.
+            throw new ArgumentException("Avatar source is invalid.");
+        }
+
+        return new ProfileAvatarSourceResult(contentId, mediaId);
+    }
+
+    private static string AvatarPatchJson(string avatarUrl, ProfileAvatarSourceResult? source)
+    {
+        var patch = new JsonObject
+        {
+            ["avatar"] = avatarUrl,
+            ["avatarSource"] = source is null
+                ? null
+                : new JsonObject
+                {
+                    ["contentId"] = source.ContentId.ToString(CultureInfo.InvariantCulture),
+                    ["mediaId"] = source.MediaId.ToString(CultureInfo.InvariantCulture)
+                }
+        };
+        return patch.ToJsonString();
+    }
+
+    private static ProfileAvatarSourceResult? ReadAvatarSource(JsonObject data)
+    {
+        if (!data.TryGetPropertyValue("avatarSource", out var value) || value is not JsonObject source ||
+            !TryReadAvatarSourceId(source, "contentId", out var contentId) ||
+            !TryReadAvatarSourceId(source, "mediaId", out var mediaId))
+        {
+            return null;
+        }
+
+        return new ProfileAvatarSourceResult(contentId, mediaId);
+    }
+
+    private static bool TryReadAvatarSourceId(JsonObject source, string name, out long id)
+    {
+        id = 0;
+        if (!source.TryGetPropertyValue(name, out var value) || value is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var text = value.GetValue<string?>();
+            return text is { Length: > 0 and <= 19 } &&
+                long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out id) &&
+                id > 0;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     public async Task<UserProfileResult?> SetUserVerifyAsync(
         long userId,
@@ -864,8 +1102,8 @@ public sealed class UserGraphService : IUserGraphService
             await _contentGraphService.CreateFeedPostAsync(
                 new CreateFeedPostInput(
                     userId,
-                    "đã cập nhật ảnh bìa.",
-                    privacy,
+                    CoverPhotoActivityContent,
+                    0,
                     new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
                 cancellationToken);
         }

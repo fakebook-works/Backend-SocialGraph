@@ -29,6 +29,9 @@ public sealed class RecommendationHydrationTests
                         $"reel-{id}",
                         0,
                         "2026-07-12T00:00:00Z",
+                        9d / 16d,
+                        0.5d,
+                        0.5d,
                         new PostAuthorResult(7, "Author", "", false, false),
                         Array.Empty<MediaResult>())
                     : new FeedPostDetailResult(
@@ -77,7 +80,7 @@ public sealed class RecommendationHydrationTests
               second: recommendationItem(postId: "1002") {
                 postId
                 post {
-                  ... on ReelDetail { id content }
+                  ... on ReelDetail { id content aspectRatio focalPointX focalPointY }
                 }
               }
             }

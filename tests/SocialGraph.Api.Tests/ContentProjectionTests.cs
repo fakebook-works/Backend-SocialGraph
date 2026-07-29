@@ -64,18 +64,32 @@ public sealed class ContentProjectionTests
             .ReturnsAsync(new SocialGraphObjectResult(
                 ReelId,
                 GraphObjectType.Reel,
-                PostJson("canonical reel", 2)));
+                ReelJson("canonical reel", 2, 16d / 9d, 0.2d, 0.8d)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
         associations.Setup(item => item.AddAssociationAsync(AuthorId, GraphAssociationType.Authored, ReelId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
         var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
 
-        var reel = await service.CreateReelAsync(new CreateReelInput(AuthorId, "canonical reel", null, Privacy: 2));
+        var reel = await service.CreateReelAsync(new CreateReelInput(
+            AuthorId,
+            "canonical reel",
+            null,
+            Privacy: 2,
+            AspectRatio: 16d / 9d,
+            FocalPointX: 0.2d,
+            FocalPointY: 0.8d));
 
         Assert.Equal(ReelId, reel.Id);
         Assert.Equal(2, reel.Privacy);
+        Assert.NotNull(reel.AspectRatio);
+        Assert.Equal(16d / 9d, reel.AspectRatio.GetValueOrDefault(), precision: 6);
+        Assert.Equal(0.2d, reel.FocalPointX);
+        Assert.Equal(0.8d, reel.FocalPointY);
         Assert.Equal(2, JsonNode.Parse(storedData!)!["privacy"]!.GetValue<int>());
+        Assert.Equal(16d / 9d, JsonNode.Parse(storedData!)!["aspectRatio"]!.GetValue<double>(), precision: 6);
+        Assert.Equal(0.2d, JsonNode.Parse(storedData!)!["focalPointX"]!.GetValue<double>());
+        Assert.Equal(0.8d, JsonNode.Parse(storedData!)!["focalPointY"]!.GetValue<double>());
         external.Verify(item => item.CreateSearchIndexAsync(ReelId, "reel", "canonical reel", It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.CreatePostEmbeddingAsync(ReelId, "canonical reel", It.Is<IReadOnlyList<string>>(urls => urls.Count == 0), It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -153,6 +167,57 @@ public sealed class ContentProjectionTests
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => service.CreateReelAsync(new CreateReelInput(AuthorId, "reel", null, privacy)));
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(0.5)]
+    [InlineData(1.8)]
+    public async Task CreateReel_RejectsAspectRatioOutsideSupportedPresentationRange(double aspectRatio)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var service = new ContentGraphService(
+            context,
+            objects.Object,
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.CreateReelAsync(
+            new CreateReelInput(AuthorId, "reel", null, Privacy: 0, AspectRatio: aspectRatio)));
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(-0.01, 0.5)]
+    [InlineData(1.01, 0.5)]
+    [InlineData(0.5, -0.01)]
+    [InlineData(0.5, 1.01)]
+    public async Task CreateReel_RejectsFocalPointOutsideNormalizedRange(double focalPointX, double focalPointY)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var service = new ContentGraphService(
+            context,
+            objects.Object,
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.CreateReelAsync(
+            new CreateReelInput(
+                AuthorId,
+                "reel",
+                null,
+                Privacy: 0,
+                AspectRatio: 1d,
+                FocalPointX: focalPointX,
+                FocalPointY: focalPointY)));
         objects.Verify(item => item.AddObjectAsync(
             It.IsAny<short>(),
             It.IsAny<string>(),
@@ -458,6 +523,16 @@ public sealed class ContentProjectionTests
         ["content"] = content,
         ["privacy"] = privacy,
         ["create"] = DateTimeOffset.UtcNow.ToString("O")
+    }.ToJsonString();
+
+    private static string ReelJson(string content, int privacy, double aspectRatio, double focalPointX, double focalPointY) => new JsonObject
+    {
+        ["content"] = content,
+        ["privacy"] = privacy,
+        ["create"] = DateTimeOffset.UtcNow.ToString("O"),
+        ["aspectRatio"] = aspectRatio,
+        ["focalPointX"] = focalPointX,
+        ["focalPointY"] = focalPointY
     }.ToJsonString();
 
     private static string MediaJson(int type, string url) => new JsonObject

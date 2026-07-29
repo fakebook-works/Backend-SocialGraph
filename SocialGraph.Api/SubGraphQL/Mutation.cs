@@ -40,12 +40,21 @@ public class Mutation
         string avatarUrl,
         string? originalUrl,
         int? privacy,
+        long? sourceContentId,
+        long? sourceMediaId,
         [Service] IUserGraphService userGraphService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
         trustedCaller.RequireUserId(userId);
-        return userGraphService.ChangeUserAvatarAsync(userId, avatarUrl, originalUrl, privacy ?? 0, cancellationToken);
+        return userGraphService.ChangeUserAvatarAsync(
+            userId,
+            avatarUrl,
+            originalUrl,
+            privacy ?? 0,
+            sourceContentId,
+            sourceMediaId,
+            cancellationToken);
     }
 
     public Task<UserProfileResult?> ChangeUserBackgroundAsync(

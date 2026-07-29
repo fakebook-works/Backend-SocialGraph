@@ -64,6 +64,7 @@ builder.Services.AddScoped<IIntegrationOutboxDispatcher, IntegrationOutboxDispat
 builder.Services.AddSingleton<IIntegrationOutboxMessageProcessor, IntegrationOutboxMessageProcessor>();
 builder.Services.AddScoped<IUserProvisioningCoordinator, UserProvisioningCoordinator>();
 builder.Services.AddScoped<IUserGraphService, UserGraphService>();
+builder.Services.AddScoped<IAuthenticationContactClient, AuthenticationContactClient>();
 builder.Services.AddScoped<IGroupGraphService, GroupGraphService>();
 builder.Services.AddScoped<IContentGraphService, ContentGraphService>();
 builder.Services.AddScoped<ICandidateService, CandidateService>();

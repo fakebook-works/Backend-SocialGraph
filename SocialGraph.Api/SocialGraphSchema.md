@@ -3,8 +3,9 @@ SET search_path TO Social_Graph;
 
 -- ** Social Graph object type & data ** --
 -------------------------------------------
--- 0  user {avatar: Url 1, background: Url 1, name: String 1, bio: String 1, gender: Short(0/1) 1,
-birthdate: DateOnly 1, location: String 1, verify: DateTime 0, privacy: Short(0/1) 1, create: DateTime} 
+-- 0  user {avatar: Url 1, avatarSource: {contentId: SnowflakeString, mediaId: SnowflakeString},
+background: Url 1, name: String 1, bio: String 1, gender: Short(0/1) 1, birthdate: DateOnly 1,
+location: String 1, verify: DateTime 0, privacy: Short(0/1) 1, create: DateTime}
 
     gender: 0 female, 1 male
     verify: thời gian hết hạn tích xanh, bình thường luôn null
@@ -23,9 +24,13 @@ birthdate: DateOnly 1, location: String 1, verify: DateTime 0, privacy: Short(0/
 
     privacy phụ thuộc vào group
       
--- 4  reel {content: String 1, privacy: Short(0/1/2/3) 1, create: DateTime}
+-- 4  reel {content: String 1, privacy: Short(0/1/2/3) 1, create: DateTime, aspectRatio: Float 0, focalPointX: Float 0, focalPointY: Float 0}
 
     privacy giống hệt post feed: 0 public, 1 friends and follow, 2 friends only, 3 private (chỉ mình tôi)
+    aspectRatio là tỉ lệ khung trình bày tuỳ chọn trong khoảng 9/16..16/9. focalPointX/focalPointY là tâm vùng
+    trình bày chuẩn hoá trong [0,1], mặc định 0.5/0.5. Ba giá trị này lưu cách người tạo căn/crop Reel để mọi
+    lần render dùng lại đúng vùng đã chọn; video upload gốc không bị cắt hoặc mã hoá lại. Reel cũ không có metadata
+    này vẫn dùng tỉ lệ media thích ứng và tâm giữa như trước.
 -- 5  story {content: String, create: DateTime, expire: DateTime}
 -- 6  comment {content: String, create: DateTime}; comment may contain at most one image through association 28.
 Comment pages return direct children for lazy expansion, per-comment like/reply counts, and batched viewer-relative
@@ -180,12 +185,33 @@ CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 -----------------------------------
 Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng.
 updatePost(input: { id, privacy?, content?, media? }) áp dụng cho feed post, group post và reel; feed post/reel dùng cùng privacy 0/1/2/3. Field bị omit được giữ nguyên; media=[] detach toàn bộ và garbage-collect media không còn parent.
-Home post candidates gồm feed post, group post và reel. Reel được hydrate thành `ReelDetail` trong union `HomePost` và frontend dùng chung card hiển thị với feed post.
+Home post candidates gồm feed post, group post và reel. Reel được hydrate thành `ReelDetail` trong union `HomePost` và frontend dùng chung card hiển thị với feed post. `createReel` nhận `aspectRatio` trong khoảng 9/16..16/9 cùng `focalPointX`/`focalPointY` trong [0,1]; `ContentResult` và `ReelDetail` trả lại đủ metadata trình bày này. Client cũ có thể bỏ qua focal point và sẽ được căn giữa.
+`profilePosts(userId, cursor, limit)` là luồng authored hợp nhất của tab Tất cả trên profile: trả cả
+`FeedPostDetail` và `ReelDetail` theo thứ tự association, còn `profileReels` vẫn chỉ trả Reel cho tab riêng.
+Viewer luôn lấy từ trusted Gateway accessor; target `userId` không phải caller identity. Resolver chặn block
+hai chiều trước khi đọc và toàn bộ item tiếp tục đi qua `ContentGraphService.GetPostDetailsAsync`, nên privacy
+0/1/2/3, trạng thái xoá và block hiện tại vẫn được áp dụng trước khi item xuất hiện.
 Mỗi bucket của `homeStories` trả thêm `unseenCount`, được tính chính xác từ các story chưa có association `Watched` của viewer; `hasUnseen` tương đương `unseenCount > 0`.
 userPhotos(userId, cursor, limit) lấy ảnh từ feed post của user mà viewer được xem.
 groupPhotos(groupId, cursor, limit) lấy ảnh từ group post của group mà viewer được xem.
 groupUserPhotos(groupId, userId, cursor, limit) lấy ảnh từ group post do user tạo trong group.
 myFeedPhotoCandidates/groupPhotoCandidates là nguồn ảnh hợp lệ để chọn avatar/background.
+Ảnh đại diện user được lưu từ bản cắt; nếu người dùng tải file mới thì ảnh gốc tạo một feed post công khai
+(`privacy=0`) với nội dung `đã cập nhật ảnh đại diện`. Chọn lại ảnh đã có không tạo activity post mới.
+`avatar` luôn là URL ảnh vuông sạch. `avatarSource` là object nullable trong `User.data`, gồm
+`contentId` và `mediaId` được lưu dưới dạng chuỗi thập phân Snowflake để không bị JavaScript làm tròn.
+Hai ID phải cùng tồn tại và chỉ là metadata truy nguồn, không phải quyền truy cập. Khi ghi ảnh có sẵn,
+backend lấy actor từ trusted accessor rồi xác minh feed post thuộc actor, media thực sự được `Contained`
+trong post và có type Photo. Khi upload mới, backend tạo activity post công khai, lấy chính ID post/media
+vừa tạo rồi ghi cùng avatar trong một transaction local. Khi xóa/đổi avatar không có nguồn, `avatarSource`
+được đặt null; user cũ không có field vẫn hợp lệ và xem avatar độc lập.
+
+`profileAvatarSource(userId)` là read model viewer-aware. Resolver áp lại block hai chiều và gọi normal
+post-detail visibility path để kiểm tra privacy/trạng thái xóa cùng quan hệ author/content/media trước khi
+trả IDs. Nguồn không tồn tại, bị ẩn, đổi privacy, sai owner/media hoặc viewer không còn quyền đều trả null;
+frontend không dò nguồn bằng URL hay nội dung `đã cập nhật ảnh đại diện` và không gọi thẳng service.
+Ảnh bìa user được lưu từ bản cắt; nếu người dùng tải file mới thì ảnh gốc tạo một feed post công khai
+(`privacy=0`) với nội dung `tôi đã cập nhật ảnh bìa của mình`. Chọn lại ảnh đã có không tạo activity post mới.
 groupUserPosts(groupId, userId, cursor, limit) áp dụng group privacy và block/content visibility.
 likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trusted gateway header.
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.
@@ -210,6 +236,12 @@ Khi render, frontend bỏ ký tự `@`, hiển thị tên đậm và cho phép n
 Không cần migration hay bảng mới; cơ chế này tái sử dụng association type 26 hiện có.
 
 Profile collections dùng `profileConnections(userId, associationType, limit)` để tải danh sách hiển thị ban đầu cho association `0/3/4`. Việc nhập từ khóa không được xử lý tại SocialGraph GraphQL: SearchService gọi REST nội bộ `GET /internal/users/{userId}/profile-connection-ids?associationType=0|3|4`, giới hạn search trong tập ID đó, rồi Gateway Fusion hydrate profile. Frontend chỉ gọi GraphQL qua Gateway.
+
+Profile của người khác dùng hai read model target-scoped riêng:
+- `profileFriends(targetUserId, limit)` lấy viewer từ trusted Gateway accessor; `targetUserId` chỉ là resource ID. Resolver kiểm tra block hai chiều giữa viewer-target, giới hạn kết quả tối đa 200, rồi tiếp tục lọc block hai chiều giữa viewer và từng người bạn. `mutualFriendCount` luôn được tính so với viewer thật, không phải target.
+- `profileContact(userId)` chỉ trả `{ email }` khi viewer đã xác thực, canonical SocialGraph profile còn tồn tại, không có block theo cả hai chiều và tài khoản Auth đang active. Email được đọc bằng signed internal REST có timestamp/nonce Redis fail-closed; browser không gọi Auth trực tiếp và không có credential, hash, token hay session field nào đi qua contract này.
+
+Hai query trên không nới `profileConnections`: API đó vẫn caller-owned và vẫn yêu cầu `userId` trùng trusted actor. Vì vậy input ID không thể được dùng để giả mạo caller.
 
 Feed post detail trả thêm `taggedUsers { id name avatar isVerified }`. Danh sách này được hydrate cùng batch association/object của trang feed, không gọi query riêng cho từng post.
 

@@ -40,6 +40,30 @@ internal static class GraphJson
         }
     }
 
+    public static double? NullableDouble(JsonObject data, string name)
+    {
+        if (!data.TryGetPropertyValue(name, out var value) || value is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var parsed = value.GetValue<double>();
+            return double.IsFinite(parsed) ? parsed : null;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or FormatException)
+        {
+            return double.TryParse(
+                value.ToJsonString().Trim('"'),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var parsed) && double.IsFinite(parsed)
+                ? parsed
+                : null;
+        }
+    }
+
     public static string UtcNowString()
     {
         return DateTimeOffset.UtcNow.ToString("O");
@@ -50,6 +74,7 @@ internal static class GraphJson
         return new JsonObject
         {
             ["avatar"] = "",
+            ["avatarSource"] = null,
             ["background"] = "",
             ["name"] = name,
             ["bio"] = $"Xin chao, minh la {name} den tu {location}",
@@ -83,6 +108,35 @@ internal static class GraphJson
             ["privacy"] = privacy,
             ["create"] = UtcNowString()
         }.ToJsonString();
+    }
+
+    public static string ReelJson(
+        string content,
+        int privacy,
+        double? aspectRatio,
+        double? focalPointX,
+        double? focalPointY)
+    {
+        var data = new JsonObject
+        {
+            ["content"] = content,
+            ["privacy"] = privacy,
+            ["create"] = UtcNowString()
+        };
+        if (aspectRatio is { } value)
+        {
+            data["aspectRatio"] = value;
+        }
+        if (focalPointX is { } x)
+        {
+            data["focalPointX"] = x;
+        }
+        if (focalPointY is { } y)
+        {
+            data["focalPointY"] = y;
+        }
+
+        return data.ToJsonString();
     }
 
     public static string GroupPostJson(string content)

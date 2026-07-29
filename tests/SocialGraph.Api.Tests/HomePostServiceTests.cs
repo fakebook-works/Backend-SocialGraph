@@ -151,7 +151,7 @@ public sealed class HomePostServiceTests
         const long mediaId = 2_051;
         context.ObjectsTb.AddRange(
             User(FeedAuthorId, "Reel Author"),
-            Post(reelId, GraphObjectType.Reel, "reel on home", privacy: 2),
+            Post(reelId, GraphObjectType.Reel, "reel on home", privacy: 2, aspectRatio: 9d / 16d, focalPointX: 0.25d, focalPointY: 0.75d),
             Media(mediaId, "https://cdn.example/reel.mp4", GraphMediaType.Video));
         context.AssociationsTb.AddRange(
             Edge(reelId, GraphAssociationType.AuthoredBy, FeedAuthorId),
@@ -165,6 +165,10 @@ public sealed class HomePostServiceTests
         Assert.Equal(GraphObjectType.Reel, visible.Type);
         Assert.Equal(2, visible.Privacy);
         Assert.Equal("reel on home", visible.Content);
+        Assert.NotNull(visible.AspectRatio);
+        Assert.Equal(9d / 16d, visible.AspectRatio.GetValueOrDefault(), precision: 6);
+        Assert.Equal(0.25d, visible.FocalPointX);
+        Assert.Equal(0.75d, visible.FocalPointY);
         Assert.Equal("https://cdn.example/reel.mp4", Assert.Single(visible.Media).Url);
         Assert.Null(await service.GetPostDetailAsync(999, reelId));
     }
@@ -301,17 +305,26 @@ public sealed class HomePostServiceTests
         }.ToJsonString()
     };
 
-    private static Objects Post(long id, short type, string content, int privacy) => new()
+    private static Objects Post(long id, short type, string content, int privacy, double? aspectRatio = null, double? focalPointX = null, double? focalPointY = null) => new()
     {
         id = id,
         otype = type,
-        data = new JsonObject
+        data = CreatePostData(content, privacy, aspectRatio, focalPointX, focalPointY)
+    };
+
+    private static string CreatePostData(string content, int privacy, double? aspectRatio, double? focalPointX, double? focalPointY)
+    {
+        var data = new JsonObject
         {
             ["content"] = content,
             ["privacy"] = privacy,
             ["create"] = DateTimeOffset.UtcNow.ToString("O")
-        }.ToJsonString()
-    };
+        };
+        if (aspectRatio is { } value) data["aspectRatio"] = value;
+        if (focalPointX is { } x) data["focalPointX"] = x;
+        if (focalPointY is { } y) data["focalPointY"] = y;
+        return data.ToJsonString();
+    }
 
     private static Objects Media(long id, string url, int type = GraphMediaType.Photo) => new()
     {

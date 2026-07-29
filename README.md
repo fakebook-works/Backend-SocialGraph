@@ -52,6 +52,7 @@ The business-safe SocialGraph fields exposed by the composed Gateway are:
 ```text
 Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
+          profileFriends, profileContact, profileAvatarSource,
           group, groups, groupViewerState, memberGroups, adminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
           visitedGroups, userPhotos, groupPhotos, groupUserPhotos,
@@ -80,11 +81,45 @@ Viewer-specific IDs are derived from `X-User-Id`; legacy `authorId` values in cr
 
 Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)` and hides inaccessible private groups.
 
+`profilePosts` is the chronological authored stream used by the profile's All tab and
+returns both visible `FeedPostDetail` and `ReelDetail` items. It derives the viewer from
+the trusted Gateway context, applies the existing two-way block check, and hydrates the
+page through `ContentGraphService`, so all four feed/Reel privacy values are evaluated
+from current state. `profileReels` remains the Reel-only collection for the dedicated tab.
+
 Raw object/association CRUD is not part of the public schema. Search hydration is provided through five internal Fusion lookups (`userSearchResult`, `groupSearchResult`, `feedPostSearchResult`, `groupPostSearchResult`, and `reelSearchResult`). Messenger hydrates participants through the federated `User @key(id)` entity. All hydration applies block and content/group privacy rules.
+
+`profileFriends(targetUserId, limit)` and `profileContact(userId)` are authenticated,
+target-scoped profile reads. The viewer always comes from the trusted Gateway context;
+the supplied ID is only the resource being viewed. Both operations stop on a block in
+either direction. Friend hydration additionally removes every friend who has a block
+relationship with the viewer and caps the public result at 200. Contact email remains
+owned by Authentication: SocialGraph reads only `{ userId, email }` for an active account
+through the existing signed internal REST client with timestamp/nonce replay protection.
+There is no browser-to-Authentication shortcut and no credential/session field is exposed.
 
 Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. Shared feed-post privacy is checked both when a Story is created and each time it is read, so a source made private later is no longer returned. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
 
 `updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
+
+`createReel` uses feed privacy `0..3` and persists non-destructive presentation metadata:
+`aspectRatio` is constrained to `9/16..16/9`, while `focalPointX` and `focalPointY` are
+normalized to `0..1` (center defaults to `0.5/0.5`). `ContentResult` and `ReelDetail`
+return these fields so every client can reproduce the creator's crop without rewriting
+the uploaded video; older Reels without the fields remain centered and compatible.
+
+User avatar and cover changes store the cropped asset. When the source is a newly uploaded
+file, the original asset is attached to a public (`privacy=0`) feed activity: avatar uses
+`đã cập nhật ảnh đại diện`, while cover uses `tôi đã cập nhật ảnh bìa của mình`. Selecting
+an existing authorized photo does not create another activity post.
+
+Avatar provenance is stored separately in the nullable `User.data.avatarSource` object as
+decimal Snowflake strings `{ contentId, mediaId }`; `avatar` remains a clean square-image URL.
+The source pair is provenance only, never authorization. SocialGraph validates trusted actor,
+upload ownership, source ownership, FeedPost type, Contained membership and Photo type on write.
+`profileAvatarSource` reapplies current post privacy, two-way block, deletion and content-media
+checks on every read. Missing, legacy or no-longer-visible provenance falls back to standalone
+avatar viewing. No database-table migration or browser-to-service shortcut is introduced.
 
 Comments are paged as direct children of either a post/Reel or another comment, so clients can expand reply levels lazily without loading an unbounded tree. `createComment` accepts text, one optional image, or both; non-image comment media is rejected. Comment projections include that image, direct reply count, and batched viewer-relative author follow state. `ContentEngagementResult.commentCount` counts the complete descendant comment tree while each comment's `replyCount` remains direct-only. `ContentEngagementResult.viewCount` reports the number of unique `WatchedBy` users for a Reel.
 
