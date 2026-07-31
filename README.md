@@ -53,7 +53,7 @@ The business-safe SocialGraph fields exposed by the composed Gateway are:
 Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
           profileFriends, profileContact, profileAvatarSource,
-          group, groups, groupViewerState, memberGroups, adminGroups,
+          group, groups, groupSuggestions, groupViewerState, memberGroups, adminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
           visitedGroups, userPhotos, groupPhotos, groupUserPhotos,
           myFeedPhotoCandidates, groupPhotoCandidates, likedReels, sharedReels, watchedReels,
@@ -70,6 +70,15 @@ Mutation: createUser, updateUser, change/remove user avatar/background,
 
 `recommendFeed` is owned by Recommendation. Each returned `RecommendationItem` is hydrated through SocialGraph's internal Fusion lookup, so frontend can request `post` in the same operation. The `post` field is the `HomePost` union: `FeedPostDetail` for user posts or `GroupPostDetail` for group posts. Group posts include `group { id name avatar canJoin }`.
 
+`groupSuggestions(limit)` is a separate, bounded metadata-only discovery path. It derives the
+viewer from trusted Gateway context, ranks groups by the number of the viewer's current friends
+who participate, and includes both public and private groups. It excludes groups the viewer
+already joins/administers or has requested to join and filters blocked friend sources through
+`BlockVisibilityService`. Each result contains the group projection, the distinct friend-member
+count, at most three minimal friend previews (`id`, `name`, `avatar`), and the number of existing
+group posts published during the previous UTC calendar day. It never hydrates private group post
+content or exposes the remaining member roster.
+
 Viewer-specific feed, shortcut, post, and Story operations require trusted Gateway headers:
 
 ```http
@@ -79,7 +88,7 @@ X-User-Id: <authenticated user id>
 
 Viewer-specific IDs are derived from `X-User-Id`; legacy `authorId` values in create inputs are overwritten by the trusted actor. Gateway must remove client-supplied trusted headers and generate them from the validated session. Calls with a missing/invalid secret or missing user identity fail before business logic runs.
 
-Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)` and hides inaccessible private groups.
+Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)`, returns each edge's `visitedAt` timestamp for relative-time shortcuts, and hides inaccessible private groups.
 
 `profilePosts` is the chronological authored stream used by the profile's All tab and
 returns both visible `FeedPostDetail` and `ReelDetail` items. It derives the viewer from
@@ -88,6 +97,11 @@ page through `ContentGraphService`, so all four feed/Reel privacy values are eva
 from current state. `profileReels` remains the Reel-only collection for the dedicated tab.
 
 Raw object/association CRUD is not part of the public schema. Search hydration is provided through five internal Fusion lookups (`userSearchResult`, `groupSearchResult`, `feedPostSearchResult`, `groupPostSearchResult`, and `reelSearchResult`). Messenger hydrates participants through the federated `User @key(id)` entity. All hydration applies block and content/group privacy rules.
+
+Fast-search hydration also returns viewer-relative metadata without accepting a viewer ID
+from GraphQL input: `UserSearchResult.viewerIsSelf/viewerIsFriend/viewerIsFollowing` and
+`GroupSearchResult.viewerIsMember` are derived from the trusted Gateway caller and current
+friend/member/admin associations. Group administrators count as members for this projection.
 
 `profileFriends(targetUserId, limit)` and `profileContact(userId)` are authenticated,
 target-scoped profile reads. The viewer always comes from the trusted Gateway context;

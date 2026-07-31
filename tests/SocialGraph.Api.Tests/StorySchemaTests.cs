@@ -35,6 +35,7 @@ public sealed class StorySchemaTests
         Assert.Contains("post: HomePost", schema);
         Assert.Contains("union HomeStory = NormalStory | FeedPostShareStory | ReelShareStory", schema);
         Assert.Contains("visitedGroups", schema);
+        Assert.Contains("visitedAt: String!", schema);
         Assert.Contains("postDetail", schema);
         Assert.Contains("postDetails", schema);
         Assert.Contains("homeStories", schema);
@@ -46,6 +47,10 @@ public sealed class StorySchemaTests
         Assert.Contains("groupJoinRequests", schema);
         Assert.Contains("userSearchResult(referenceId: ID!): UserSearchResult", schema);
         Assert.Contains("groupSearchResult(referenceId: ID!): GroupSearchResult", schema);
+        Assert.Contains("viewerIsSelf: Boolean!", schema);
+        Assert.Contains("viewerIsFriend: Boolean!", schema);
+        Assert.Contains("viewerIsFollowing: Boolean!", schema);
+        Assert.Contains("viewerIsMember: Boolean!", schema);
         Assert.Contains("feedPostSearchResult(referenceId: ID!): FeedPostSearchResult", schema);
         Assert.Contains("groupPostSearchResult(referenceId: ID!): GroupPostSearchResult", schema);
         Assert.Contains("reelSearchResult(referenceId: ID!): ReelSearchResult", schema);
@@ -54,6 +59,10 @@ public sealed class StorySchemaTests
         Assert.Contains("userById(id: Long!): User", schema);
         Assert.Contains("profiles(userIds: [Long!]!): [UserProfileResult!]!", schema);
         Assert.Contains("groups(groupIds: [Long!]!): [GroupResult!]!", schema);
+        Assert.Contains("groupSuggestions(limit: Int!): [GroupSuggestionResult!]!", schema);
+        Assert.Contains("type GroupSuggestionFriendResult", schema);
+        Assert.Contains("friendMembers: [GroupSuggestionFriendResult!]!", schema);
+        Assert.DoesNotContain("friendMembers: [UserProfileResult", schema);
         Assert.Contains("profilePosts", schema);
         Assert.Contains("profileReels", schema);
         Assert.Contains("memberGroups", schema);

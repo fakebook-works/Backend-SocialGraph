@@ -127,6 +127,18 @@ public class Query
         return groups;
     }
 
+    public Task<IReadOnlyList<GroupSuggestionResult>> GetGroupSuggestionsAsync(
+        int limit,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        return groupGraphService.GetGroupSuggestionsAsync(
+            trustedCaller.RequireUserId(),
+            limit,
+            cancellationToken);
+    }
+
     public async Task<ProfilePostPageResult> GetProfilePostsAsync(
         long userId,
         int limit,
@@ -230,24 +242,62 @@ public class Query
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
+        var viewerId = trustedCaller.RequireUserId();
         var user = await FederatedUser.ResolveForViewerAsync(
-            trustedCaller.RequireUserId(),
+            viewerId,
             referenceId,
             userGraphService,
             associationService,
             cancellationToken);
-        return user is null ? null : new UserSearchHydrationResult(referenceId, user);
+        if (user is null)
+        {
+            return null;
+        }
+
+        var viewerIsSelf = viewerId == referenceId;
+        var viewerIsFriend = !viewerIsSelf && await associationService.HasAssociationAsync(
+            viewerId,
+            GraphAssociationType.Friend,
+            referenceId,
+            cancellationToken);
+        var viewerIsFollowing = !viewerIsSelf && await associationService.HasAssociationAsync(
+            viewerId,
+            GraphAssociationType.Followed,
+            referenceId,
+            cancellationToken);
+        return new UserSearchHydrationResult(
+            referenceId,
+            user,
+            viewerIsSelf,
+            viewerIsFriend,
+            viewerIsFollowing);
     }
 
     public async Task<GroupSearchHydrationResult?> GetGroupSearchResultAsync(
         [GraphQLType(typeof(NonNullType<IdType>))] long referenceId,
         [Service] IGroupGraphService groupGraphService,
+        [Service] IAssociationService associationService,
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        trustedCaller.RequireUserId();
+        var viewerId = trustedCaller.RequireUserId();
         var group = await groupGraphService.GetGroupAsync(referenceId, cancellationToken);
-        return group is null ? null : new GroupSearchHydrationResult(referenceId, group);
+        if (group is null)
+        {
+            return null;
+        }
+
+        var viewerIsMember = await associationService.HasAssociationAsync(
+                viewerId,
+                GraphAssociationType.Member,
+                referenceId,
+                cancellationToken) ||
+            await associationService.HasAssociationAsync(
+                viewerId,
+                GraphAssociationType.Admin,
+                referenceId,
+                cancellationToken);
+        return new GroupSearchHydrationResult(referenceId, group, viewerIsMember);
     }
 
     public async Task<FeedPostSearchHydrationResult?> GetFeedPostSearchResultAsync(

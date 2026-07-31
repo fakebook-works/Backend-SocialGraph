@@ -99,12 +99,16 @@ public sealed class FederatedUser
 [GraphQLName("UserSearchResult")]
 public sealed record UserSearchHydrationResult(
     [property: GraphQLType(typeof(NonNullType<IdType>))] long ReferenceId,
-    FederatedUser User);
+    FederatedUser User,
+    bool ViewerIsSelf,
+    bool ViewerIsFriend,
+    bool ViewerIsFollowing);
 
 [GraphQLName("GroupSearchResult")]
 public sealed record GroupSearchHydrationResult(
     [property: GraphQLType(typeof(NonNullType<IdType>))] long ReferenceId,
-    GroupResult Group);
+    GroupResult Group,
+    bool ViewerIsMember);
 
 [GraphQLName("FeedPostSearchResult")]
 public sealed record FeedPostSearchHydrationResult(

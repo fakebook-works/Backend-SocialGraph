@@ -1,15 +1,55 @@
 namespace SocialGraph.Api.Tests;
 
 using System.Text.Json.Nodes;
+using HotChocolate;
 using Microsoft.EntityFrameworkCore;
 using Moq;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
+using SocialGraph.Api.Infrastructure;
 using SocialGraph.Api.Service;
+using SocialGraph.Api.SubGraphQL;
 
 public sealed class GroupShortcutServiceTests
 {
     private const long UserId = 100;
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(2)]
+    public async Task CreateGroup_RejectsPrivacyOutsidePublicAndPrivate(int privacy)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        var service = CreateService(context, objects);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.CreateGroupAsync(
+            new CreateGroupInput(UserId, "Invalid privacy", null, privacy)));
+
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(2)]
+    public async Task UpdateGroup_RejectsPrivacyOutsidePublicAndPrivate(int privacy)
+    {
+        await using var context = CreateContext();
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        var service = CreateService(context, objects);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.UpdateGroupAsync(
+            new UpdateGroupInput(300, null, null, null, null, privacy)));
+
+        objects.Verify(item => item.UpdateObjectAsync(
+            It.IsAny<long>(),
+            It.IsAny<short>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
 
     [Fact]
     public async Task VisitedGroups_UsesStableKeysetCursorAcrossPages()
@@ -32,6 +72,12 @@ public sealed class GroupShortcutServiceTests
         var second = await service.GetVisitedGroupsAsync(UserId, 2, first.EndCursor);
 
         Assert.Equal(new long[] { 301, 303 }, first.Items.Select(item => item.Id));
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeMilliseconds(3_000).UtcDateTime,
+            DateTimeOffset.Parse(first.Items[0].VisitedAt).UtcDateTime);
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeMilliseconds(2_000).UtcDateTime,
+            DateTimeOffset.Parse(first.Items[1].VisitedAt).UtcDateTime);
         Assert.True(first.HasNextPage);
         Assert.False(string.IsNullOrWhiteSpace(first.EndCursor));
         Assert.Equal(new long[] { 302, 304 }, second.Items.Select(item => item.Id));
@@ -58,6 +104,119 @@ public sealed class GroupShortcutServiceTests
         var page = await service.GetVisitedGroupsAsync(UserId, 10, null);
 
         Assert.Equal(new long[] { 310, 312 }, page.Items.Select(item => item.Id));
+    }
+
+    [Fact]
+    public async Task GroupSuggestions_RanksGroupsJoinedByFriendsAndIncludesPrivateMetadata()
+    {
+        await using var context = CreateContext();
+        const long firstFriendId = 101;
+        const long secondFriendId = 102;
+        const long blockedFriendId = 103;
+        const long thirdFriendId = 104;
+        const long fourthFriendId = 105;
+        var now = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
+        var yesterdayStart = new DateTimeOffset(2026, 7, 30, 0, 0, 0, TimeSpan.Zero);
+        context.ObjectsTb.AddRange(
+            User(firstFriendId, "An"),
+            User(secondFriendId, "Binh"),
+            User(blockedFriendId, "Blocked"),
+            User(thirdFriendId, "Chi"),
+            User(fourthFriendId, "Dung"),
+            Group(350, "Public suggestion", privacy: 0),
+            Group(351, "Private suggestion", privacy: 1),
+            Group(352, "Already joined", privacy: 0),
+            Group(353, "Pending request", privacy: 1),
+            Group(354, "Blocked source", privacy: 1),
+            GroupPost(500),
+            GroupPost(501),
+            GroupPost(502),
+            GroupPost(503));
+        context.AssociationsTb.AddRange(
+            Edge(UserId, GraphAssociationType.Friend, firstFriendId, 10_000),
+            Edge(UserId, GraphAssociationType.Friend, secondFriendId, 9_000),
+            Edge(UserId, GraphAssociationType.Friend, thirdFriendId, 8_900),
+            Edge(UserId, GraphAssociationType.Friend, fourthFriendId, 8_800),
+            // A stale Friend edge must never let a blocked account influence suggestions.
+            Edge(UserId, GraphAssociationType.Friend, blockedFriendId, 8_000),
+            Edge(UserId, GraphAssociationType.Blocked, blockedFriendId, 8_100),
+            Edge(firstFriendId, GraphAssociationType.Member, 350, 7_000),
+            Edge(firstFriendId, GraphAssociationType.Member, 351, 7_100),
+            Edge(firstFriendId, GraphAssociationType.Admin, 351, 7_200),
+            Edge(secondFriendId, GraphAssociationType.Member, 351, 7_300),
+            Edge(thirdFriendId, GraphAssociationType.Member, 351, 7_250),
+            Edge(fourthFriendId, GraphAssociationType.Member, 351, 7_225),
+            Edge(firstFriendId, GraphAssociationType.Member, 352, 7_400),
+            Edge(firstFriendId, GraphAssociationType.Member, 353, 7_500),
+            Edge(blockedFriendId, GraphAssociationType.Member, 354, 7_600),
+            Edge(UserId, GraphAssociationType.Member, 352, 7_700),
+            Edge(UserId, GraphAssociationType.GroupJoinRequest, 353, 7_800),
+            Edge(350, GraphAssociationType.HaveMember, firstFriendId, 7_000),
+            Edge(351, GraphAssociationType.HaveMember, firstFriendId, 7_100),
+            Edge(351, GraphAssociationType.HaveMember, secondFriendId, 7_300),
+            Edge(351, GraphAssociationType.HaveMember, thirdFriendId, 7_250),
+            Edge(351, GraphAssociationType.HaveMember, fourthFriendId, 7_225),
+            Edge(351, GraphAssociationType.HaveAdmin, firstFriendId, 7_200),
+            Edge(351, GraphAssociationType.Published, 500, yesterdayStart.ToUnixTimeMilliseconds()),
+            Edge(351, GraphAssociationType.Published, 501, yesterdayStart.AddDays(1).AddMilliseconds(-1).ToUnixTimeMilliseconds()),
+            Edge(351, GraphAssociationType.Published, 502, yesterdayStart.AddMilliseconds(-1).ToUnixTimeMilliseconds()),
+            Edge(351, GraphAssociationType.Published, 503, yesterdayStart.AddDays(1).ToUnixTimeMilliseconds()));
+        await context.SaveChangesAsync();
+        var service = CreateService(context, timeProvider: new FixedTimeProvider(now));
+
+        var suggestions = await service.GetGroupSuggestionsAsync(UserId, 10);
+
+        Assert.Equal(new long[] { 351, 350 }, suggestions.Select(item => item.Group.Id));
+        var privateSuggestion = suggestions[0];
+        Assert.Equal(1, privateSuggestion.Group.Privacy);
+        Assert.Equal(4, privateSuggestion.Group.MemberCount);
+        Assert.Equal(1, privateSuggestion.Group.AdminCount);
+        Assert.Equal(4, privateSuggestion.FriendMemberCount);
+        Assert.Equal(3, privateSuggestion.FriendMembers.Count);
+        Assert.Equal(3, privateSuggestion.FriendMembers.Select(item => item.Id).Distinct().Count());
+        Assert.All(privateSuggestion.FriendMembers, friend => Assert.False(string.IsNullOrWhiteSpace(friend.Name)));
+        Assert.Equal(2, privateSuggestion.YesterdayPostCount);
+        Assert.Equal(0, suggestions[1].Group.Privacy);
+        Assert.DoesNotContain(suggestions, item => item.Group.Id is 352 or 353 or 354);
+    }
+
+    [Fact]
+    public async Task GroupSuggestions_DerivesViewerFromTrustedCaller()
+    {
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.GetGroupSuggestionsAsync(
+                UserId,
+                12,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<GroupSuggestionResult>());
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(UserId);
+
+        var result = await new Query().GetGroupSuggestionsAsync(
+            12,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None);
+
+        Assert.Empty(result);
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task GroupSuggestions_RejectsUntrustedCallerBeforeReadingGroups()
+    {
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Throws(new GraphQLException("untrusted"));
+
+        await Assert.ThrowsAsync<GraphQLException>(() => new Query().GetGroupSuggestionsAsync(
+            12,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        groups.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -99,7 +258,7 @@ public sealed class GroupShortcutServiceTests
         associations.Setup(item => item.RetrieveAssociationAsync(330, GraphAssociationType.HaveAdmin, null, 100, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(200, 1) }, null));
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
-        var service = new GroupGraphService(context, objects.Object, associations.Object, external.Object);
+        var service = CreateService(context, objects, associations, external.Object);
 
         var result = await service.RequestJoinAsync(UserId, 330);
 
@@ -120,7 +279,7 @@ public sealed class GroupShortcutServiceTests
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
         associations.Setup(item => item.ApplyMutationsAsync(It.IsAny<IReadOnlyCollection<AssociationMutation>>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
-        var service = new GroupGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+        var service = CreateService(context, objects, associations);
 
         var result = await service.RequestJoinAsync(UserId, 331);
 
@@ -147,7 +306,7 @@ public sealed class GroupShortcutServiceTests
         associations.Setup(item => item.HasAssociationAsync(adminId, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
-        var service = new GroupGraphService(context, objects.Object, associations.Object, external.Object);
+        var service = CreateService(context, objects, associations, external.Object);
 
         var invited = await service.InviteUserAsync(adminId, groupId, UserId);
 
@@ -168,11 +327,27 @@ public sealed class GroupShortcutServiceTests
     private static GroupGraphService CreateService(
         MyDbContext context,
         Mock<IObjectService>? objects = null,
-        Mock<IAssociationService>? associations = null) => new(
+        Mock<IAssociationService>? associations = null,
+        IExternalServiceClient? external = null,
+        TimeProvider? timeProvider = null)
+    {
+        var objectService = (objects ?? new Mock<IObjectService>()).Object;
+        var associationService = (associations ?? new Mock<IAssociationService>()).Object;
+        var externalService = external ?? Mock.Of<IExternalServiceClient>();
+        var userGraphService = new UserGraphService(
+            objectService,
+            associationService,
+            externalService,
+            context);
+        return new GroupGraphService(
             context,
-            (objects ?? new Mock<IObjectService>()).Object,
-            (associations ?? new Mock<IAssociationService>()).Object,
-            Mock.Of<IExternalServiceClient>());
+            objectService,
+            associationService,
+            externalService,
+            new BlockVisibilityService(context),
+            userGraphService,
+            timeProvider ?? TimeProvider.System);
+    }
 
     private static MyDbContext CreateContext()
     {
@@ -189,6 +364,25 @@ public sealed class GroupShortcutServiceTests
         data = GroupJson(name, privacy)
     };
 
+    private static Objects User(long id, string name) => new()
+    {
+        id = id,
+        otype = GraphObjectType.User,
+        data = new JsonObject
+        {
+            ["avatar"] = $"https://cdn.example/{id}.jpg",
+            ["name"] = name,
+            ["privacy"] = 0
+        }.ToJsonString()
+    };
+
+    private static Objects GroupPost(long id) => new()
+    {
+        id = id,
+        otype = GraphObjectType.GroupPost,
+        data = "{}"
+    };
+
     private static string GroupJson(string name, int privacy) => new JsonObject
     {
         ["name"] = name,
@@ -203,4 +397,9 @@ public sealed class GroupShortcutServiceTests
         id2 = id2,
         time = time
     };
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
 }

@@ -16,7 +16,7 @@ public sealed class CandidateServiceTests
         await using var context = CreateContext();
         context.ObjectsTb.AddRange(
             User(200), User(201), User(202), User(203), User(204),
-            Group(300, privacy: 1), Group(301, privacy: 0),
+            Group(300, privacy: 1), Group(301, privacy: 0), Group(302, privacy: 0), Group(303, privacy: 1),
             Post(1_000, GraphObjectType.FeedPost, privacy: 1),
             Post(1_001, GraphObjectType.FeedPost, privacy: 1),
             Post(1_002, GraphObjectType.FeedPost, privacy: 0),
@@ -27,7 +27,9 @@ public sealed class CandidateServiceTests
             Post(1_007, GraphObjectType.Reel, privacy: 1),
             Post(1_008, GraphObjectType.Reel, privacy: 0),
             Post(1_009, GraphObjectType.Reel, privacy: 2),
-            Post(1_010, GraphObjectType.Reel, privacy: 0));
+            Post(1_010, GraphObjectType.Reel, privacy: 0),
+            Post(1_011, GraphObjectType.GroupPost, privacy: 3),
+            Post(1_012, GraphObjectType.GroupPost, privacy: 0));
         context.AssociationsTb.AddRange(
             Edge(UserId, GraphAssociationType.Friend, 200),
             Edge(UserId, GraphAssociationType.Followed, 201),
@@ -36,22 +38,25 @@ public sealed class CandidateServiceTests
             Authored(200, 1_000), Authored(201, 1_001), Authored(201, 1_002),
             Authored(202, 1_003), Authored(203, 1_004), Authored(204, 1_005),
             Authored(200, 1_006), Authored(201, 1_007), Authored(204, 1_008),
-            Authored(201, 1_009), Authored(203, 1_010),
+            Authored(201, 1_009), Authored(203, 1_010), Authored(204, 1_011), Authored(204, 1_012),
             AuthoredBy(1_000, 200), AuthoredBy(1_001, 201), AuthoredBy(1_002, 201),
             AuthoredBy(1_003, 202), AuthoredBy(1_004, 203), AuthoredBy(1_005, 204),
             AuthoredBy(1_006, 200), AuthoredBy(1_007, 201), AuthoredBy(1_008, 204),
-            AuthoredBy(1_009, 201), AuthoredBy(1_010, 203),
+            AuthoredBy(1_009, 201), AuthoredBy(1_010, 203), AuthoredBy(1_011, 204), AuthoredBy(1_012, 204),
             Edge(300, GraphAssociationType.Published, 1_003),
-            Edge(301, GraphAssociationType.Published, 1_004));
+            Edge(301, GraphAssociationType.Published, 1_004),
+            Edge(302, GraphAssociationType.Published, 1_011),
+            Edge(303, GraphAssociationType.Published, 1_012));
         await context.SaveChangesAsync();
         var service = new CandidateService(context, Mock.Of<IAssociationService>());
 
         var ids = await service.GetPostCandidateIdsAsync(UserId, 20);
 
-        Assert.Equal(new long[] { 1_008, 1_007, 1_006, 1_005, 1_003, 1_002, 1_001, 1_000 }, ids);
+        Assert.Equal(new long[] { 1_011, 1_008, 1_007, 1_006, 1_005, 1_003, 1_002, 1_001, 1_000 }, ids);
         Assert.DoesNotContain(1_004, ids);
         Assert.DoesNotContain(1_009, ids);
         Assert.DoesNotContain(1_010, ids);
+        Assert.DoesNotContain(1_012, ids);
     }
 
     [Fact]
@@ -102,12 +107,22 @@ public sealed class CandidateServiceTests
     {
         id = id,
         otype = type,
-        data = new JsonObject
-        {
-            ["privacy"] = privacy,
-            ["create"] = DateTimeOffset.UtcNow.ToString("O")
-        }.ToJsonString()
+        data = PostJson(type, privacy)
     };
+
+    private static string PostJson(short type, int privacy)
+    {
+        var data = new JsonObject
+        {
+            ["create"] = DateTimeOffset.UtcNow.ToString("O")
+        };
+        if (type != GraphObjectType.GroupPost)
+        {
+            data["privacy"] = privacy;
+        }
+
+        return data.ToJsonString();
+    }
 
     private static Associations Authored(long authorId, long postId) =>
         Edge(authorId, GraphAssociationType.Authored, postId);

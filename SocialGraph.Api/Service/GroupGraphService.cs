@@ -8,10 +8,15 @@ using SocialGraph.Api.Database;
 
 public sealed class GroupGraphService : IGroupGraphService
 {
+    private const int MaxSuggestionFriendSources = 1_000;
+    private const int MaxSuggestionMembershipEdges = 10_000;
     private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
     private readonly IExternalServiceClient _externalServiceClient;
+    private readonly IBlockVisibilityService _blockVisibility;
+    private readonly IUserGraphService _userGraphService;
+    private readonly TimeProvider _timeProvider;
     private readonly IContentGraphService? _contentGraphService;
     private readonly IMediaOwnershipGuard? _mediaOwnershipGuard;
 
@@ -20,6 +25,9 @@ public sealed class GroupGraphService : IGroupGraphService
         IObjectService objectService,
         IAssociationService associationService,
         IExternalServiceClient externalServiceClient,
+        IBlockVisibilityService blockVisibility,
+        IUserGraphService userGraphService,
+        TimeProvider timeProvider,
         IContentGraphService? contentGraphService = null,
         IMediaOwnershipGuard? mediaOwnershipGuard = null)
     {
@@ -27,6 +35,9 @@ public sealed class GroupGraphService : IGroupGraphService
         _objectService = objectService;
         _associationService = associationService;
         _externalServiceClient = externalServiceClient;
+        _blockVisibility = blockVisibility;
+        _userGraphService = userGraphService;
+        _timeProvider = timeProvider;
         _contentGraphService = contentGraphService;
         _mediaOwnershipGuard = mediaOwnershipGuard;
     }
@@ -42,6 +53,8 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default)
     {
+        ValidateGroupPrivacy(input.Privacy);
+
         var group = await _objectService.AddObjectAsync(
             GraphObjectType.Group,
             GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar, input.Background),
@@ -60,6 +73,8 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, CancellationToken cancellationToken = default)
     {
+        ValidateGroupPrivacy(input.Privacy);
+
         var updated = await _objectService.UpdateObjectAsync(
             input.Id,
             GraphObjectType.Group,
@@ -134,6 +149,185 @@ public sealed class GroupGraphService : IGroupGraphService
             GraphJson.String(data, "create"),
             await _associationService.CountAssociationAsync(groupId, GraphAssociationType.HaveMember, cancellationToken),
             await _associationService.CountAssociationAsync(groupId, GraphAssociationType.HaveAdmin, cancellationToken));
+    }
+
+    public async Task<IReadOnlyList<GroupSuggestionResult>> GetGroupSuggestionsAsync(
+        long userId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var take = Math.Clamp(limit, 1, 50);
+        var friendIds = await (
+                from edge in _dbContext.AssociationsTb.AsNoTracking()
+                join friendObject in _dbContext.ObjectsTb.AsNoTracking()
+                    on edge.id2 equals friendObject.id
+                where edge.id1 == userId &&
+                      edge.atype == GraphAssociationType.Friend &&
+                      friendObject.otype == GraphObjectType.User
+                orderby edge.time descending, edge.id2 descending
+                select edge.id2)
+            .Take(MaxSuggestionFriendSources)
+            .ToArrayAsync(cancellationToken);
+        if (friendIds.Length == 0)
+        {
+            return Array.Empty<GroupSuggestionResult>();
+        }
+
+        var blockedFriendIds = await _blockVisibility.GetBlockedUserIdsAsync(
+            userId,
+            friendIds,
+            cancellationToken);
+        var visibleFriendIds = friendIds
+            .Where(friendId => !blockedFriendIds.Contains(friendId))
+            .ToArray();
+        if (visibleFriendIds.Length == 0)
+        {
+            return Array.Empty<GroupSuggestionResult>();
+        }
+
+        var excludedViewerAssociationTypes = new short[]
+        {
+            GraphAssociationType.Member,
+            GraphAssociationType.Admin,
+            GraphAssociationType.GroupJoinRequest
+        };
+        var candidateMembershipTypes = new short[]
+        {
+            GraphAssociationType.Member,
+            GraphAssociationType.Admin
+        };
+        var candidateMemberships = _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(membership =>
+                visibleFriendIds.Contains(membership.id1) &&
+                candidateMembershipTypes.Contains(membership.atype))
+            .OrderByDescending(membership => membership.time)
+            .ThenByDescending(membership => membership.id2)
+            .Take(MaxSuggestionMembershipEdges);
+        var candidateIds = await (
+                from membership in candidateMemberships
+                join groupObject in _dbContext.ObjectsTb.AsNoTracking()
+                    on membership.id2 equals groupObject.id
+                where groupObject.otype == GraphObjectType.Group &&
+                      !_dbContext.AssociationsTb.Any(viewerEdge =>
+                          viewerEdge.id1 == userId &&
+                          viewerEdge.id2 == groupObject.id &&
+                          excludedViewerAssociationTypes.Contains(viewerEdge.atype))
+                group membership by groupObject.id
+                into candidate
+                orderby candidate.Select(edge => edge.id1).Distinct().Count() descending,
+                    candidate.Key descending
+                select candidate.Key)
+            .Take(take)
+            .ToArrayAsync(cancellationToken);
+        if (candidateIds.Length == 0)
+        {
+            return Array.Empty<GroupSuggestionResult>();
+        }
+
+        var groupObjects = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .Where(item => candidateIds.Contains(item.id) && item.otype == GraphObjectType.Group)
+            .ToDictionaryAsync(item => item.id, cancellationToken);
+        var counts = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(edge => candidateIds.Contains(edge.id1) &&
+                (edge.atype == GraphAssociationType.HaveMember ||
+                 edge.atype == GraphAssociationType.HaveAdmin))
+            .GroupBy(edge => new { edge.id1, edge.atype })
+            .Select(group => new { group.Key.id1, group.Key.atype, Count = group.LongCount() })
+            .ToArrayAsync(cancellationToken);
+        var countsByGroup = counts.ToDictionary(
+            item => (item.id1, item.atype),
+            item => item.Count);
+
+        var friendMembershipRows = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(edge => candidateIds.Contains(edge.id2) &&
+                visibleFriendIds.Contains(edge.id1) &&
+                candidateMembershipTypes.Contains(edge.atype))
+            .Select(edge => new { GroupId = edge.id2, FriendId = edge.id1, edge.time })
+            .ToArrayAsync(cancellationToken);
+        var friendIdsByGroup = friendMembershipRows
+            .GroupBy(row => row.GroupId)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .GroupBy(row => row.FriendId)
+                    .Select(rows => new { FriendId = rows.Key, LatestMembership = rows.Max(row => row.time) })
+                    .OrderByDescending(row => row.LatestMembership)
+                    .ThenByDescending(row => row.FriendId)
+                    .Select(row => row.FriendId)
+                    .ToArray());
+        var previewFriendIds = friendIdsByGroup.Values
+            .SelectMany(ids => ids.Take(3))
+            .Distinct()
+            .ToArray();
+        var previewProfiles = previewFriendIds.Length == 0
+            ? Array.Empty<UserProfileResult>()
+            : (await _userGraphService.GetProfilesForViewerAsync(
+                userId,
+                previewFriendIds,
+                cancellationToken)).ToArray();
+        var previewProfilesById = previewProfiles.ToDictionary(profile => profile.Id);
+
+        var now = _timeProvider.GetUtcNow();
+        var todayStart = new DateTimeOffset(
+            now.Year,
+            now.Month,
+            now.Day,
+            0,
+            0,
+            0,
+            TimeSpan.Zero);
+        var yesterdayStartMilliseconds = todayStart.AddDays(-1).ToUnixTimeMilliseconds();
+        var todayStartMilliseconds = todayStart.ToUnixTimeMilliseconds();
+        var yesterdayPostCounts = await (
+                from published in _dbContext.AssociationsTb.AsNoTracking()
+                join postObject in _dbContext.ObjectsTb.AsNoTracking()
+                    on published.id2 equals postObject.id
+                where candidateIds.Contains(published.id1) &&
+                      published.atype == GraphAssociationType.Published &&
+                      published.time >= yesterdayStartMilliseconds &&
+                      published.time < todayStartMilliseconds &&
+                      postObject.otype == GraphObjectType.GroupPost
+                group published by published.id1
+                into posts
+                select new { GroupId = posts.Key, Count = posts.LongCount() })
+            .ToDictionaryAsync(item => item.GroupId, item => item.Count, cancellationToken);
+
+        return candidateIds
+            .Where(groupObjects.ContainsKey)
+            .Select(groupId =>
+            {
+                var item = groupObjects[groupId];
+                var data = GraphJson.ParseObject(item.data);
+                var groupFriendIds = friendIdsByGroup.GetValueOrDefault(groupId) ?? Array.Empty<long>();
+                var friendMembers = groupFriendIds
+                    .Take(3)
+                    .Where(previewProfilesById.ContainsKey)
+                    .Select(friendId => previewProfilesById[friendId])
+                    .Select(profile => new GroupSuggestionFriendResult(
+                        profile.Id,
+                        profile.Name,
+                        profile.Avatar))
+                    .ToArray();
+                return new GroupSuggestionResult(
+                    new GroupResult(
+                        item.id,
+                        GraphJson.String(data, "avatar"),
+                        GraphJson.String(data, "background"),
+                        GraphJson.String(data, "name"),
+                        GraphJson.String(data, "bio"),
+                        GraphJson.Int(data, "privacy"),
+                        GraphJson.String(data, "create"),
+                        countsByGroup.GetValueOrDefault((groupId, GraphAssociationType.HaveMember)),
+                        countsByGroup.GetValueOrDefault((groupId, GraphAssociationType.HaveAdmin))),
+                    groupFriendIds.Length,
+                    friendMembers,
+                    yesterdayPostCounts.GetValueOrDefault(groupId));
+            })
+            .ToArray();
     }
 
     public async Task<GroupResult?> ChangeGroupAvatarAsync(
@@ -289,7 +483,10 @@ public sealed class GroupGraphService : IGroupGraphService
             items.Add(new VisitedGroupResult(
                 group.id,
                 GraphJson.String(data, "avatar"),
-                GraphJson.String(data, "name")));
+                GraphJson.String(data, "name"),
+                DateTimeOffset.FromUnixTimeMilliseconds(edge.time)
+                    .UtcDateTime
+                    .ToString("O", System.Globalization.CultureInfo.InvariantCulture)));
         }
 
         var lastScannedEdge = selectedEdges[^1];
@@ -569,6 +766,16 @@ public sealed class GroupGraphService : IGroupGraphService
     {
         return await _associationService.HasAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken) ||
                await _associationService.HasAssociationAsync(userId, GraphAssociationType.Admin, groupId, cancellationToken);
+    }
+
+    private static void ValidateGroupPrivacy(int? privacy)
+    {
+        if (privacy is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(privacy),
+                "Group privacy must be 0 (public) or 1 (private).");
+        }
     }
 
     private async Task<bool> CanViewGroupAsync(

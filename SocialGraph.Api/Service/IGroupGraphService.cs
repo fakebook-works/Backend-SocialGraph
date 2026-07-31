@@ -8,6 +8,7 @@ public interface IGroupGraphService
     Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, CancellationToken cancellationToken = default);
     Task<bool> DeleteGroupAsync(long groupId, CancellationToken cancellationToken = default);
     Task<GroupResult?> GetGroupAsync(long groupId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<GroupSuggestionResult>> GetGroupSuggestionsAsync(long userId, int limit, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupAvatarAsync(long actorId, long groupId, string avatarUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupBackgroundAsync(long actorId, long groupId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<VisitedGroupPageResult> GetVisitedGroupsAsync(long userId, int limit, string? cursor, CancellationToken cancellationToken = default);

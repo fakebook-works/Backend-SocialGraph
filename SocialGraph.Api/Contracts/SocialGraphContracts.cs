@@ -150,6 +150,17 @@ public sealed record GroupResult(
     long MemberCount,
     long AdminCount);
 
+public sealed record GroupSuggestionFriendResult(
+    long Id,
+    string Name,
+    string Avatar);
+
+public sealed record GroupSuggestionResult(
+    GroupResult Group,
+    int FriendMemberCount,
+    IReadOnlyList<GroupSuggestionFriendResult> FriendMembers,
+    long YesterdayPostCount);
+
 public sealed record ContentResult(
     long Id,
     short Type,
@@ -248,7 +259,8 @@ public sealed record GroupSummaryResult(
 public sealed record VisitedGroupResult(
     long Id,
     string Avatar,
-    string Name);
+    string Name,
+    string VisitedAt);
 
 public sealed record VisitedGroupPageResult(
     IReadOnlyList<VisitedGroupResult> Items,

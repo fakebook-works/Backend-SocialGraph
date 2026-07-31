@@ -150,6 +150,7 @@ những trường không đánh dấu là không được sửa đổi khi đã 
  
     user1 -(29)-> group1: user1 đã ghé thăm những group nào
     * không cần inverse vì không cần biết group1 được những user nào ghé thăm
+    * visitedGroups trả `visitedAt` từ `Associations.time` để frontend hiển thị lần truy cập gần nhất
 
 
 Association thể hiện mối quan hệ giữa 2 object
@@ -186,6 +187,15 @@ CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng.
 updatePost(input: { id, privacy?, content?, media? }) áp dụng cho feed post, group post và reel; feed post/reel dùng cùng privacy 0/1/2/3. Field bị omit được giữ nguyên; media=[] detach toàn bộ và garbage-collect media không còn parent.
 Home post candidates gồm feed post, group post và reel. Reel được hydrate thành `ReelDetail` trong union `HomePost` và frontend dùng chung card hiển thị với feed post. `createReel` nhận `aspectRatio` trong khoảng 9/16..16/9 cùng `focalPointX`/`focalPointY` trong [0,1]; `ContentResult` và `ReelDetail` trả lại đủ metadata trình bày này. Client cũ có thể bỏ qua focal point và sẽ được căn giữa.
+Fast-search hydration không nhận `viewerId` từ input. `UserSearchResult` trả `viewerIsSelf`,
+`viewerIsFriend` và `viewerIsFollowing`; `GroupSearchResult` trả `viewerIsMember` (member hoặc admin), đều được tính từ
+trusted Gateway caller và association hiện tại.
+`groupSuggestions(limit)` lấy viewer từ trusted Gateway accessor, xếp hạng các group theo số bạn bè hiện tại
+đang là member/admin và trả metadata của cả group công khai lẫn riêng tư. Query loại group viewer đã tham gia,
+quản trị hoặc đang chờ duyệt và lọc nguồn bạn bè bị block hai chiều. Mỗi kết quả gồm `group`, tổng số bạn bè
+thành viên distinct, tối đa ba preview chỉ có `id/name/avatar`, và tổng GroupPost còn tồn tại được `Published`
+trong khoảng UTC `[00:00 hôm qua, 00:00 hôm nay)`. Đây là projection tổng hợp có giới hạn: nó không cấp quyền
+đọc nội dung post riêng tư và không lộ phần còn lại của member list nhóm riêng tư.
 `profilePosts(userId, cursor, limit)` là luồng authored hợp nhất của tab Tất cả trên profile: trả cả
 `FeedPostDetail` và `ReelDetail` theo thứ tự association, còn `profileReels` vẫn chỉ trả Reel cho tab riêng.
 Viewer luôn lấy từ trusted Gateway accessor; target `userId` không phải caller identity. Resolver chặn block
