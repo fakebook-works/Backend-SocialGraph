@@ -1,5 +1,6 @@
 namespace SocialGraph.Api.Tests;
 
+using HotChocolate;
 using Moq;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Infrastructure;
@@ -8,6 +9,125 @@ using SocialGraph.Api.SubGraphQL;
 
 public sealed class AdvancedMutationContractTests
 {
+    [Fact]
+    public async Task SharePostToGroup_UsesTrustedActorAndRequiresDestinationMembership()
+    {
+        const long actorId = 100;
+        const long spoofedAuthorId = 101;
+        const long sourceId = 200;
+        const long groupId = 300;
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.ResolveCanonicalShareSourceIdAsync(sourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(sourceId);
+        var reads = new Mock<ISocialReadModelService>(MockBehavior.Strict);
+        reads.Setup(item => item.CanShareTargetAsync(actorId, sourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsParticipantAsync(actorId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(actorId);
+
+        var exception = await Assert.ThrowsAsync<GraphQLException>(() => new Mutation().SharePostAsync(
+            new SharePostInput(spoofedAuthorId, sourceId, "share", 0, groupId),
+            content.Object,
+            reads.Object,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        Assert.Equal("FORBIDDEN", exception.Errors.Single().Code);
+        content.Verify(item => item.SharePostAsync(It.IsAny<SharePostInput>(), It.IsAny<CancellationToken>()), Times.Never);
+        content.VerifyAll();
+        reads.VerifyAll();
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task SharePostToGroup_ForwardsOnlyTrustedActorAndCanonicalSource()
+    {
+        const long actorId = 100;
+        const long sourceId = 200;
+        const long canonicalSourceId = 201;
+        const long groupId = 300;
+        var expected = new ContentResult(400, GraphObjectType.GroupPost, "share", 0, "now", actorId, Array.Empty<MediaResult>());
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.ResolveCanonicalShareSourceIdAsync(sourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(canonicalSourceId);
+        content.Setup(item => item.SharePostAsync(
+                It.Is<SharePostInput>(input => input.AuthorId == actorId && input.SourceId == canonicalSourceId && input.DestinationGroupId == groupId),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expected);
+        var reads = new Mock<ISocialReadModelService>(MockBehavior.Strict);
+        reads.Setup(item => item.CanShareTargetAsync(actorId, canonicalSourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsParticipantAsync(actorId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(actorId);
+
+        var result = await new Mutation().SharePostAsync(
+            new SharePostInput(999, sourceId, "share", 0, groupId),
+            content.Object,
+            reads.Object,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None);
+
+        Assert.Same(expected, result);
+        content.VerifyAll();
+        reads.VerifyAll();
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task DeleteContent_AllowsGroupAdministratorThroughTheCanonicalPolicy()
+    {
+        const long adminId = 100;
+        const long postId = 200;
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.CanDeleteContentAsync(adminId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        content.Setup(item => item.DeleteContentAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(adminId);
+
+        var deleted = await new Mutation().DeleteContentAsync(
+            postId,
+            content.Object,
+            trusted.Object,
+            CancellationToken.None);
+
+        Assert.True(deleted);
+        content.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task DeleteContent_RejectsCallerOutsideTheCanonicalPolicy()
+    {
+        const long viewerId = 100;
+        const long postId = 200;
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.CanDeleteContentAsync(viewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(viewerId);
+
+        var exception = await Assert.ThrowsAsync<GraphQLException>(() => new Mutation().DeleteContentAsync(
+            postId,
+            content.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        Assert.Equal("FORBIDDEN", exception.Errors.Single().Code);
+        content.Verify(item => item.DeleteContentAsync(It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     [Fact]
     public async Task ChangeUserAvatar_UsesTrustedOwnerAndForwardsExactSourcePair()
     {
@@ -59,18 +179,18 @@ public sealed class AdvancedMutationContractTests
     }
 
     [Fact]
-    public async Task InviteGroupUser_RequiresTrustedAdministrator()
+    public async Task InviteGroupUser_RequiresTrustedCurrentParticipant()
     {
-        const long adminId = 100;
+        const long inviterId = 100;
         const long groupId = 200;
         const long userId = 300;
         var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
-        groups.Setup(item => item.IsAdminAsync(adminId, groupId, It.IsAny<CancellationToken>()))
+        groups.Setup(item => item.IsParticipantAsync(inviterId, groupId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
-        groups.Setup(item => item.InviteUserAsync(adminId, groupId, userId, It.IsAny<CancellationToken>()))
+        groups.Setup(item => item.InviteUserAsync(inviterId, groupId, userId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
-        trusted.Setup(item => item.RequireUserId()).Returns(adminId);
+        trusted.Setup(item => item.RequireUserId()).Returns(inviterId);
 
         var result = await new Mutation().InviteGroupUserAsync(
             groupId,
@@ -80,6 +200,34 @@ public sealed class AdvancedMutationContractTests
             CancellationToken.None);
 
         Assert.True(result);
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task InviteGroupUser_RejectsAuthenticatedNonParticipantBeforeDispatch()
+    {
+        const long outsiderId = 101;
+        const long groupId = 200;
+        const long userId = 300;
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsParticipantAsync(outsiderId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(outsiderId);
+
+        await Assert.ThrowsAsync<GraphQLException>(() => new Mutation().InviteGroupUserAsync(
+            groupId,
+            userId,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        groups.Verify(item => item.InviteUserAsync(
+            It.IsAny<long>(),
+            It.IsAny<long>(),
+            It.IsAny<long>(),
+            It.IsAny<CancellationToken>()), Times.Never);
         groups.VerifyAll();
         trusted.VerifyAll();
     }

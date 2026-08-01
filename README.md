@@ -53,9 +53,9 @@ The business-safe SocialGraph fields exposed by the composed Gateway are:
 Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
           profileFriends, profileContact, profileAvatarSource,
-          group, groups, groupSuggestions, groupViewerState, memberGroups, adminGroups,
+          group, groups, groupSuggestions, groupFriendMembers, groupViewerState, memberGroups, adminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
-          visitedGroups, userPhotos, groupPhotos, groupUserPhotos,
+          visitedGroups, userPhotos, groupPhotos, groupMedia, groupUserPhotos,
           myFeedPhotoCandidates, groupPhotoCandidates, likedReels, sharedReels, watchedReels,
           postDetail, postDetails, profilePosts, profileReels, comments,
           contentEngagement, savedContent, likedUsers, taggedUsers, mentionedUsers,
@@ -79,6 +79,12 @@ count, at most three minimal friend previews (`id`, `name`, `avatar`), and the n
 group posts published during the previous UTC calendar day. It never hydrates private group post
 content or exposes the remaining member roster.
 
+`groupFriendMembers(groupId, limit)` is the exact group-profile companion projection. It
+derives the viewer from the trusted Gateway context, clamps the result to 12 and returns
+only that viewer's current, unblocked friends who are current Member/Admin participants of
+the named group. It remains available for a discoverable private group and while the viewer
+has a pending join request, but never exposes strangers or the rest of the private roster.
+
 Viewer-specific feed, shortcut, post, and Story operations require trusted Gateway headers:
 
 ```http
@@ -88,13 +94,32 @@ X-User-Id: <authenticated user id>
 
 Viewer-specific IDs are derived from `X-User-Id`; legacy `authorId` values in create inputs are overwritten by the trusted actor. Gateway must remove client-supplied trusted headers and generate them from the validated session. Calls with a missing/invalid secret or missing user identity fail before business logic runs.
 
-Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)`, returns each edge's `visitedAt` timestamp for relative-time shortcuts, and hides inaccessible private groups.
+Gateway strips client-supplied trusted headers, validates the session, then creates these headers itself. `X-Gateway-Secret` remains accepted as a compatibility alias. `postDetails` preserves ranked input order, removes duplicate IDs, enforces a 100-ID maximum, batches graph reads, and omits deleted, blocked, malformed, or unauthorized posts. `visitedGroups` uses an opaque keyset cursor over `Visited(29)`, returns each edge's `visitedAt` timestamp for relative-time shortcuts, and hides inaccessible private groups. `leaveGroup` derives its actor from the trusted Gateway caller and does not accept a successor ID. A successful leave removes the actor's Member, optional Admin, inverse edges and Visited in one transaction. When the actor is the sole administrator, the service selects only from current `HaveMember` edges (never pending requests), ordered by membership time ascending and then user ID ascending, promotes that member first, and removes the actor in the same transaction. Concurrent leave operations for one group are serialized by a PostgreSQL transaction-scoped advisory lock. If no current member can succeed the sole administrator, the operation fails closed and preserves all associations. Administrative member removal uses the same serialized group boundary: the trusted administrator is re-authorized from both canonical Admin edges after the lock is held, then the non-admin target's Member/HaveMember pair and only that group's one-way Visited edge are removed in the same transaction. Visits to other groups are preserved, and administrator targets must use the dedicated demotion/leave flows.
 
 `profilePosts` is the chronological authored stream used by the profile's All tab and
-returns both visible `FeedPostDetail` and `ReelDetail` items. It derives the viewer from
+returns only visible `FeedPostDetail` and `ReelDetail` items. `GroupPostDetail` is explicitly
+excluded even when the target authored it; group-authored content remains available through
+`groupPosts`/`groupUserPosts` under group privacy and membership checks. It derives the viewer from
 the trusted Gateway context, applies the existing two-way block check, and hydrates the
 page through `ContentGraphService`, so all four feed/Reel privacy values are evaluated
 from current state. `profileReels` remains the Reel-only collection for the dedicated tab.
+
+Post sharing is viewer-aware and supports four canonical source types: Group, FeedPost,
+GroupPost and Reel. The resolver derives the actor from trusted Gateway context, unwraps an
+existing FeedPost/GroupPost wrapper to its final source, checks current source visibility, and
+optionally accepts `destinationGroupId`. A destination group requires current Member/Admin
+participation and creates a GroupPost wrapper; without it, the wrapper is a FeedPost with privacy
+0/1/2/3. Both normal GroupPost creation and destination-group sharing recheck participation inside
+the content transaction and hold a PostgreSQL row lock on that membership until commit, closing the
+leave/remove race between authorization and the `Published` edge. Story sharing deliberately remains restricted to FeedPost/Reel through the separate
+`CanShareStoryTargetAsync` policy.
+
+Every wrapper read re-evaluates the original source for that viewer. A private GroupPost returns
+full author/content/media/mentions only to a current member or administrator. Other viewers receive
+only safe group-card metadata plus `requiresGroupMembership`; a deleted source or a two-way block
+returns the generic unavailable projection. Group metadata itself is discoverable to authenticated
+users so a private group can be found and joined. Wrapper privacy never widens original-source
+access, and browser traffic still reaches these operations only through Gateway GraphQL.
 
 Raw object/association CRUD is not part of the public schema. Search hydration is provided through five internal Fusion lookups (`userSearchResult`, `groupSearchResult`, `feedPostSearchResult`, `groupPostSearchResult`, and `reelSearchResult`). Messenger hydrates participants through the federated `User @key(id)` entity. All hydration applies block and content/group privacy rules.
 
@@ -112,9 +137,21 @@ owned by Authentication: SocialGraph reads only `{ userId, email }` for an activ
 through the existing signed internal REST client with timestamp/nonce replay protection.
 There is no browser-to-Authentication shortcut and no credential/session field is exposed.
 
-Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. Shared feed-post privacy is checked both when a Story is created and each time it is read, so a source made private later is no longer returned. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
+Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. A feed post or reel may be shared only while the trusted actor can read it. Every Story read independently rechecks the Story viewer against the source's current privacy and two-way block state, so changing privacy or relationships hides the source only from viewers who no longer have access. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
 
 `updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
+
+`groupMedia(groupId, cursor, limit)` is the viewer-aware group profile gallery and returns
+only photo/video attachments from currently visible GroupPosts. `groupPhotos` remains the
+photo-only compatibility query. Both reuse current group privacy and post visibility checks.
+GroupPost creation accepts `taggedUserIds`; tags and mention tokens are accepted only when each
+referenced account is both the actor's current friend and a current member/administrator of the
+same group, with two-way blocks taking precedence. GroupPost detail returns `taggedUsers`.
+
+`deleteContent` remains author-only for feed posts, Reels, comments and Stories. A GroupPost may
+also be deleted by a current administrator of the exact group reached through its `PublishedIn`
+edge. Supplying another group ID cannot grant deletion authority because the mutation accepts
+only the content ID and derives both caller and owning group from trusted/current state.
 
 `createReel` uses feed privacy `0..3` and persists non-destructive presentation metadata:
 `aspectRatio` is constrained to `9/16..16/9`, while `focalPointX` and `focalPointY` are
@@ -137,7 +174,28 @@ avatar viewing. No database-table migration or browser-to-service shortcut is in
 
 Comments are paged as direct children of either a post/Reel or another comment, so clients can expand reply levels lazily without loading an unbounded tree. `createComment` accepts text, one optional image, or both; non-image comment media is rejected. Comment projections include that image, direct reply count, and batched viewer-relative author follow state. `ContentEngagementResult.commentCount` counts the complete descendant comment tree while each comment's `replyCount` remains direct-only. `ContentEngagementResult.viewCount` reports the number of unique `WatchedBy` users for a Reel.
 
-`inviteGroupUser` is an admin-only notification flow and does not silently add membership; the invited user still uses the normal join/request flow. Feed/story shares enqueue canonical Share notifications for the original author and suppress self-notifications.
+`requestJoinGroup` always creates a pending request for both public and private groups;
+group privacy controls post visibility, not admission. Only a current administrator can
+approve that request and create membership. `inviteGroupUser` is available to a current
+member/administrator for one of their current friends, remains block-aware, and only queues
+the invitation notification. It never silently creates membership; the invited user still
+uses the same request/approval flow. Feed/story shares enqueue canonical Share notifications
+for the original author and suppress self-notifications.
+
+`groupJoinRequests(groupId, cursor, limit)` is a typed, administrator-only projection over
+the group-side inverse edge `HaveGroupJoinRequest(18)`. The trusted caller is checked both at
+the resolver and read-model boundary, the page is capped at 50, blocked/deleted profiles are
+not hydrated, and the API returns `UserSummaryPageResult` rather than exposing raw association
+rows. `pendingGroupJoins` continues to read the caller-side `GroupJoinRequest(17)` edge.
+
+Group role termination is fail-closed. Removing an administrator owns a serializable
+transaction and takes the same PostgreSQL advisory group lock as `leaveGroup`; it preserves
+membership and refuses to remove the last administrator. `deleteGroup` keeps its public
+GraphQL shape but passes the trusted actor into the service and succeeds only when that actor
+is both a current administrator and the final current participant. Pending requests do not
+count as participants and are removed with the group. The final-participant check and local
+group deletion run in a service-owned Serializable transaction under the same PostgreSQL
+advisory group lock; external cleanup is dispatched only after that transaction commits.
 
 ## Configuration
 

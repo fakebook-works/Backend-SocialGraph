@@ -1,8 +1,10 @@
 namespace SocialGraph.Api.Service;
 
+using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
 
@@ -94,9 +96,60 @@ public sealed class GroupGraphService : IGroupGraphService
         return await GetGroupAsync(input.Id, cancellationToken);
     }
 
-    public async Task<bool> DeleteGroupAsync(long groupId, CancellationToken cancellationToken = default)
+    public async Task<bool> DeleteGroupAsync(long actorId, long groupId, CancellationToken cancellationToken = default)
     {
+        if (actorId <= 0 || groupId <= 0)
+        {
+            return false;
+        }
+
+        if (_dbContext.Database.IsRelational() && _dbContext.Database.CurrentTransaction is not null)
+        {
+            throw new InvalidOperationException("Group deletion must own its database transaction.");
+        }
+
+        await using var transaction = _dbContext.Database.IsRelational()
+            ? await _dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+        if (transaction is not null && string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            // Serialize deletion with leave/demotion and retain a Serializable predicate
+            // read over membership so a concurrent approval/add cannot make this decision stale.
+            await _dbContext.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(@groupId)",
+                new object[] { new NpgsqlParameter("groupId", groupId) },
+                cancellationToken);
+        }
+
+        // Deletion is the terminal path for the final participant only. Read directly
+        // from PostgreSQL rather than trusting a cached role/count projection.
+        var actorRoles = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == actorId && item.id2 == groupId &&
+                (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin))
+            .Select(item => item.atype)
+            .ToArrayAsync(cancellationToken);
+        if (!actorRoles.Contains(GraphAssociationType.Member) ||
+            !actorRoles.Contains(GraphAssociationType.Admin) ||
+            await _dbContext.AssociationsTb.AsNoTracking().AnyAsync(item =>
+                (item.id1 == groupId && item.id2 != actorId &&
+                    (item.atype == GraphAssociationType.HaveMember || item.atype == GraphAssociationType.HaveAdmin)) ||
+                (item.id2 == groupId && item.id1 != actorId &&
+                    (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin)),
+                cancellationToken))
+        {
+            return false;
+        }
+
         var current = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+        if (current?.otype != GraphObjectType.Group)
+        {
+            return false;
+        }
+
         var currentData = current is null ? null : GraphJson.ParseObject(current.data);
         var profileMedia = currentData is null
             ? Array.Empty<string>()
@@ -105,29 +158,37 @@ public sealed class GroupGraphService : IGroupGraphService
                 GraphJson.String(currentData, "avatar"),
                 GraphJson.String(currentData, "background")
             }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var groupPostIds = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(item => item.id1 == groupId && item.atype == GraphAssociationType.Published)
+            .Select(item => item.id2)
+            .Distinct()
+            .ToArrayAsync(cancellationToken);
+        await _associationService.DeleteObjectAssociationsAsync(groupId, cancellationToken);
+        var deleted = await _objectService.DeleteObjectAsync(groupId, cancellationToken);
+        if (!deleted)
+        {
+            return false;
+        }
+
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        // Do not hold the lifecycle transaction while dispatching cleanup work. The group
+        // is already unavailable; bounded/idempotent cleanup can safely finish afterwards.
         if (_contentGraphService is not null)
         {
-            var groupPostIds = await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => item.id1 == groupId && item.atype == GraphAssociationType.Published)
-                .Select(item => item.id2)
-                .Distinct()
-                .ToArrayAsync(cancellationToken);
             foreach (var postId in groupPostIds)
             {
                 await _contentGraphService.DeleteContentAsync(postId, cancellationToken);
             }
         }
-        await _associationService.DeleteObjectAssociationsAsync(groupId, cancellationToken);
-        var deleted = await _objectService.DeleteObjectAsync(groupId, cancellationToken);
-        if (deleted)
-        {
-            await _externalServiceClient.DeleteSearchIndexAsync(groupId, cancellationToken);
-            // Cascade cleanup of stored group artwork; ownership was validated when it was set.
-            await _externalServiceClient.DeleteMediaAsync(profileMedia, null, cancellationToken);
-        }
-
-        return deleted;
+        await _externalServiceClient.DeleteSearchIndexAsync(groupId, cancellationToken);
+        // Cascade cleanup of stored group artwork; ownership was validated when it was set.
+        await _externalServiceClient.DeleteMediaAsync(profileMedia, null, cancellationToken);
+        return true;
     }
 
     public async Task<GroupResult?> GetGroupAsync(long groupId, CancellationToken cancellationToken = default)
@@ -327,6 +388,60 @@ public sealed class GroupGraphService : IGroupGraphService
                     friendMembers,
                     yesterdayPostCounts.GetValueOrDefault(groupId));
             })
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<GroupSuggestionFriendResult>> GetGroupFriendMembersAsync(
+        long viewerId,
+        long groupId,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var take = Math.Clamp(limit, 1, 12);
+        var groupExists = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .AnyAsync(item => item.id == groupId && item.otype == GraphObjectType.Group, cancellationToken);
+        if (!groupExists)
+        {
+            return Array.Empty<GroupSuggestionFriendResult>();
+        }
+
+        var friendIds = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(friend =>
+                friend.id1 == viewerId &&
+                friend.atype == GraphAssociationType.Friend &&
+                _dbContext.AssociationsTb.Any(membership =>
+                    membership.id1 == friend.id2 &&
+                    membership.id2 == groupId &&
+                    (membership.atype == GraphAssociationType.Member ||
+                     membership.atype == GraphAssociationType.Admin)))
+            .OrderByDescending(friend => friend.time)
+            .ThenByDescending(friend => friend.id2)
+            .Select(friend => friend.id2)
+            .Take(take)
+            .ToArrayAsync(cancellationToken);
+        if (friendIds.Length == 0)
+        {
+            return Array.Empty<GroupSuggestionFriendResult>();
+        }
+
+        var blockedIds = await _blockVisibility.GetBlockedUserIdsAsync(viewerId, friendIds, cancellationToken);
+        var visibleFriendIds = friendIds.Where(friendId => !blockedIds.Contains(friendId)).ToArray();
+        if (visibleFriendIds.Length == 0)
+        {
+            return Array.Empty<GroupSuggestionFriendResult>();
+        }
+
+        var profiles = await _userGraphService.GetProfilesForViewerAsync(
+            viewerId,
+            visibleFriendIds,
+            cancellationToken);
+        var profilesById = profiles.ToDictionary(profile => profile.Id);
+        return visibleFriendIds
+            .Where(profilesById.ContainsKey)
+            .Select(friendId => profilesById[friendId])
+            .Select(profile => new GroupSuggestionFriendResult(profile.Id, profile.Name, profile.Avatar))
             .ToArray();
     }
 
@@ -537,18 +652,15 @@ public sealed class GroupGraphService : IGroupGraphService
             return false;
         }
 
-        var group = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-        var groupData = GraphJson.ParseObject(group!.data);
-        if (GraphJson.Int(groupData, "privacy") == 0)
-        {
-            return await AddMemberAsync(groupId, userId, cancellationToken);
-        }
-
-        await _associationService.AddAssociationAsync(
+        var requested = await _associationService.AddAssociationAsync(
             userId,
             GraphAssociationType.GroupJoinRequest,
             groupId,
             cancellationToken);
+        if (!requested)
+        {
+            return false;
+        }
 
         var admins = await _associationService.RetrieveAssociationAsync(
             groupId,
@@ -631,12 +743,12 @@ public sealed class GroupGraphService : IGroupGraphService
     }
 
     public async Task<bool> InviteUserAsync(
-        long adminId,
+        long inviterId,
         long groupId,
         long userId,
         CancellationToken cancellationToken = default)
     {
-        if (!await IsAdminAsync(adminId, groupId, cancellationToken) ||
+        if (!await IsParticipantAsync(inviterId, groupId, cancellationToken) ||
             !await AreUserAndGroupAsync(userId, groupId, cancellationToken) ||
             await IsParticipantAsync(userId, groupId, cancellationToken) ||
             await _associationService.HasAssociationAsync(
@@ -644,13 +756,18 @@ public sealed class GroupGraphService : IGroupGraphService
                 GraphAssociationType.GroupJoinRequest,
                 groupId,
                 cancellationToken) ||
+            !await _associationService.HasAssociationAsync(
+                inviterId,
+                GraphAssociationType.Friend,
+                userId,
+                cancellationToken) ||
             await _associationService.HasAssociationAsync(
-                adminId,
+                inviterId,
                 GraphAssociationType.Blocked,
                 userId,
                 cancellationToken) ||
             await _associationService.HasAssociationAsync(
-                adminId,
+                inviterId,
                 GraphAssociationType.BlockedBy,
                 userId,
                 cancellationToken))
@@ -659,7 +776,7 @@ public sealed class GroupGraphService : IGroupGraphService
         }
 
         await _externalServiceClient.NotifyAsync(
-            adminId,
+            inviterId,
             userId,
             ExternalNotificationAction.GroupInvite,
             groupId,
@@ -670,27 +787,10 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<bool> LeaveGroupAsync(long userId, long groupId, CancellationToken cancellationToken = default)
     {
-        if (await IsAdminAsync(userId, groupId, cancellationToken))
-        {
-            var adminCount = await _associationService.CountAssociationAsync(
-                groupId,
-                GraphAssociationType.HaveAdmin,
-                cancellationToken);
-            if (adminCount <= 1)
-            {
-                return false;
-            }
-
-            return await _associationService.ApplyMutationsAsync(
-                new AssociationMutation[]
-                {
-                    new(userId, GraphAssociationType.Admin, groupId, false),
-                    new(userId, GraphAssociationType.Member, groupId, false)
-                },
-                cancellationToken);
-        }
-
-        return await RemoveMemberAsync(groupId, userId, cancellationToken);
+        return await _associationService.LeaveGroupWithAdminTransferAsync(
+            userId,
+            groupId,
+            cancellationToken);
     }
 
     public Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
@@ -704,14 +804,17 @@ public sealed class GroupGraphService : IGroupGraphService
             cancellationToken);
     }
 
-    public async Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default)
+    public Task<bool> RemoveMemberAsync(
+        long adminId,
+        long groupId,
+        long userId,
+        CancellationToken cancellationToken = default)
     {
-        if (await IsAdminAsync(userId, groupId, cancellationToken))
-        {
-            return false;
-        }
-
-        return await _associationService.DeleteOneAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken);
+        return _associationService.RemoveGroupMemberByAdminAsync(
+            adminId,
+            userId,
+            groupId,
+            cancellationToken);
     }
 
     public async Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
@@ -727,27 +830,7 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<bool> RemoveAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default)
     {
-        if (!await IsAdminAsync(userId, groupId, cancellationToken))
-        {
-            return false;
-        }
-
-        var adminCount = await _associationService.CountAssociationAsync(
-            groupId,
-            GraphAssociationType.HaveAdmin,
-            cancellationToken);
-        if (adminCount <= 1)
-        {
-            return false;
-        }
-
-        return await _associationService.ApplyMutationsAsync(
-            new AssociationMutation[]
-            {
-                new(userId, GraphAssociationType.Member, groupId, true),
-                new(userId, GraphAssociationType.Admin, groupId, false)
-            },
-            cancellationToken);
+        return await _associationService.DemoteGroupAdminAsync(userId, groupId, cancellationToken);
     }
 
     private async Task<bool> AreUserAndGroupAsync(long userId, long groupId, CancellationToken cancellationToken)

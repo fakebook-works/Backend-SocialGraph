@@ -13,7 +13,7 @@ public sealed class StoryServiceTests
     private const long StoryAuthorId = 200;
 
     [Fact]
-    public async Task HomeStories_RechecksSharedPostPrivacyOnEveryRead()
+    public async Task HomeStories_RechecksTheCurrentViewersSharedPostAccessOnEveryRead()
     {
         await using var context = CreateContext();
         var storyId = 1_000L;
@@ -24,25 +24,26 @@ public sealed class StoryServiceTests
             new Objects { id = postId, otype = GraphObjectType.FeedPost, data = PostJson("private source", 1) });
         context.AssociationsTb.AddRange(
             Edge(StoryAuthorId, GraphAssociationType.Authored, storyId),
+            Edge(postId, GraphAssociationType.AuthoredBy, StoryAuthorId),
+            Edge(ViewerId, GraphAssociationType.Friend, StoryAuthorId),
             Edge(storyId, GraphAssociationType.Share, postId));
         await context.SaveChangesAsync();
         var associations = VisibleAuthorAssociations();
         var service = CreateService(context, associations);
 
+        var visible = await service.GetHomeStoriesAsync(ViewerId, 20, null);
+
+        var visibleBucket = Assert.Single(visible.Items);
+        var visibleStory = Assert.IsType<FeedPostShareStoryResult>(Assert.Single(visibleBucket.Stories));
+        Assert.Equal("private source", visibleStory.SharedSource.Content);
+
+        var source = await context.ObjectsTb.FindAsync(postId);
+        source!.data = PostJson("author only source", 3);
+        await context.SaveChangesAsync();
+
         var hidden = await service.GetHomeStoriesAsync(ViewerId, 20, null);
 
         Assert.Empty(hidden.Items);
-
-        var source = await context.ObjectsTb.FindAsync(postId);
-        source!.data = PostJson("public source", 0);
-        await context.SaveChangesAsync();
-
-        var visible = await service.GetHomeStoriesAsync(ViewerId, 20, null);
-
-        var bucket = Assert.Single(visible.Items);
-        var story = Assert.IsType<FeedPostShareStoryResult>(Assert.Single(bucket.Stories));
-        Assert.Equal(postId, story.SharedSource.Id);
-        Assert.Equal("public source", story.SharedSource.Content);
     }
 
     [Fact]

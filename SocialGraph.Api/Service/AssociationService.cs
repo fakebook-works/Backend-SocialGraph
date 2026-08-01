@@ -1,5 +1,6 @@
 namespace SocialGraph.Api.Service;
 
+using System.Data;
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -136,6 +137,326 @@ public sealed class AssociationService : IAssociationService
         });
 
         return affected > 0;
+    }
+
+    /// <summary>
+    /// Removes a current group participant and, when that participant is the sole
+    /// administrator, promotes the earliest remaining member before the removal.
+    /// The successor is deliberately selected by the service rather than supplied by
+    /// the client so this operation cannot be used to grant arbitrary admin rights.
+    /// </summary>
+    public async Task<bool> LeaveGroupWithAdminTransferAsync(
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken = default)
+    {
+        if (userId <= 0 || groupId <= 0 || userId == groupId)
+        {
+            return false;
+        }
+
+        if (_dbContext.Database.IsRelational() && _dbContext.Database.CurrentTransaction is not null)
+        {
+            // Cache invalidation must happen after the transaction that owns these writes
+            // commits. This operation is therefore an atomic service boundary and must not
+            // be embedded in a caller-owned transaction.
+            throw new InvalidOperationException("Group leave must own its database transaction.");
+        }
+
+        await using var transaction = _dbContext.Database.IsRelational()
+            ? await _dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+
+        if (transaction is not null && string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            // Serialize concurrent leave operations for the same group before any
+            // membership/admin read. A single bigint key preserves the Snowflake group ID.
+            await _dbContext.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(@groupId)",
+                new object[] { new NpgsqlParameter("groupId", groupId) },
+                cancellationToken);
+        }
+
+        var memberExists = await _dbContext.AssociationsTb
+            .AnyAsync(item =>
+                item.id1 == userId &&
+                item.atype == GraphAssociationType.Member &&
+                item.id2 == groupId,
+                cancellationToken);
+        if (!memberExists)
+        {
+            return false;
+        }
+
+        var isAdmin = await _dbContext.AssociationsTb
+            .AnyAsync(item =>
+                item.id1 == userId &&
+                item.atype == GraphAssociationType.Admin &&
+                item.id2 == groupId,
+                cancellationToken);
+
+        long? successorId = null;
+        if (isAdmin)
+        {
+            var hasAnotherAdmin = await _dbContext.AssociationsTb
+                .AnyAsync(item =>
+                    item.id1 == groupId &&
+                    item.atype == GraphAssociationType.HaveAdmin &&
+                    item.id2 != userId,
+                    cancellationToken);
+
+            if (!hasAnotherAdmin)
+            {
+                successorId = await _dbContext.AssociationsTb
+                    .Where(item =>
+                        item.id1 == groupId &&
+                        item.atype == GraphAssociationType.HaveMember &&
+                        item.id2 != userId)
+                    .OrderBy(item => item.time)
+                    .ThenBy(item => item.id2)
+                    .Select(item => (long?)item.id2)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (successorId is null)
+                {
+                    // The last participant must use the explicit group-deletion flow.
+                    // Disposing the uncommitted transaction preserves Admin, Member and Visited.
+                    return false;
+                }
+            }
+        }
+
+        var rowsToRemove = await _dbContext.AssociationsTb
+            .Where(item =>
+                (item.id1 == userId && item.id2 == groupId &&
+                    (item.atype == GraphAssociationType.Member ||
+                     item.atype == GraphAssociationType.Admin ||
+                     item.atype == GraphAssociationType.Visited)) ||
+                (item.id1 == groupId && item.id2 == userId &&
+                    (item.atype == GraphAssociationType.HaveMember ||
+                     item.atype == GraphAssociationType.HaveAdmin)))
+            .ToListAsync(cancellationToken);
+
+        if (successorId is long nextAdminId)
+        {
+            var promotedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _dbContext.AssociationsTb.AddRange(
+                new Associations
+                {
+                    id1 = nextAdminId,
+                    atype = GraphAssociationType.Admin,
+                    id2 = groupId,
+                    time = promotedAt
+                },
+                new Associations
+                {
+                    id1 = groupId,
+                    atype = GraphAssociationType.HaveAdmin,
+                    id2 = nextAdminId,
+                    time = promotedAt
+                });
+        }
+
+        _dbContext.AssociationsTb.RemoveRange(rowsToRemove);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        var affectedCacheKeys = new HashSet<(long id1, short atype)>
+        {
+            (userId, GraphAssociationType.Member),
+            (groupId, GraphAssociationType.HaveMember),
+            (userId, GraphAssociationType.Admin),
+            (groupId, GraphAssociationType.HaveAdmin),
+            (userId, GraphAssociationType.Visited)
+        };
+        if (successorId is long promotedUserId)
+        {
+            affectedCacheKeys.Add((promotedUserId, GraphAssociationType.Admin));
+        }
+
+        await TryRedisWriteAsync(async () =>
+        {
+            foreach (var key in affectedCacheKeys)
+            {
+                await DeleteAssociationCacheAsync(key.id1, key.atype);
+            }
+        });
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes a non-administrator member and that member's shortcut visit in one
+    /// transaction. The administrator is re-authorized after taking the group lock,
+    /// so a stale resolver check cannot authorize a later membership mutation.
+    /// </summary>
+    public async Task<bool> RemoveGroupMemberByAdminAsync(
+        long adminId,
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken = default)
+    {
+        if (adminId <= 0 || userId <= 0 || groupId <= 0 || adminId == userId ||
+            adminId == groupId || userId == groupId)
+        {
+            return false;
+        }
+
+        if (_dbContext.Database.IsRelational() && _dbContext.Database.CurrentTransaction is not null)
+        {
+            throw new InvalidOperationException("Group member removal must own its database transaction.");
+        }
+
+        await using var transaction = _dbContext.Database.IsRelational()
+            ? await _dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+
+        if (transaction is not null && string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            await _dbContext.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(@groupId)",
+                new object[] { new NpgsqlParameter("groupId", groupId) },
+                cancellationToken);
+        }
+
+        var relevantRows = await _dbContext.AssociationsTb
+            .Where(item =>
+                (item.id1 == adminId && item.id2 == groupId && item.atype == GraphAssociationType.Admin) ||
+                (item.id1 == groupId && item.id2 == adminId && item.atype == GraphAssociationType.HaveAdmin) ||
+                (item.id1 == userId && item.id2 == groupId &&
+                    (item.atype == GraphAssociationType.Member ||
+                     item.atype == GraphAssociationType.Admin ||
+                     item.atype == GraphAssociationType.Visited)) ||
+                (item.id1 == groupId && item.id2 == userId &&
+                    (item.atype == GraphAssociationType.HaveMember ||
+                     item.atype == GraphAssociationType.HaveAdmin)))
+            .ToListAsync(cancellationToken);
+
+        var actorIsCurrentAdmin = relevantRows.Any(item =>
+                item.id1 == adminId && item.atype == GraphAssociationType.Admin && item.id2 == groupId) &&
+            relevantRows.Any(item =>
+                item.id1 == groupId && item.atype == GraphAssociationType.HaveAdmin && item.id2 == adminId);
+        var targetIsCurrentMember = relevantRows.Any(item =>
+            item.id1 == userId && item.atype == GraphAssociationType.Member && item.id2 == groupId);
+        var targetHasAdminRole = relevantRows.Any(item =>
+            (item.id1 == userId && item.atype == GraphAssociationType.Admin && item.id2 == groupId) ||
+            (item.id1 == groupId && item.atype == GraphAssociationType.HaveAdmin && item.id2 == userId));
+
+        if (!actorIsCurrentAdmin || !targetIsCurrentMember || targetHasAdminRole)
+        {
+            return false;
+        }
+
+        var rowsToRemove = relevantRows.Where(item =>
+            (item.id1 == userId && item.id2 == groupId &&
+                (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Visited)) ||
+            (item.id1 == groupId && item.id2 == userId && item.atype == GraphAssociationType.HaveMember));
+        _dbContext.AssociationsTb.RemoveRange(rowsToRemove);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        await TryRedisWriteAsync(async () =>
+        {
+            await DeleteAssociationCacheAsync(userId, GraphAssociationType.Member);
+            await DeleteAssociationCacheAsync(groupId, GraphAssociationType.HaveMember);
+            await DeleteAssociationCacheAsync(userId, GraphAssociationType.Visited);
+        });
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes one administrator role while preserving membership and the invariant
+    /// that every non-empty group has at least one current administrator. PostgreSQL
+    /// serializes this operation with group leave through the same advisory-lock key.
+    /// </summary>
+    public async Task<bool> DemoteGroupAdminAsync(
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken = default)
+    {
+        if (userId <= 0 || groupId <= 0 || userId == groupId)
+        {
+            return false;
+        }
+
+        if (_dbContext.Database.IsRelational() && _dbContext.Database.CurrentTransaction is not null)
+        {
+            throw new InvalidOperationException("Group administrator demotion must own its database transaction.");
+        }
+
+        await using var transaction = _dbContext.Database.IsRelational()
+            ? await _dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            : null;
+
+        if (transaction is not null && string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            await _dbContext.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(@groupId)",
+                new object[] { new NpgsqlParameter("groupId", groupId) },
+                cancellationToken);
+        }
+
+        var roleRows = await _dbContext.AssociationsTb
+            .Where(item =>
+                (item.id1 == userId && item.id2 == groupId &&
+                    (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin)) ||
+                (item.id1 == groupId && item.id2 == userId &&
+                    (item.atype == GraphAssociationType.HaveMember || item.atype == GraphAssociationType.HaveAdmin)))
+            .ToListAsync(cancellationToken);
+        var isMember = roleRows.Any(item =>
+            item.id1 == userId && item.atype == GraphAssociationType.Member && item.id2 == groupId);
+        var isAdmin = roleRows.Any(item =>
+            item.id1 == userId && item.atype == GraphAssociationType.Admin && item.id2 == groupId);
+        if (!isMember || !isAdmin)
+        {
+            return false;
+        }
+
+        var hasAnotherAdmin = await _dbContext.AssociationsTb
+            .AnyAsync(item =>
+                item.id1 == groupId &&
+                item.atype == GraphAssociationType.HaveAdmin &&
+                item.id2 != userId,
+                cancellationToken);
+        if (!hasAnotherAdmin)
+        {
+            return false;
+        }
+
+        _dbContext.AssociationsTb.RemoveRange(roleRows.Where(item =>
+            item.atype == GraphAssociationType.Admin || item.atype == GraphAssociationType.HaveAdmin));
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        await TryRedisWriteAsync(async () =>
+        {
+            await DeleteAssociationCacheAsync(userId, GraphAssociationType.Admin);
+            await DeleteAssociationCacheAsync(groupId, GraphAssociationType.HaveAdmin);
+        });
+
+        return true;
     }
 
     public Task<bool> HasAssociationAsync(

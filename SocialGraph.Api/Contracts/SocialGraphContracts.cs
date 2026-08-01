@@ -55,6 +55,7 @@ public sealed record CreateGroupPostInput(
     long GroupId,
     string Content,
     IReadOnlyList<MediaInput>? Media,
+    IReadOnlyList<long>? TaggedUserIds = null,
     IReadOnlyList<long>? MentionedUserIds = null);
 
 public sealed record UpdatePostInput(
@@ -96,7 +97,12 @@ public sealed record CreateReelInput(
     double? FocalPointX = null,
     double? FocalPointY = null);
 
-public sealed record SharePostInput(long AuthorId, long SourceId, string Content, int Privacy);
+public sealed record SharePostInput(
+    long AuthorId,
+    long SourceId,
+    string Content,
+    int Privacy,
+    long? DestinationGroupId = null);
 
 public sealed record OperationResult(bool Success, string? Message = null);
 
@@ -213,7 +219,9 @@ public sealed record GroupPostDetailResult(
     PostAuthorResult Author,
     PostGroupResult Group,
     IReadOnlyList<MediaResult> Media,
-    IReadOnlyList<MentionUserResult>? Mentions = null) : IHomePostResult;
+    IReadOnlyList<MentionUserResult>? Mentions = null,
+    IReadOnlyList<UserSummaryResult>? TaggedUsers = null,
+    SharedPostSourceResult? SharedSource = null) : IHomePostResult;
 
 [GraphQLName("RecommendationItem")]
 public sealed record RecommendationItemResult(
@@ -243,7 +251,19 @@ public sealed record SharedPostSourceResult(
     IReadOnlyList<MediaResult> Media,
     IReadOnlyList<MentionUserResult>? Mentions = null,
     int? Privacy = null,
-    string? Create = null);
+    string? Create = null,
+    SharedPostGroupResult? Group = null,
+    bool RequiresGroupMembership = false);
+
+public sealed record SharedPostGroupResult(
+    long Id,
+    string Name,
+    string Avatar,
+    string Background,
+    int Privacy,
+    long MemberCount,
+    bool ViewerIsMember,
+    bool JoinRequestPending);
 
 public sealed record UserSummaryResult(
     long Id,

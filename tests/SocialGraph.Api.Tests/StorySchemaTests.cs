@@ -44,7 +44,9 @@ public sealed class StorySchemaTests
         Assert.Contains("unseenCount", schema);
         Assert.Contains("recordGroupVisit", schema);
         Assert.Contains("incomingFriendRequests", schema);
-        Assert.Contains("groupJoinRequests", schema);
+        Assert.Contains(
+            "groupJoinRequests(groupId: Long!, cursor: String, limit: Int!): UserSummaryPageResult!",
+            schema);
         Assert.Contains("userSearchResult(referenceId: ID!): UserSearchResult", schema);
         Assert.Contains("groupSearchResult(referenceId: ID!): GroupSearchResult", schema);
         Assert.Contains("viewerIsSelf: Boolean!", schema);

@@ -151,5 +151,17 @@ public sealed class AssociationContractTests
             GraphAssociationType.Contained,
             GraphObjectType.User,
             GraphObjectType.Media));
+        Assert.True(GraphAssociationRules.IsValidForObjectTypes(
+            GraphAssociationType.Share,
+            GraphObjectType.FeedPost,
+            GraphObjectType.Group));
+        Assert.True(GraphAssociationRules.IsValidForObjectTypes(
+            GraphAssociationType.Share,
+            GraphObjectType.GroupPost,
+            GraphObjectType.GroupPost));
+        Assert.False(GraphAssociationRules.IsValidForObjectTypes(
+            GraphAssociationType.Share,
+            GraphObjectType.Story,
+            GraphObjectType.Group));
     }
 }

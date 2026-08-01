@@ -108,6 +108,34 @@ public sealed class SocialReadModelService : ISocialReadModelService
         return new GroupMembershipPageResult(groups, page.nextCursor, page.nextCursor is not null);
     }
 
+    public async Task<UserSummaryPageResult> GetGroupJoinRequestsAsync(
+        long viewerId,
+        long groupId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        // Keep the authorization check inside the read model as well as at the resolver
+        // boundary. This prevents another caller from reusing this service as a raw
+        // association-reader and makes current database state authoritative.
+        if (!await _associationService.HasAssociationAsync(
+                viewerId,
+                GraphAssociationType.Admin,
+                groupId,
+                cancellationToken))
+        {
+            return EmptyUsers();
+        }
+
+        return await GetAssociatedUsersAsync(
+            viewerId,
+            groupId,
+            GraphAssociationType.HaveGroupJoinRequest,
+            cursor,
+            Math.Clamp(limit, 1, 50),
+            cancellationToken);
+    }
+
     public async Task<UserSummaryPageResult> GetGroupMembersAsync(
         long viewerId,
         long groupId,
@@ -244,7 +272,19 @@ public sealed class SocialReadModelService : ISocialReadModelService
         CancellationToken cancellationToken = default)
     {
         return await CanViewGroupAsync(viewerId, groupId, cancellationToken)
-            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, includeVideos: false, cancellationToken)
+            : EmptyPhotos();
+    }
+
+    public async Task<PhotoPageResult> GetGroupMediaAsync(
+        long viewerId,
+        long groupId,
+        string? cursor,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        return await CanViewGroupAsync(viewerId, groupId, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, includeVideos: true, cancellationToken)
             : EmptyPhotos();
     }
 
@@ -257,7 +297,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         CancellationToken cancellationToken = default)
     {
         return await CanViewGroupAsync(viewerId, groupId, cancellationToken)
-            ? await GetGroupPhotoPageAsync(viewerId, groupId, userId, cursor, limit, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, userId, cursor, limit, includeVideos: false, cancellationToken)
             : EmptyPhotos();
     }
 
@@ -277,7 +317,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
     {
         return await _associationService.HasAssociationAsync(
             viewerId, GraphAssociationType.Admin, groupId, cancellationToken)
-            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, cancellationToken)
+            ? await GetGroupPhotoPageAsync(viewerId, groupId, null, cursor, limit, includeVideos: false, cancellationToken)
             : EmptyPhotos();
     }
 
@@ -360,11 +400,12 @@ public sealed class SocialReadModelService : ISocialReadModelService
             return new CommentPageResult(Array.Empty<CommentThreadItemResult>(), null, false);
         }
 
+        var take = Math.Clamp(limit, 1, 50);
         var page = await _associationService.RetrieveAssociationAsync(
             targetId,
             GraphAssociationType.HaveComment,
             cursor,
-            Math.Clamp(limit, 1, 50),
+            Math.Min(take * 4, 100),
             cancellationToken);
         if (page.items.Count == 0)
         {
@@ -430,9 +471,11 @@ public sealed class SocialReadModelService : ISocialReadModelService
                 .ToArray(),
             cancellationToken);
         var authorViewerStates = await GetCommentAuthorViewerStatesAsync(viewerId, authorIds, cancellationToken);
-        var result = new List<CommentThreadItemResult>(page.items.Count);
+        var result = new List<CommentThreadItemResult>(take);
+        var processed = 0;
         foreach (var edge in page.items)
         {
+            processed++;
             if (!comments.TryGetValue(edge.id2, out var comment) ||
                 !authorByComment.TryGetValue(edge.id2, out var authorId) ||
                 (authorId != viewerId && blockedUserIds.Contains(authorId)) ||
@@ -471,9 +514,17 @@ public sealed class SocialReadModelService : ISocialReadModelService
                 authorViewerState.IsFollowing,
                 mentions,
                 media));
+            if (result.Count == take)
+            {
+                break;
+            }
         }
 
-        return new CommentPageResult(result, page.nextCursor, page.nextCursor is not null);
+        var hasNext = processed < page.items.Count || page.nextCursor is not null;
+        return new CommentPageResult(
+            result,
+            hasNext ? AdvanceCursor(cursor, processed) : null,
+            hasNext);
     }
 
     public async Task<ContentEngagementResult?> GetEngagementAsync(
@@ -635,14 +686,24 @@ public sealed class SocialReadModelService : ISocialReadModelService
         CancellationToken cancellationToken = default)
     {
         var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
-        if (target?.otype == GraphObjectType.Reel)
+        if (target?.otype == GraphObjectType.Group)
         {
-            return GraphJson.Int(GraphJson.ParseObject(target.data), "privacy") == 0 &&
-                   await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
+            // Group profile metadata is intentionally visible to every authenticated account,
+            // including private groups, so users can discover and request to join them.
+            return viewerId > 0;
         }
 
-        return target?.otype == GraphObjectType.FeedPost &&
-               GraphJson.Int(GraphJson.ParseObject(target.data), "privacy") == 0 &&
+        return target?.otype is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel &&
+               await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
+    }
+
+    public async Task<bool> CanShareStoryTargetAsync(
+        long viewerId,
+        long targetId,
+        CancellationToken cancellationToken = default)
+    {
+        var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
+        return target?.otype is GraphObjectType.FeedPost or GraphObjectType.Reel &&
                await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
     }
 
@@ -807,6 +868,18 @@ public sealed class SocialReadModelService : ISocialReadModelService
 
         if (target.otype == GraphObjectType.Comment)
         {
+            var commentAuthorPage = await _associationService.RetrieveAssociationAsync(
+                targetId,
+                GraphAssociationType.AuthoredBy,
+                null,
+                1,
+                cancellationToken);
+            var commentAuthorId = commentAuthorPage?.items.FirstOrDefault()?.id2 ?? 0;
+            if (commentAuthorId <= 0 || await IsBlockedAsync(viewerId, commentAuthorId, cancellationToken))
+            {
+                return false;
+            }
+
             var parent = await _associationService.RetrieveAssociationAsync(
                 targetId,
                 GraphAssociationType.Comment,
@@ -914,7 +987,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
             .Take(scanTake)
             .ToListAsync(cancellationToken);
 
-        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, cancellationToken);
+        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, includeVideos: false, cancellationToken);
     }
 
     private async Task<PhotoPageResult> GetGroupPhotoPageAsync(
@@ -923,6 +996,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         long? userId,
         string? cursor,
         int limit,
+        bool includeVideos,
         CancellationToken cancellationToken)
     {
         var take = Math.Clamp(limit, 1, 50);
@@ -961,7 +1035,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
             .Take(scanTake)
             .ToListAsync(cancellationToken);
 
-        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, cancellationToken);
+        return await BuildPhotoPageAsync(viewerId, cursor, take, scanTake, rows, includeVideos, cancellationToken);
     }
 
     private async Task<PhotoPageResult> BuildPhotoPageAsync(
@@ -970,6 +1044,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         int take,
         int scanTake,
         IReadOnlyList<PhotoCandidate> rows,
+        bool includeVideos,
         CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
@@ -1003,7 +1078,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
 
             var mediaData = GraphJson.ParseObject(row.MediaData);
             var mediaType = GraphJson.Int(mediaData, "type");
-            if (mediaType != GraphMediaType.Photo)
+            if (mediaType != GraphMediaType.Photo && (!includeVideos || mediaType != GraphMediaType.Video))
             {
                 continue;
             }

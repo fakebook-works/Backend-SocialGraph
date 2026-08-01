@@ -69,7 +69,7 @@ public sealed class BlockVisibilityRegressionTests
             .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, PostJson("post")));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
         associations.Setup(service => service.RetrieveAssociationAsync(
-                postId, GraphAssociationType.HaveComment, null, 20, It.IsAny<CancellationToken>()))
+                postId, GraphAssociationType.HaveComment, null, It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(
                 [new AssociationEdgeResult(hiddenCommentId, 2), new AssociationEdgeResult(visibleCommentId, 1)],
                 null));
@@ -129,6 +129,8 @@ public sealed class BlockVisibilityRegressionTests
         await context.SaveChangesAsync();
 
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(service => service.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, "{}"));
         var associations = new Mock<IAssociationService>(MockBehavior.Strict);
         associations.Setup(service => service.RetrieveAssociationAsync(
                 postId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))

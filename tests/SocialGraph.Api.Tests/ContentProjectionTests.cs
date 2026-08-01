@@ -18,6 +18,151 @@ public sealed class ContentProjectionTests
     private const long LegacyMentionedUserId = 9_000_000_000_000_007;
 
     [Fact]
+    public async Task GroupAdministrator_CanDeleteOnlyPostsPublishedInTheirGroup()
+    {
+        await using var context = CreateContext();
+        const long groupId = 9_000_000_000_000_020;
+        const long adminId = 9_000_000_000_000_021;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.GroupPost, ContentJson("group post")));
+        objects.Setup(item => item.RetrieveObjectAsync(ReelId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(ReelId, GraphObjectType.Reel, ReelJson("reel", 0, 1d, 0.5d, 0.5d)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.PublishedIn, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(groupId, 1) }, null));
+        associations.Setup(item => item.HasAssociationAsync(adminId, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        Assert.True(await service.CanDeleteContentAsync(adminId, PostId));
+        Assert.False(await service.CanDeleteContentAsync(adminId, ReelId));
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task CreateGroupPost_RejectsReferencesUnlessTheyAreFriendAndParticipant(
+        bool isFriend,
+        bool isParticipant)
+    {
+        await using var context = CreateContext();
+        const long groupId = 9_000_000_000_000_030;
+        const long targetId = 9_000_000_000_000_031;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.HasAssociationAsync(AuthorId, GraphAssociationType.Friend, targetId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(isFriend);
+        associations.Setup(item => item.HasAssociationAsync(targetId, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(isParticipant);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.CreateGroupPostAsync(
+            new CreateGroupPostInput(
+                AuthorId,
+                groupId,
+                $"Hello [[mention:{targetId}]]",
+                null,
+                TaggedUserIds: new[] { targetId })));
+
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task CreateGroupPost_PersistsEligibleTagAndMentionReferences()
+    {
+        await using var context = CreateContext();
+        const long groupId = 9_000_000_000_000_040;
+        const long targetId = 9_000_000_000_000_041;
+        var text = $"Hello [[mention:{targetId}]]";
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.AddObjectAsync(GraphObjectType.GroupPost, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.GroupPost, ContentJson(text)));
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, new JsonObject { ["privacy"] = 1 }.ToJsonString()));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.HasAssociationAsync(AuthorId, GraphAssociationType.Friend, targetId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.HasAssociationAsync(AuthorId, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.HasAssociationAsync(targetId, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.PublishedIn, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(groupId, 1) }, null));
+        associations.Setup(item => item.AddAssociationAsync(PostId, GraphAssociationType.Tagged, targetId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.AddAssociationAsync(PostId, GraphAssociationType.Mentioned, targetId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        var created = await service.CreateGroupPostAsync(new CreateGroupPostInput(
+            AuthorId,
+            groupId,
+            text,
+            null,
+            TaggedUserIds: new[] { targetId }));
+
+        Assert.Equal(1, created.Privacy);
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Tagged, targetId, It.IsAny<CancellationToken>()), Times.Once);
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId, GraphAssociationType.Mentioned, targetId, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task SharePost_RejectsAStaleDestinationGroupMembershipBeforeWriting()
+    {
+        await using var context = CreateContext();
+        const long groupId = 9_000_000_000_000_042;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.SharePostAsync(
+            new SharePostInput(AuthorId, SourceId, "share", 0, DestinationGroupId: groupId)));
+
+        Assert.Contains("current group members", exception.Message, StringComparison.OrdinalIgnoreCase);
+        objects.Verify(item => item.AddObjectAsync(
+            It.IsAny<short>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DirectGroupReference_RejectsAccountsOutsideFriendAndParticipantIntersection(bool tag)
+    {
+        await using var context = CreateContext();
+        const long groupId = 9_000_000_000_000_050;
+        const long targetId = 9_000_000_000_000_051;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.GroupPost, ContentJson("group post")));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
+        associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.PublishedIn, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(groupId, 1) }, null));
+        associations.Setup(item => item.HasAssociationAsync(AuthorId, GraphAssociationType.Friend, targetId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => tag
+            ? service.TagAsync(PostId, targetId)
+            : service.MentionAsync(PostId, targetId));
+
+        associations.Verify(item => item.AddAssociationAsync(
+            PostId,
+            tag ? GraphAssociationType.Tagged : GraphAssociationType.Mentioned,
+            targetId,
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+
+    [Fact]
     public async Task CreateFeedPost_DerivesMentionsOnlyFromContentTokens()
     {
         await using var context = CreateContext();
@@ -322,6 +467,10 @@ public sealed class ContentProjectionTests
         objects.Setup(item => item.RetrieveObjectAsync(SourceId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(SourceId, GraphObjectType.FeedPost, PostJson("source", 0)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.AddAssociationAsync(AuthorId, GraphAssociationType.Authored, PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.AddAssociationAsync(PostId, GraphAssociationType.Share, SourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
         associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
         associations.Setup(item => item.RetrieveAssociationAsync(SourceId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
@@ -380,6 +529,10 @@ public sealed class ContentProjectionTests
         objects.Setup(item => item.RetrieveObjectAsync(SourceId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(SourceId, GraphObjectType.FeedPost, PostJson("source", 0)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.AddAssociationAsync(AuthorId, GraphAssociationType.Authored, PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.AddAssociationAsync(PostId, GraphAssociationType.Share, SourceId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
         associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
         associations.Setup(item => item.RetrieveAssociationAsync(SourceId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
@@ -397,6 +550,32 @@ public sealed class ContentProjectionTests
             PostId, GraphAssociationType.Share, wrapperId, It.IsAny<CancellationToken>()), Times.Never);
         external.Verify(item => item.RecordRecommendationInteractionAsync(
             AuthorId, SourceId, RecommendationInteractionAction.Share, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CanonicalShareSource_UnwrapsASharedGroupWrapperToTheGroup()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 9_000_000_000_000_010;
+        const long groupId = 9_000_000_000_000_011;
+        context.ObjectsTb.AddRange(
+            new Objects { id = wrapperId, otype = GraphObjectType.FeedPost, data = PostJson("shared group", 0) },
+            new Objects { id = groupId, otype = GraphObjectType.Group, data = new JsonObject { ["name"] = "Group" }.ToJsonString() });
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = wrapperId,
+            atype = GraphAssociationType.Share,
+            id2 = groupId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
+        var service = new ContentGraphService(
+            context,
+            Mock.Of<IObjectService>(),
+            Mock.Of<IAssociationService>(),
+            Mock.Of<IExternalServiceClient>());
+
+        Assert.Equal(groupId, await service.ResolveCanonicalShareSourceIdAsync(wrapperId));
     }
 
     [Fact]
@@ -432,6 +611,17 @@ public sealed class ContentProjectionTests
     {
         await using var context = CreateContext();
         const long storyId = 9_000_000_000_000_006;
+        context.ObjectsTb.AddRange(
+            new Objects { id = SourceId, otype = GraphObjectType.FeedPost, data = PostJson("source", 0) },
+            new Objects { id = SourceAuthorId, otype = GraphObjectType.User, data = UserJson("Source author") });
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = SourceId,
+            atype = GraphAssociationType.AuthoredBy,
+            id2 = SourceAuthorId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.RetrieveObjectAsync(SourceId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(SourceId, GraphObjectType.FeedPost, PostJson("source", 0)));

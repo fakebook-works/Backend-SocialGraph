@@ -18,6 +18,7 @@ public sealed class ProfilePostsQueryTests
         const long feedId = 1_001;
         const long reelId = 1_002;
         const long hiddenId = 1_003;
+        const long groupPostId = 1_004;
         var associations = new Mock<IAssociationService>(MockBehavior.Strict);
         associations.Setup(item => item.RetrieveAssociationAsync(
                 ViewerId,
@@ -28,6 +29,7 @@ public sealed class ProfilePostsQueryTests
             .ReturnsAsync(new AssociationPageResult(
                 [
                     new AssociationEdgeResult(feedId, 3),
+                    new AssociationEdgeResult(groupPostId, 2),
                     new AssociationEdgeResult(reelId, 2),
                     new AssociationEdgeResult(hiddenId, 1),
                 ],
@@ -35,7 +37,7 @@ public sealed class ProfilePostsQueryTests
         var content = new Mock<IContentGraphService>(MockBehavior.Strict);
         content.Setup(item => item.GetPostDetailsAsync(
                 ViewerId,
-                It.Is<IReadOnlyList<long>>(ids => ids.SequenceEqual(new[] { feedId, reelId, hiddenId })),
+                It.Is<IReadOnlyList<long>>(ids => ids.SequenceEqual(new[] { feedId, groupPostId, reelId, hiddenId })),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync([
                 new FeedPostDetailResult(
@@ -45,6 +47,15 @@ public sealed class ProfilePostsQueryTests
                     2,
                     "2026-07-15T12:00:00Z",
                     new PostAuthorResult(ViewerId, "Owner", string.Empty, false, false),
+                    Array.Empty<MediaResult>()),
+                new GroupPostDetailResult(
+                    groupPostId,
+                    GraphObjectType.GroupPost,
+                    "group-only post",
+                    0,
+                    "2026-07-14T12:00:00Z",
+                    new PostAuthorResult(ViewerId, "Owner", string.Empty, false, false),
+                    new PostGroupResult(900, "Private group", string.Empty, false),
                     Array.Empty<MediaResult>()),
                 new ReelDetailResult(
                     reelId,

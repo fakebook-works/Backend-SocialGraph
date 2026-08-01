@@ -63,6 +63,105 @@ public sealed class SocialReadModelServiceTests
     }
 
     [Fact]
+    public async Task GroupJoinRequests_AdminReadsInversePendingEdgesAsBoundedUserSummaries()
+    {
+        await using var context = CreateContext();
+        const long groupId = 301;
+        context.ObjectsTb.Add(new Objects
+        {
+            id = TargetUserId,
+            otype = GraphObjectType.User,
+            data = UserJson("Pending member")
+        });
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.HasAssociationAsync(
+                ViewerId,
+                GraphAssociationType.Admin,
+                groupId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                groupId,
+                GraphAssociationType.HaveGroupJoinRequest,
+                null,
+                50,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(TargetUserId, 1) },
+                null));
+        var service = CreateService(context, objects, associations);
+
+        var page = await service.GetGroupJoinRequestsAsync(ViewerId, groupId, null, 500);
+
+        var pending = Assert.Single(page.Items);
+        Assert.Equal(TargetUserId, pending.Id);
+        Assert.Equal("Pending member", pending.Name);
+        Assert.False(page.HasNextPage);
+        associations.VerifyAll();
+    }
+
+    [Fact]
+    public async Task PendingGroupJoins_ReadsTheCallerSideForwardEdgeWithTheSameBound()
+    {
+        await using var context = CreateContext();
+        const long groupId = 303;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson(1)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                ViewerId,
+                GraphAssociationType.GroupJoinRequest,
+                null,
+                50,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(groupId, 1) },
+                null));
+        var service = CreateService(context, objects, associations);
+
+        var page = await service.GetPendingGroupJoinsAsync(ViewerId, null, 500);
+
+        Assert.Equal(groupId, Assert.Single(page.Items).Id);
+        associations.Verify(item => item.RetrieveAssociationAsync(
+            ViewerId,
+            GraphAssociationType.GroupJoinRequest,
+            null,
+            50,
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GroupJoinRequests_NonAdminCannotReadPendingEdges()
+    {
+        await using var context = CreateContext();
+        const long groupId = 302;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.HasAssociationAsync(
+                ViewerId,
+                GraphAssociationType.Admin,
+                groupId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var service = CreateService(context, objects, associations);
+
+        var page = await service.GetGroupJoinRequestsAsync(ViewerId, groupId, null, 50);
+
+        Assert.Empty(page.Items);
+        Assert.False(page.HasNextPage);
+        associations.Verify(item => item.RetrieveAssociationAsync(
+            It.IsAny<long>(),
+            It.IsAny<short>(),
+            It.IsAny<string?>(),
+            It.IsAny<int>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+        associations.VerifyAll();
+    }
+
+    [Fact]
     public async Task Comments_ReturnTypedAuthorCountsAndViewerReactionState()
     {
         await using var context = CreateContext();
@@ -86,7 +185,7 @@ public sealed class SocialReadModelServiceTests
         objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("post")));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
-        associations.Setup(item => item.RetrieveAssociationAsync(postId, GraphAssociationType.HaveComment, null, 20, It.IsAny<CancellationToken>()))
+        associations.Setup(item => item.RetrieveAssociationAsync(postId, GraphAssociationType.HaveComment, null, It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(commentId, 1) }, null));
         var content = new Mock<IContentGraphService>();
         content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
@@ -156,6 +255,144 @@ public sealed class SocialReadModelServiceTests
     }
 
     [Fact]
+    public async Task Comments_ScansPastMissingRowsAndAdvancesTheRawCursor()
+    {
+        await using var context = CreateContext();
+        const long postId = 458;
+        const long missingCommentId = 459;
+        const long visibleCommentId = 460;
+        const long nextCommentId = 461;
+        context.ObjectsTb.AddRange(
+            new Objects { id = TargetUserId, otype = GraphObjectType.User, data = UserJson("Visible commenter") },
+            new Objects { id = visibleCommentId, otype = GraphObjectType.Comment, data = ContentJson("visible after gap") },
+            new Objects { id = nextCommentId, otype = GraphObjectType.Comment, data = ContentJson("next visible") });
+        context.AssociationsTb.AddRange(
+            Edge(visibleCommentId, GraphAssociationType.AuthoredBy, TargetUserId),
+            Edge(nextCommentId, GraphAssociationType.AuthoredBy, TargetUserId));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("post")));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                postId,
+                GraphAssociationType.HaveComment,
+                null,
+                4,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[]
+                {
+                    new AssociationEdgeResult(missingCommentId, 3),
+                    new AssociationEdgeResult(visibleCommentId, 2),
+                    new AssociationEdgeResult(nextCommentId, 1)
+                },
+                null));
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(FeedPost(postId, TargetUserId));
+        var service = CreateService(context, objects, associations, content);
+
+        var page = await service.GetCommentsAsync(ViewerId, postId, null, 1);
+
+        Assert.Equal("visible after gap", Assert.Single(page.Items).Content);
+        Assert.True(page.HasNextPage);
+        Assert.Equal("2", page.EndCursor);
+    }
+
+    [Fact]
+    public async Task Comments_DenyACommentTargetWhoseAuthorIsBlocked()
+    {
+        await using var context = CreateContext();
+        const long commentId = 462;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(commentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(commentId, GraphObjectType.Comment, ContentJson("hidden")));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                commentId,
+                GraphAssociationType.AuthoredBy,
+                null,
+                1,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(TargetUserId, 1) },
+                null));
+        associations.Setup(item => item.HasAssociationAsync(
+                ViewerId,
+                GraphAssociationType.Blocked,
+                TargetUserId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = CreateService(context, objects, associations);
+
+        var page = await service.GetCommentsAsync(ViewerId, commentId, null, 20);
+        var canReply = await service.CanCommentTargetAsync(ViewerId, commentId);
+
+        Assert.Empty(page.Items);
+        Assert.False(canReply);
+        associations.Verify(item => item.RetrieveAssociationAsync(
+            commentId,
+            GraphAssociationType.HaveComment,
+            It.IsAny<string?>(),
+            It.IsAny<int>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SharePolicy_AllowsVisibleFeedPosts(bool visible)
+    {
+        await using var context = CreateContext();
+        const long postId = 470;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("private", 2)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(visible ? FeedPost(postId, TargetUserId) : null);
+        var service = CreateService(context, objects, associations, content);
+
+        Assert.Equal(visible, await service.CanShareTargetAsync(ViewerId, postId));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SharePolicy_RequiresCurrentVisibilityForGroupPosts(bool visible)
+    {
+        await using var context = CreateContext();
+        const long postId = 471;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.GroupPost, ContentJson("group post")));
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(visible ? GroupPost(postId, TargetUserId, 900) : null);
+        var service = CreateService(context, objects, new Mock<IAssociationService>(MockBehavior.Loose), content);
+
+        Assert.Equal(visible, await service.CanShareTargetAsync(ViewerId, postId));
+        Assert.False(await service.CanShareStoryTargetAsync(ViewerId, postId));
+    }
+
+    [Fact]
+    public async Task SharePolicy_AllowsAuthenticatedGroupMetadataButNeverGroupStories()
+    {
+        await using var context = CreateContext();
+        const long groupId = 472;
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, ContentJson("group")));
+        var service = CreateService(context, objects, new Mock<IAssociationService>(MockBehavior.Loose));
+
+        Assert.True(await service.CanShareTargetAsync(ViewerId, groupId));
+        Assert.False(await service.CanShareStoryTargetAsync(ViewerId, groupId));
+        Assert.False(await service.CanShareTargetAsync(0, groupId));
+    }
+
+    [Fact]
     public async Task Comments_MarkAnExistingFollowWithoutOfferingAnotherFollowAction()
     {
         await using var context = CreateContext();
@@ -172,7 +409,7 @@ public sealed class SocialReadModelServiceTests
         objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("post")));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
-        associations.Setup(item => item.RetrieveAssociationAsync(postId, GraphAssociationType.HaveComment, null, 20, It.IsAny<CancellationToken>()))
+        associations.Setup(item => item.RetrieveAssociationAsync(postId, GraphAssociationType.HaveComment, null, It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(commentId, 1) }, null));
         var content = new Mock<IContentGraphService>(MockBehavior.Loose);
         content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
@@ -219,6 +456,71 @@ public sealed class SocialReadModelServiceTests
         var page = await service.GetUserPhotosAsync(ViewerId, TargetUserId, null, 10);
 
         Assert.Equal(visibleMediaId, Assert.Single(page.Items).Media.Id);
+    }
+
+    [Fact]
+    public async Task GroupMedia_ReturnsPhotosAndVideosWhileGroupPhotosRemainPhotoOnly()
+    {
+        await using var context = CreateContext();
+        const long groupId = 650;
+        const long postId = 651;
+        const long photoId = 652;
+        const long videoId = 653;
+        const long fileId = 654;
+        context.ObjectsTb.AddRange(
+            new Objects { id = postId, otype = GraphObjectType.GroupPost, data = ContentJson("media post") },
+            new Objects { id = photoId, otype = GraphObjectType.Media, data = MediaJson("photo", GraphMediaType.Photo) },
+            new Objects { id = videoId, otype = GraphObjectType.Media, data = MediaJson("video", GraphMediaType.Video) },
+            new Objects { id = fileId, otype = GraphObjectType.Media, data = MediaJson("file", GraphMediaType.File) });
+        context.AssociationsTb.AddRange(
+            Edge(groupId, GraphAssociationType.Published, postId),
+            Edge(postId, GraphAssociationType.AuthoredBy, TargetUserId),
+            Edge(postId, GraphAssociationType.Contained, photoId),
+            Edge(postId, GraphAssociationType.Contained, videoId),
+            Edge(postId, GraphAssociationType.Contained, fileId));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson(0)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailsAsync(ViewerId, It.IsAny<IReadOnlyList<long>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new IHomePostResult[] { GroupPost(postId, TargetUserId, groupId) });
+        var service = CreateService(context, objects, associations, content);
+
+        var media = await service.GetGroupMediaAsync(ViewerId, groupId, null, 10);
+        var photos = await service.GetGroupPhotosAsync(ViewerId, groupId, null, 10);
+
+        Assert.Equal(new[] { photoId, videoId }, media.Items.Select(item => item.Media.Id).Order().ToArray());
+        Assert.Equal(photoId, Assert.Single(photos.Items).Media.Id);
+    }
+
+    [Fact]
+    public async Task GroupMedia_DoesNotRevealPrivateGroupMediaToOutsider()
+    {
+        await using var context = CreateContext();
+        const long groupId = 660;
+        const long postId = 661;
+        const long photoId = 662;
+        context.ObjectsTb.AddRange(
+            new Objects { id = postId, otype = GraphObjectType.GroupPost, data = ContentJson("private media post") },
+            new Objects { id = photoId, otype = GraphObjectType.Media, data = MediaJson("private-photo", GraphMediaType.Photo) });
+        context.AssociationsTb.AddRange(
+            Edge(groupId, GraphAssociationType.Published, postId),
+            Edge(postId, GraphAssociationType.AuthoredBy, TargetUserId),
+            Edge(postId, GraphAssociationType.Contained, photoId));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson(1)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        var service = CreateService(context, objects, associations, content);
+
+        var media = await service.GetGroupMediaAsync(ViewerId, groupId, null, 10);
+
+        Assert.Empty(media.Items);
+        content.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -410,9 +712,9 @@ public sealed class SocialReadModelServiceTests
         ["privacy"] = privacy
     }.ToJsonString();
 
-    private static string MediaJson(string value) => new JsonObject
+    private static string MediaJson(string value, int type = GraphMediaType.Photo) => new JsonObject
     {
-        ["type"] = 0,
+        ["type"] = type,
         ["url"] = $"https://cdn.example/{value}.jpg"
     }.ToJsonString();
 

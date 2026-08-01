@@ -139,6 +139,20 @@ public class Query
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<GroupSuggestionFriendResult>> GetGroupFriendMembersAsync(
+        long groupId,
+        int limit,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        return groupGraphService.GetGroupFriendMembersAsync(
+            trustedCaller.RequireUserId(),
+            groupId,
+            limit,
+            cancellationToken);
+    }
+
     public async Task<ProfilePostPageResult> GetProfilePostsAsync(
         long userId,
         int limit,
@@ -171,7 +185,8 @@ public class Query
         foreach (var edge in authored.items)
         {
             processed++;
-            if (detailsById.TryGetValue(edge.id2, out var detail))
+            if (detailsById.TryGetValue(edge.id2, out var detail) &&
+                detail is FeedPostDetailResult or ReelDetailResult)
             {
                 items.Add(detail);
                 if (items.Count == take)
@@ -724,6 +739,16 @@ public class Query
         readModels.GetGroupPhotosAsync(
             trustedCaller.RequireUserId(), groupId, cursor, limit, cancellationToken);
 
+    public Task<PhotoPageResult> GetGroupMediaAsync(
+        long groupId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken) =>
+        readModels.GetGroupMediaAsync(
+            trustedCaller.RequireUserId(), groupId, cursor, limit, cancellationToken);
+
     public Task<PhotoPageResult> GetGroupUserPhotosAsync(
         long groupId,
         long userId,
@@ -875,7 +900,14 @@ public class Query
         return readModels.GetMentionedUsersAsync(trustedCaller.RequireUserId(), sourceId, cursor, limit, cancellationToken);
     }
 
-    public async Task<AssociationPageResult> GetGroupJoinRequestsAsync(long groupId, string? cursor, int limit, [Service] IAssociationService associationService, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
+    public async Task<UserSummaryPageResult> GetGroupJoinRequestsAsync(
+        long groupId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
     {
         var viewerId = trustedCaller.RequireUserId();
         if (!await groupGraphService.IsAdminAsync(viewerId, groupId, cancellationToken))
@@ -887,7 +919,12 @@ public class Query
                     .Build());
         }
 
-        return await associationService.RetrieveAssociationAsync(groupId, GraphAssociationType.HaveGroupJoinRequest, cursor, limit, cancellationToken);
+        return await readModels.GetGroupJoinRequestsAsync(
+            viewerId,
+            groupId,
+            cursor,
+            Math.Clamp(limit, 1, 50),
+            cancellationToken);
     }
 
     public Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(

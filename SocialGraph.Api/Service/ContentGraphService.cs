@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Npgsql;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
 
@@ -88,7 +89,15 @@ public sealed class ContentGraphService : IContentGraphService
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
             foreach (var userId in NormalizeUserIds(input.TaggedUserIds))
             {
-                if (!await TagAsync(post.id, userId, cancellationToken))
+                if (!await AddUserReferenceAsync(
+                        post.id,
+                        userId,
+                        input.AuthorId,
+                        GraphObjectType.FeedPost,
+                        0,
+                        GraphAssociationType.Tagged,
+                        ExternalNotificationAction.Tag,
+                        cancellationToken))
                 {
                     throw new InvalidOperationException($"Unable to tag user {userId}.");
                 }
@@ -96,7 +105,15 @@ public sealed class ContentGraphService : IContentGraphService
 
             foreach (var userId in MentionUserIds(input.Content))
             {
-                if (!await MentionAsync(post.id, userId, cancellationToken))
+                if (!await AddUserReferenceAsync(
+                        post.id,
+                        userId,
+                        input.AuthorId,
+                        GraphObjectType.FeedPost,
+                        0,
+                        GraphAssociationType.Mentioned,
+                        ExternalNotificationAction.Mention,
+                        cancellationToken))
                 {
                     throw new InvalidOperationException($"Unable to mention user {userId}.");
                 }
@@ -125,21 +142,56 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, CancellationToken cancellationToken = default)
     {
         await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
-        await EnsureReferencesAllowedAsync(input.AuthorId, MentionUserIds(input.Content), cancellationToken);
+        var taggedUserIds = NormalizeUserIds(input.TaggedUserIds);
+        var mentionedUserIds = MentionUserIds(input.Content);
+        var referencedUserIds = taggedUserIds.Concat(mentionedUserIds).Distinct().ToArray();
+        await EnsureReferencesAllowedAsync(input.AuthorId, referencedUserIds, cancellationToken);
+        await EnsureGroupReferencesAllowedAsync(input.AuthorId, input.GroupId, referencedUserIds, cancellationToken);
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? post = null;
         try
         {
+            if (!await LockCurrentGroupParticipationAsync(input.AuthorId, input.GroupId, cancellationToken))
+            {
+                throw new InvalidOperationException("Only current group members and administrators can publish group posts.");
+            }
+
             post = await _objectService.AddObjectAsync(GraphObjectType.GroupPost, GraphJson.GroupPostJson(input.Content), cancellationToken);
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
             await _associationService.AddAssociationAsync(input.GroupId, GraphAssociationType.Published, post.id, cancellationToken);
-            foreach (var userId in MentionUserIds(input.Content))
+            foreach (var userId in taggedUserIds)
             {
-                if (!await MentionAsync(post.id, userId, cancellationToken))
+                if (!await AddUserReferenceAsync(
+                        post.id,
+                        userId,
+                        input.AuthorId,
+                        GraphObjectType.GroupPost,
+                        input.GroupId,
+                        GraphAssociationType.Tagged,
+                        ExternalNotificationAction.Tag,
+                        cancellationToken,
+                        groupReferenceAlreadyValidated: true))
                 {
-                    throw new InvalidOperationException($"Unable to mention user {userId}.");
+                    throw new InvalidOperationException("Unable to tag the selected account.");
+                }
+            }
+
+            foreach (var userId in mentionedUserIds)
+            {
+                if (!await AddUserReferenceAsync(
+                        post.id,
+                        userId,
+                        input.AuthorId,
+                        GraphObjectType.GroupPost,
+                        input.GroupId,
+                        GraphAssociationType.Mentioned,
+                        ExternalNotificationAction.Mention,
+                        cancellationToken,
+                        groupReferenceAlreadyValidated: true))
+                {
+                    throw new InvalidOperationException("Unable to mention the selected account.");
                 }
             }
 
@@ -182,6 +234,15 @@ public sealed class ContentGraphService : IContentGraphService
         if (input.Content is not null)
         {
             await EnsureReferencesAllowedAsync(authorId, MentionUserIds(input.Content), cancellationToken);
+            if (current.otype == GraphObjectType.GroupPost)
+            {
+                var groupId = await GetPublishedGroupIdAsync(input.Id, cancellationToken);
+                await EnsureGroupReferencesAllowedAsync(
+                    authorId,
+                    groupId,
+                    MentionUserIds(input.Content),
+                    cancellationToken);
+            }
         }
         var post = await _objectService.UpdateObjectAsync(
             input.Id,
@@ -406,6 +467,30 @@ public sealed class ContentGraphService : IContentGraphService
             cancellationToken);
     }
 
+    public async Task<bool> CanDeleteContentAsync(
+        long userId,
+        long contentId,
+        CancellationToken cancellationToken = default)
+    {
+        if (await IsAuthorAsync(userId, contentId, cancellationToken))
+        {
+            return true;
+        }
+
+        var content = await _objectService.RetrieveObjectAsync(contentId, cancellationToken);
+        if (content?.otype != GraphObjectType.GroupPost)
+        {
+            return false;
+        }
+
+        var groupId = await GetPublishedGroupIdAsync(contentId, cancellationToken);
+        return groupId > 0 && await _associationService.HasAssociationAsync(
+            userId,
+            GraphAssociationType.Admin,
+            groupId,
+            cancellationToken);
+    }
+
     public async Task<IHomePostResult?> GetPostDetailAsync(
         long viewerId,
         long postId,
@@ -491,10 +576,15 @@ public sealed class ContentGraphService : IContentGraphService
                 .Where(item => sourceIds.Contains(item.id1) &&
                     (item.atype == GraphAssociationType.AuthoredBy ||
                      item.atype == GraphAssociationType.Contained ||
-                     item.atype == GraphAssociationType.Mentioned))
+                     item.atype == GraphAssociationType.Mentioned ||
+                     item.atype == GraphAssociationType.PublishedIn))
                 .ToListAsync(cancellationToken);
         var sourceAuthorBySource = sourceLinks
             .Where(item => item.atype == GraphAssociationType.AuthoredBy)
+            .GroupBy(item => item.id1)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
+        var sourceGroupBySource = sourceLinks
+            .Where(item => item.atype == GraphAssociationType.PublishedIn)
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
         var postMentionTokenIds = posts.Values
@@ -505,6 +595,7 @@ public sealed class ContentGraphService : IContentGraphService
             .Concat(groupByPost.Values)
             .Concat(sourceIds)
             .Concat(sourceAuthorBySource.Values)
+            .Concat(sourceGroupBySource.Values)
             .Concat(postLinks
                 .Where(item => item.atype == GraphAssociationType.Contained)
                 .Select(item => item.id2))
@@ -541,6 +632,7 @@ public sealed class ContentGraphService : IContentGraphService
         var relationTargetIds = authorByPost.Values
             .Concat(groupByPost.Values)
             .Concat(sourceAuthorBySource.Values)
+            .Concat(sourceGroupBySource.Values)
             .Concat(referencedUserIds)
             .Distinct()
             .ToArray();
@@ -555,12 +647,51 @@ public sealed class ContentGraphService : IContentGraphService
                      item.atype == GraphAssociationType.Blocked ||
                      item.atype == GraphAssociationType.BlockedBy ||
                      item.atype == GraphAssociationType.Member ||
-                     item.atype == GraphAssociationType.Admin))
+                     item.atype == GraphAssociationType.Admin ||
+                     item.atype == GraphAssociationType.GroupJoinRequest))
                 .ToListAsync(cancellationToken);
         var friends = RelationTargets(viewerLinks, GraphAssociationType.Friend);
         var followed = RelationTargets(viewerLinks, GraphAssociationType.Followed);
         var blocked = RelationTargets(viewerLinks, GraphAssociationType.Blocked, GraphAssociationType.BlockedBy);
         var participatingGroups = RelationTargets(viewerLinks, GraphAssociationType.Member, GraphAssociationType.Admin);
+        var pendingGroups = RelationTargets(viewerLinks, GraphAssociationType.GroupJoinRequest);
+        var sharedGroupIds = sourceIds
+            .Where(id => relatedObjects.TryGetValue(id, out var source) && source.otype == GraphObjectType.Group)
+            .Concat(sourceGroupBySource.Values)
+            .Distinct()
+            .ToArray();
+        var sharedGroupMemberCounts = sharedGroupIds.Length == 0
+            ? new Dictionary<long, long>()
+            : (await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(item => sharedGroupIds.Contains(item.id2) &&
+                    (item.atype == GraphAssociationType.Member || item.atype == GraphAssociationType.Admin))
+                .Select(item => new { item.id1, item.id2 })
+                .Distinct()
+                .ToListAsync(cancellationToken))
+                .GroupBy(item => item.id2)
+                .ToDictionary(group => group.Key, group => (long)group.Select(item => item.id1).Distinct().Count());
+
+        SharedPostGroupResult? BuildSharedGroup(long sharedGroupId)
+        {
+            if (!relatedObjects.TryGetValue(sharedGroupId, out var sharedGroup) ||
+                sharedGroup.otype != GraphObjectType.Group)
+            {
+                return null;
+            }
+
+            var sharedGroupData = GraphJson.ParseObject(sharedGroup.data);
+            return new SharedPostGroupResult(
+                sharedGroupId,
+                GraphJson.String(sharedGroupData, "name"),
+                GraphJson.String(sharedGroupData, "avatar"),
+                GraphJson.String(sharedGroupData, "background"),
+                GraphJson.Int(sharedGroupData, "privacy"),
+                sharedGroupMemberCounts.GetValueOrDefault(sharedGroupId),
+                participatingGroups.Contains(sharedGroupId),
+                pendingGroups.Contains(sharedGroupId));
+        }
+
         var results = new List<IHomePostResult>(orderedPostIds.Length);
 
         foreach (var postId in orderedPostIds)
@@ -591,14 +722,7 @@ public sealed class ContentGraphService : IContentGraphService
             }
 
             var canView = post.otype is GraphObjectType.FeedPost or GraphObjectType.Reel
-                ? viewerId == authorId || privacy switch
-                {
-                    0 => true,
-                    1 => friends.Contains(authorId) || followed.Contains(authorId),
-                    2 => friends.Contains(authorId),
-                    3 => false,
-                    _ => false
-                }
+                ? CanViewFeedLikeContent(viewerId, authorId, privacy, friends, followed, blocked)
                 : privacy == 0 || participatingGroups.Contains(groupId);
             if (!canView)
             {
@@ -626,49 +750,11 @@ public sealed class ContentGraphService : IContentGraphService
             var content = GraphJson.String(postData, "content");
             var create = GraphJson.String(postData, "create");
             var mentions = BuildMentionUsers(content, relatedObjects, blocked, viewerId);
-
-            if (post.otype == GraphObjectType.GroupPost && group is not null)
-            {
-                var groupData = GraphJson.ParseObject(group.data);
-                results.Add(new GroupPostDetailResult(
-                    post.id,
-                    post.otype,
-                    content,
-                    privacy,
-                    create,
-                    postAuthor,
-                    new PostGroupResult(
-                        group.id,
-                        GraphJson.String(groupData, "name"),
-                        GraphJson.String(groupData, "avatar"),
-                        !participatingGroups.Contains(group.id)),
-                    media,
-                    mentions));
-                continue;
-            }
-
-            if (post.otype == GraphObjectType.Reel)
-            {
-                results.Add(new ReelDetailResult(
-                    post.id,
-                    post.otype,
-                    content,
-                    privacy,
-                    create,
-                    GraphJson.NullableDouble(postData, "aspectRatio"),
-                    GraphJson.NullableDouble(postData, "focalPointX"),
-                    GraphJson.NullableDouble(postData, "focalPointY"),
-                    postAuthor,
-                    media,
-                    mentions));
-                continue;
-            }
-
             SharedPostSourceResult? sharedSource = null;
             if (sourceByPost.TryGetValue(post.id, out var sourceId))
             {
                 if (!relatedObjects.TryGetValue(sourceId, out var source) ||
-                    source.otype is not (GraphObjectType.FeedPost or GraphObjectType.Reel))
+                    source.otype is not (GraphObjectType.Group or GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
                 {
                     sharedSource = new SharedPostSourceResult(
                         sourceId,
@@ -679,18 +765,60 @@ public sealed class ContentGraphService : IContentGraphService
                         Array.Empty<MediaResult>(),
                         Array.Empty<MentionUserResult>());
                 }
+                else if (source.otype == GraphObjectType.Group)
+                {
+                    var sharedGroup = BuildSharedGroup(sourceId);
+                    sharedSource = new SharedPostSourceResult(
+                        sourceId,
+                        sharedGroup is not null,
+                        source.otype,
+                        null,
+                        null,
+                        Array.Empty<MediaResult>(),
+                        Array.Empty<MentionUserResult>(),
+                        sharedGroup?.Privacy,
+                        GraphJson.String(GraphJson.ParseObject(source.data), "create"),
+                        sharedGroup);
+                }
                 else
                 {
                     var sourceData = GraphJson.ParseObject(source.data);
-                    var sourceIsPublic = GraphJson.Int(sourceData, "privacy") == 0;
                     var sourceAuthorId = sourceAuthorBySource.GetValueOrDefault(sourceId);
                     relatedObjects.TryGetValue(sourceAuthorId, out var sourceAuthor);
                     var hasSourceAuthor = sourceAuthorId > 0 &&
                         sourceAuthor is not null &&
                         sourceAuthor.otype == GraphObjectType.User;
-                    var sourceAvailable = sourceIsPublic &&
-                        hasSourceAuthor &&
-                        (viewerId == sourceAuthorId || !blocked.Contains(sourceAuthorId));
+                    var sourcePrivacy = GraphJson.Int(sourceData, "privacy");
+                    SharedPostGroupResult? sharedGroup = null;
+                    var requiresGroupMembership = false;
+                    bool sourceAvailable;
+
+                    if (source.otype == GraphObjectType.GroupPost)
+                    {
+                        var sourceGroupId = sourceGroupBySource.GetValueOrDefault(sourceId);
+                        sharedGroup = BuildSharedGroup(sourceGroupId);
+                        sourcePrivacy = sharedGroup?.Privacy ?? 1;
+                        sourceAvailable = hasSourceAuthor &&
+                            sharedGroup is not null &&
+                            !blocked.Contains(sourceAuthorId) &&
+                            (sourcePrivacy == 0 || sharedGroup.ViewerIsMember);
+                        requiresGroupMembership = hasSourceAuthor &&
+                            sharedGroup is not null &&
+                            !blocked.Contains(sourceAuthorId) &&
+                            sourcePrivacy != 0 &&
+                            !sharedGroup.ViewerIsMember;
+                    }
+                    else
+                    {
+                        sourceAvailable = hasSourceAuthor &&
+                            CanViewFeedLikeContent(
+                                viewerId,
+                                sourceAuthorId,
+                                sourcePrivacy,
+                                friends,
+                                followed,
+                                blocked);
+                    }
 
                     if (!sourceAvailable)
                     {
@@ -701,7 +829,11 @@ public sealed class ContentGraphService : IContentGraphService
                             null,
                             null,
                             Array.Empty<MediaResult>(),
-                            Array.Empty<MentionUserResult>());
+                            Array.Empty<MentionUserResult>(),
+                            sourcePrivacy,
+                            null,
+                            requiresGroupMembership ? sharedGroup : null,
+                            requiresGroupMembership);
                     }
                     else
                     {
@@ -727,22 +859,54 @@ public sealed class ContentGraphService : IContentGraphService
                                 IsVerifyActive(sourceAuthorData)),
                             sourceMedia,
                             BuildMentionUsers(sourceContent, relatedObjects, blocked, viewerId),
-                            GraphJson.Int(sourceData, "privacy"),
-                            GraphJson.String(sourceData, "create"));
+                            sourcePrivacy,
+                            GraphJson.String(sourceData, "create"),
+                            sharedGroup);
                     }
                 }
             }
 
-            var taggedUsers = postLinks
-                .Where(item => item.id1 == postId && item.atype == GraphAssociationType.Tagged)
-                .Where(item => item.id2 == viewerId || !blocked.Contains(item.id2))
-                .OrderBy(item => item.time)
-                .ThenBy(item => item.id2)
-                .Select(item => relatedObjects.TryGetValue(item.id2, out var taggedUser) && taggedUser.otype == GraphObjectType.User
-                    ? BuildUserSummary(taggedUser)
-                    : null)
-                .OfType<UserSummaryResult>()
-                .ToArray();
+            if (post.otype == GraphObjectType.GroupPost && group is not null)
+            {
+                var groupData = GraphJson.ParseObject(group.data);
+                var groupTaggedUsers = BuildTaggedUsers(postId, postLinks, relatedObjects, blocked, viewerId);
+                results.Add(new GroupPostDetailResult(
+                    post.id,
+                    post.otype,
+                    content,
+                    privacy,
+                    create,
+                    postAuthor,
+                    new PostGroupResult(
+                        group.id,
+                        GraphJson.String(groupData, "name"),
+                        GraphJson.String(groupData, "avatar"),
+                        !participatingGroups.Contains(group.id)),
+                    media,
+                    mentions,
+                    groupTaggedUsers,
+                    sharedSource));
+                continue;
+            }
+
+            if (post.otype == GraphObjectType.Reel)
+            {
+                results.Add(new ReelDetailResult(
+                    post.id,
+                    post.otype,
+                    content,
+                    privacy,
+                    create,
+                    GraphJson.NullableDouble(postData, "aspectRatio"),
+                    GraphJson.NullableDouble(postData, "focalPointX"),
+                    GraphJson.NullableDouble(postData, "focalPointY"),
+                    postAuthor,
+                    media,
+                    mentions));
+                continue;
+            }
+
+            var taggedUsers = BuildTaggedUsers(postId, postLinks, relatedObjects, blocked, viewerId);
             results.Add(new FeedPostDetailResult(
                 post.id,
                 post.otype,
@@ -868,7 +1032,7 @@ public sealed class ContentGraphService : IContentGraphService
         CancellationToken cancellationToken = default)
     {
         var sharedSourceId = await ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
-        var sharedSource = await RequireStoryShareSourceAsync(sharedSourceId, cancellationToken);
+        var sharedSource = await RequireStoryShareSourceAsync(input.AuthorId, sharedSourceId, cancellationToken);
 
         var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
@@ -957,7 +1121,7 @@ public sealed class ContentGraphService : IContentGraphService
         var selectedCandidates = pageCandidates.Take(take).ToArray();
         var selectedAuthorIds = selectedCandidates.Select(item => item.AuthorId).ToHashSet();
         var activeStories = await GetActiveStoriesAsync(selectedAuthorIds, now, cancellationToken);
-        var storyItems = await BuildHomeStoryItemsAsync(activeStories, cancellationToken);
+        var storyItems = await BuildHomeStoryItemsAsync(userId, activeStories, cancellationToken);
         var authorSummaries = await GetUserSummariesAsync(selectedAuthorIds, cancellationToken);
         var storiesByAuthor = activeStories
             .GroupBy(item => item.AuthorId)
@@ -1029,7 +1193,7 @@ public sealed class ContentGraphService : IContentGraphService
             return null;
         }
 
-        var storyItems = await BuildHomeStoryItemsAsync(activeStories, cancellationToken);
+        var storyItems = await BuildHomeStoryItemsAsync(userId, activeStories, cancellationToken);
         var orderedStories = activeStories
             .Where(story => storyItems.ContainsKey(story.Story.id))
             .OrderBy(story => story.CreatedAt)
@@ -1124,7 +1288,15 @@ public sealed class ContentGraphService : IContentGraphService
         await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
         foreach (var userId in MentionUserIds(input.Content))
         {
-            if (!await MentionAsync(reel.id, userId, cancellationToken))
+            if (!await AddUserReferenceAsync(
+                    reel.id,
+                    userId,
+                    input.AuthorId,
+                    GraphObjectType.Reel,
+                    0,
+                    GraphAssociationType.Mentioned,
+                    ExternalNotificationAction.Mention,
+                    cancellationToken))
             {
                 throw new InvalidOperationException("Unable to mention the selected account.");
             }
@@ -1155,7 +1327,7 @@ public sealed class ContentGraphService : IContentGraphService
                 .Where(item => item.id == current)
                 .Select(item => (short?)item.otype)
                 .FirstOrDefaultAsync(cancellationToken);
-            if (objectType != GraphObjectType.FeedPost)
+            if (objectType is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost))
             {
                 return current;
             }
@@ -1180,8 +1352,91 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<ContentResult> SharePostAsync(SharePostInput input, CancellationToken cancellationToken = default)
     {
         var sourceId = await ResolveCanonicalShareSourceIdAsync(input.SourceId, cancellationToken);
-        var post = await CreateFeedPostAsync(new CreateFeedPostInput(input.AuthorId, input.Content, input.Privacy, Array.Empty<MediaInput>()), cancellationToken);
-        await _associationService.AddAssociationAsync(post.Id, GraphAssociationType.Share, sourceId, cancellationToken);
+        var destinationGroupId = input.DestinationGroupId is > 0 ? input.DestinationGroupId.Value : 0;
+        if (destinationGroupId == 0 && input.Privacy is (< 0 or > 3))
+        {
+            throw new ArgumentOutOfRangeException(nameof(input), "Feed privacy must be between 0 and 3.");
+        }
+
+        var mentionedUserIds = MentionUserIds(input.Content);
+        await EnsureReferencesAllowedAsync(input.AuthorId, mentionedUserIds, cancellationToken);
+        if (destinationGroupId > 0)
+        {
+            await EnsureGroupReferencesAllowedAsync(input.AuthorId, destinationGroupId, mentionedUserIds, cancellationToken);
+        }
+
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? wrapper = null;
+        ContentResult post;
+        try
+        {
+            if (destinationGroupId > 0 &&
+                !await LockCurrentGroupParticipationAsync(input.AuthorId, destinationGroupId, cancellationToken))
+            {
+                throw new InvalidOperationException("Only current group members and administrators can publish group posts.");
+            }
+
+            var wrapperType = destinationGroupId > 0 ? GraphObjectType.GroupPost : GraphObjectType.FeedPost;
+            var wrapperData = destinationGroupId > 0
+                ? GraphJson.GroupPostJson(input.Content)
+                : GraphJson.PostJson(input.Content, input.Privacy);
+            wrapper = await _objectService.AddObjectAsync(wrapperType, wrapperData, cancellationToken);
+            if (!await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, wrapper.id, cancellationToken))
+            {
+                throw new InvalidOperationException("Unable to attach the share author.");
+            }
+            if (destinationGroupId > 0)
+            {
+                if (!await _associationService.AddAssociationAsync(destinationGroupId, GraphAssociationType.Published, wrapper.id, cancellationToken))
+                {
+                    throw new InvalidOperationException("Unable to publish the share in the selected group.");
+                }
+            }
+
+            if (!await _associationService.AddAssociationAsync(wrapper.id, GraphAssociationType.Share, sourceId, cancellationToken))
+            {
+                throw new InvalidOperationException("Unable to attach the canonical share source.");
+            }
+            foreach (var userId in mentionedUserIds)
+            {
+                if (!await AddUserReferenceAsync(
+                        wrapper.id,
+                        userId,
+                        input.AuthorId,
+                        wrapperType,
+                        destinationGroupId,
+                        GraphAssociationType.Mentioned,
+                        ExternalNotificationAction.Mention,
+                        cancellationToken,
+                        groupReferenceAlreadyValidated: destinationGroupId > 0))
+                {
+                    throw new InvalidOperationException("Unable to mention the selected account.");
+                }
+            }
+
+            await _externalServiceClient.CreateSearchIndexAsync(
+                wrapper.id,
+                destinationGroupId > 0 ? "groupPost" : "feedPost",
+                input.Content,
+                cancellationToken);
+            await _externalServiceClient.CreatePostEmbeddingAsync(
+                wrapper.id,
+                input.Content,
+                Array.Empty<string>(),
+                cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            post = await BuildContentResultAsync(wrapper, input.AuthorId, Array.Empty<MediaResult>(), cancellationToken);
+        }
+        catch
+        {
+            await RollbackAndInvalidateAsync(transaction, wrapper?.id);
+            throw;
+        }
+
         await QueueRecommendationInteractionIfContentAsync(
             input.AuthorId,
             sourceId,
@@ -1195,7 +1450,7 @@ public sealed class ContentGraphService : IContentGraphService
                 sourceAuthorId,
                 ExternalNotificationAction.Share,
                 sourceId,
-                new { shareId = post.Id, shareType = "feedPost" },
+                new { shareId = post.Id, shareType = destinationGroupId > 0 ? "groupPost" : "feedPost" },
                 cancellationToken);
         }
 
@@ -1284,33 +1539,80 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<bool> TagAsync(long postId, long userId, CancellationToken cancellationToken = default)
     {
-        var authorId = await GetAuthorIdAsync(postId, cancellationToken);
-        if (authorId <= 0 || await _blockVisibility.IsBlockedEitherDirectionAsync(authorId, userId, cancellationToken))
+        var source = await _objectService.RetrieveObjectAsync(postId, cancellationToken);
+        if (source is null)
         {
             return false;
         }
 
-        var result = await _associationService.AddAssociationAsync(postId, GraphAssociationType.Tagged, userId, cancellationToken);
-        if (result && authorId > 0 && authorId != userId)
-        {
-            await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Tag, postId, null, cancellationToken);
-        }
-
-        return result;
+        var authorId = await GetAuthorIdAsync(postId, cancellationToken);
+        var groupId = source.otype == GraphObjectType.GroupPost
+            ? await GetPublishedGroupIdAsync(postId, cancellationToken)
+            : 0;
+        return await AddUserReferenceAsync(
+            postId,
+            userId,
+            authorId,
+            source.otype,
+            groupId,
+            GraphAssociationType.Tagged,
+            ExternalNotificationAction.Tag,
+            cancellationToken);
     }
 
     public async Task<bool> MentionAsync(long sourceId, long userId, CancellationToken cancellationToken = default)
     {
+        var source = await _objectService.RetrieveObjectAsync(sourceId, cancellationToken);
+        if (source is null)
+        {
+            return false;
+        }
+
         var authorId = await GetAuthorIdAsync(sourceId, cancellationToken);
+        var groupId = source.otype == GraphObjectType.GroupPost
+            ? await GetPublishedGroupIdAsync(sourceId, cancellationToken)
+            : 0;
+        return await AddUserReferenceAsync(
+            sourceId,
+            userId,
+            authorId,
+            source.otype,
+            groupId,
+            GraphAssociationType.Mentioned,
+            ExternalNotificationAction.Mention,
+            cancellationToken);
+    }
+
+    private async Task<bool> AddUserReferenceAsync(
+        long sourceId,
+        long userId,
+        long authorId,
+        short sourceType,
+        long groupId,
+        short associationType,
+        short notificationAction,
+        CancellationToken cancellationToken,
+        bool groupReferenceAlreadyValidated = false)
+    {
         if (authorId <= 0 || await _blockVisibility.IsBlockedEitherDirectionAsync(authorId, userId, cancellationToken))
         {
             return false;
         }
 
-        var result = await _associationService.AddAssociationAsync(sourceId, GraphAssociationType.Mentioned, userId, cancellationToken);
+        if (sourceType == GraphObjectType.GroupPost && !groupReferenceAlreadyValidated)
+        {
+            if (groupId <= 0)
+            {
+                return false;
+            }
+
+            await EnsureGroupReferencesAllowedAsync(authorId, groupId, new[] { userId }, cancellationToken);
+        }
+
+        var result = await _associationService.AddAssociationAsync(sourceId, associationType, userId, cancellationToken);
         if (result && authorId > 0 && authorId != userId)
         {
-            await _externalServiceClient.NotifyAsync(authorId, userId, ExternalNotificationAction.Mention, sourceId, null, cancellationToken);
+            await _externalServiceClient.NotifyAsync(authorId, userId, notificationAction, sourceId, null, cancellationToken);
         }
 
         return result;
@@ -1447,6 +1749,29 @@ public sealed class ContentGraphService : IContentGraphService
     {
         var group = await _associationService.RetrieveAssociationAsync(postId, GraphAssociationType.PublishedIn, null, 1, cancellationToken);
         return group.items.FirstOrDefault()?.id2 ?? 0;
+    }
+
+    private static bool CanViewFeedLikeContent(
+        long viewerId,
+        long authorId,
+        int privacy,
+        IReadOnlySet<long> friends,
+        IReadOnlySet<long> followed,
+        IReadOnlySet<long> blocked)
+    {
+        if (authorId <= 0 || viewerId != authorId && blocked.Contains(authorId))
+        {
+            return false;
+        }
+
+        return viewerId == authorId || privacy switch
+        {
+            0 => true,
+            1 => friends.Contains(authorId) || followed.Contains(authorId),
+            2 => friends.Contains(authorId),
+            3 => false,
+            _ => false
+        };
     }
 
     private static HashSet<long> RelationTargets(
@@ -1693,6 +2018,52 @@ public sealed class ContentGraphService : IContentGraphService
         return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
     }
 
+    private async Task<bool> LockCurrentGroupParticipationAsync(
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken)
+    {
+        if (userId <= 0 || groupId <= 0)
+        {
+            return false;
+        }
+
+        if (!_dbContext.Database.IsRelational())
+        {
+            return await _associationService.HasAssociationAsync(
+                    userId,
+                    GraphAssociationType.Member,
+                    groupId,
+                    cancellationToken) ||
+                await _associationService.HasAssociationAsync(
+                    userId,
+                    GraphAssociationType.Admin,
+                    groupId,
+                    cancellationToken);
+        }
+
+        // Hold a row lock until the surrounding content transaction commits. A concurrent
+        // leave/remove operation must therefore finish before this check or wait until the
+        // GroupPost is committed; it cannot revoke membership in the gap between policy
+        // validation and the Published edge write.
+        var participants = await _dbContext.Database.SqlQueryRaw<long>(
+                """
+                SELECT id1 AS "Value"
+                FROM social_graph.associations
+                WHERE id1 = @user_id
+                  AND id2 = @group_id
+                  AND atype IN (@member_type, @admin_type)
+                LIMIT 1
+                FOR KEY SHARE
+                """,
+                new NpgsqlParameter("user_id", userId),
+                new NpgsqlParameter("group_id", groupId),
+                new NpgsqlParameter("member_type", GraphAssociationType.Member),
+                new NpgsqlParameter("admin_type", GraphAssociationType.Admin))
+            .ToListAsync(cancellationToken);
+        return participants.Count > 0;
+    }
+
     private static IReadOnlyList<long> NormalizeUserIds(IReadOnlyList<long>? userIds)
     {
         if (userIds is null || userIds.Count == 0)
@@ -1734,6 +2105,23 @@ public sealed class ContentGraphService : IContentGraphService
                 var data = GraphJson.ParseObject(user.data);
                 return new MentionUserResult(userId, GraphJson.String(data, "name"), true);
             })
+            .ToArray();
+
+    private static IReadOnlyList<UserSummaryResult> BuildTaggedUsers(
+        long postId,
+        IReadOnlyList<Associations> postLinks,
+        IReadOnlyDictionary<long, Objects> objects,
+        IReadOnlySet<long> blockedUserIds,
+        long viewerId) =>
+        postLinks
+            .Where(item => item.id1 == postId && item.atype == GraphAssociationType.Tagged)
+            .Where(item => item.id2 == viewerId || !blockedUserIds.Contains(item.id2))
+            .OrderBy(item => item.time)
+            .ThenBy(item => item.id2)
+            .Select(item => objects.TryGetValue(item.id2, out var taggedUser) && taggedUser.otype == GraphObjectType.User
+                ? BuildUserSummary(taggedUser)
+                : null)
+            .OfType<UserSummaryResult>()
             .ToArray();
 
     private async Task SyncMentionAssociationsAsync(
@@ -1793,6 +2181,43 @@ public sealed class ContentGraphService : IContentGraphService
             // Deliberately omit the affected id: the mutation must not become an account
             // enumeration oracle for users that are hidden by a block.
             throw new InvalidOperationException("A blocked account cannot be tagged or mentioned.");
+        }
+    }
+
+    private async Task EnsureGroupReferencesAllowedAsync(
+        long authorId,
+        long groupId,
+        IEnumerable<long> referencedUserIds,
+        CancellationToken cancellationToken)
+    {
+        var referenced = referencedUserIds
+            .Where(id => id > 0 && id != authorId)
+            .Distinct()
+            .Take(100)
+            .ToArray();
+        foreach (var userId in referenced)
+        {
+            var isFriend = await _associationService.HasAssociationAsync(
+                authorId,
+                GraphAssociationType.Friend,
+                userId,
+                cancellationToken);
+            var participates = await _associationService.HasAssociationAsync(
+                    userId,
+                    GraphAssociationType.Member,
+                    groupId,
+                    cancellationToken) ||
+                await _associationService.HasAssociationAsync(
+                    userId,
+                    GraphAssociationType.Admin,
+                    groupId,
+                    cancellationToken);
+            if (!isFriend || !participates)
+            {
+                // Keep this deliberately generic so the mutation cannot reveal whether a
+                // hidden account is a friend, a group participant, or blocked.
+                throw new InvalidOperationException("A selected account cannot be tagged or mentioned in this group.");
+            }
         }
     }
 
@@ -1903,6 +2328,7 @@ public sealed class ContentGraphService : IContentGraphService
     }
 
     private async Task<IReadOnlyDictionary<long, IHomeStoryResult>> BuildHomeStoryItemsAsync(
+        long viewerId,
         IReadOnlyList<ActiveStoryRow> stories,
         CancellationToken cancellationToken)
     {
@@ -1922,28 +2348,15 @@ public sealed class ContentGraphService : IContentGraphService
             .GroupBy(item => item.id1)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.time).First().id2);
         var sourceIds = shareByStory.Values.Distinct().ToArray();
-        var sourceObjects = sourceIds.Length == 0
-            ? new Dictionary<long, Objects>()
-            : await _dbContext.ObjectsTb
-                .AsNoTracking()
-                .Where(item => sourceIds.Contains(item.id))
-                .ToDictionaryAsync(item => item.id, cancellationToken);
-        var visibleSourceIds = sourceObjects.Values
-            .Where(IsStoryShareSourceVisible)
-            .Select(item => item.id)
-            .ToArray();
-        var sourceLinks = visibleSourceIds.Length == 0
-            ? new List<Associations>()
-            : await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => visibleSourceIds.Contains(item.id1) &&
-                    (item.atype == GraphAssociationType.AuthoredBy || item.atype == GraphAssociationType.Contained))
-                .ToListAsync(cancellationToken);
+        var visibleSharedSources = sourceIds.Length == 0
+            ? new Dictionary<long, IStorySharedSourceResult>()
+            : (await GetPostDetailsAsync(viewerId, sourceIds, cancellationToken))
+                .Where(item => item is FeedPostDetailResult or ReelDetailResult)
+                .ToDictionary(GetHomePostId, BuildStorySharedSourceResult);
 
         var relatedIds = storyLinks
             .Where(item => item.atype == GraphAssociationType.Contained)
             .Select(item => item.id2)
-            .Concat(sourceLinks.Select(item => item.id2))
             .Distinct()
             .ToArray();
         var relatedObjects = relatedIds.Length == 0
@@ -1958,12 +2371,11 @@ public sealed class ContentGraphService : IContentGraphService
         {
             if (shareByStory.TryGetValue(story.Story.id, out var sourceId))
             {
-                if (!sourceObjects.TryGetValue(sourceId, out var source) || !IsStoryShareSourceVisible(source))
+                if (!visibleSharedSources.TryGetValue(sourceId, out var sharedSource))
                 {
                     continue;
                 }
 
-                var sharedSource = BuildSharedSourceResult(source, sourceLinks, relatedObjects);
                 results[story.Story.id] = BuildShareStoryResult(story.Story, sharedSource);
                 continue;
             }
@@ -2004,71 +2416,47 @@ public sealed class ContentGraphService : IContentGraphService
     }
 
     private async Task<IStorySharedSourceResult> RequireStoryShareSourceAsync(
+        long viewerId,
         long sourceId,
         CancellationToken cancellationToken)
     {
-        var source = await _objectService.RetrieveObjectAsync(sourceId, cancellationToken)
-            ?? throw new ArgumentException("Shared source does not exist.", nameof(sourceId));
-        if (!IsStoryShareSourceVisible(source.otype, source.data))
-        {
-            throw source.otype == GraphObjectType.FeedPost
-                ? new ArgumentException("Only public feed posts can be shared to story.", nameof(sourceId))
-                : new ArgumentException("Stories can only share public feed posts or reels.", nameof(sourceId));
-        }
-
-        return await BuildSharedSourceResultAsync(source, cancellationToken);
+        var source = (await GetPostDetailsAsync(viewerId, new[] { sourceId }, cancellationToken))
+            .FirstOrDefault();
+        return source is FeedPostDetailResult or ReelDetailResult
+            ? BuildStorySharedSourceResult(source)
+            : throw new ArgumentException(
+                "The shared source is unavailable or not visible to the current user.",
+                nameof(sourceId));
     }
 
-    private async Task<IStorySharedSourceResult> BuildSharedSourceResultAsync(
-        SocialGraphObjectResult source,
-        CancellationToken cancellationToken)
+    private static IStorySharedSourceResult BuildStorySharedSourceResult(IHomePostResult source)
     {
-        var data = GraphJson.ParseObject(source.data);
-        var content = GraphJson.String(data, "content");
-        var authorId = await GetAuthorIdAsync(source.id, cancellationToken);
-        var author = authorId > 0 ? await BuildUserSummaryAsync(authorId, cancellationToken) : null;
-        var media = await GetFirstMediaAsync(source.id, cancellationToken);
-
-        return source.otype switch
+        return source switch
         {
-            GraphObjectType.FeedPost => new FeedPostSharedSourceResult(source.id, content, media, author),
-            GraphObjectType.Reel => new ReelSharedSourceResult(source.id, content, media, author),
+            FeedPostDetailResult feedPost => new FeedPostSharedSourceResult(
+                feedPost.Id,
+                feedPost.Content,
+                feedPost.Media.FirstOrDefault(),
+                ToUserSummary(feedPost.Author)),
+            ReelDetailResult reel => new ReelSharedSourceResult(
+                reel.Id,
+                reel.Content,
+                reel.Media.FirstOrDefault(),
+                ToUserSummary(reel.Author)),
             _ => throw new InvalidOperationException("Unsupported story shared source type.")
         };
     }
 
-    private static IStorySharedSourceResult BuildSharedSourceResult(
-        Objects source,
-        IReadOnlyList<Associations> sourceLinks,
-        IReadOnlyDictionary<long, Objects> relatedObjects)
+    private static long GetHomePostId(IHomePostResult post) => post switch
     {
-        var data = GraphJson.ParseObject(source.data);
-        var authorId = sourceLinks
-            .Where(item => item.id1 == source.id && item.atype == GraphAssociationType.AuthoredBy)
-            .OrderByDescending(item => item.time)
-            .Select(item => item.id2)
-            .FirstOrDefault();
-        var author = authorId > 0 && relatedObjects.TryGetValue(authorId, out var authorObject) &&
-                     authorObject.otype == GraphObjectType.User
-            ? BuildUserSummary(authorObject)
-            : null;
-        var mediaId = sourceLinks
-            .Where(item => item.id1 == source.id && item.atype == GraphAssociationType.Contained)
-            .OrderByDescending(item => item.time)
-            .Select(item => item.id2)
-            .FirstOrDefault();
-        var media = mediaId > 0 && relatedObjects.TryGetValue(mediaId, out var mediaObject)
-            ? BuildMediaResult(mediaObject)
-            : null;
-        var content = GraphJson.String(data, "content");
+        FeedPostDetailResult feedPost => feedPost.Id,
+        ReelDetailResult reel => reel.Id,
+        GroupPostDetailResult groupPost => groupPost.Id,
+        _ => 0
+    };
 
-        return source.otype switch
-        {
-            GraphObjectType.FeedPost => new FeedPostSharedSourceResult(source.id, content, media, author),
-            GraphObjectType.Reel => new ReelSharedSourceResult(source.id, content, media, author),
-            _ => throw new InvalidOperationException("Unsupported story shared source type.")
-        };
-    }
+    private static UserSummaryResult ToUserSummary(PostAuthorResult author) =>
+        new(author.Id, author.Name, author.Avatar, author.IsVerified);
 
     private static IHomeStoryResult BuildShareStoryResult(
         SocialGraphObjectResult story,
@@ -2089,22 +2477,6 @@ public sealed class ContentGraphService : IContentGraphService
                 reel),
             _ => throw new InvalidOperationException("Unsupported story shared source result.")
         };
-    }
-
-    private static bool IsStoryShareSourceVisible(Objects source) =>
-        IsStoryShareSourceVisible(source.otype, source.data);
-
-    private static bool IsStoryShareSourceVisible(short objectType, string rawData)
-    {
-        // Only public sources are shareable. Reels carry the same 0..3 privacy domain as
-        // feed posts and can be made private after being shared, so they are subject to the
-        // same check; treating every reel as visible leaked private reels to story viewers.
-        if (objectType is not (GraphObjectType.FeedPost or GraphObjectType.Reel))
-        {
-            return false;
-        }
-
-        return GraphJson.Int(GraphJson.ParseObject(rawData), "privacy") == 0;
     }
 
     private static UserSummaryResult BuildUserSummary(Objects user)

@@ -183,8 +183,9 @@ public class Mutation
 
     public async Task<bool> DeleteGroupAsync(long groupId, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.DeleteGroupAsync(groupId, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.DeleteGroupAsync(actorId, groupId, cancellationToken);
     }
 
     public async Task<GroupResult?> ChangeGroupAvatarAsync(long groupId, string avatarUrl, string? originalUrl, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
@@ -275,9 +276,9 @@ public class Mutation
         [Service] ITrustedCallerAccessor trustedCaller,
         CancellationToken cancellationToken)
     {
-        var adminId = trustedCaller.RequireUserId();
-        await RequireGroupAdminAsync(adminId, groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.InviteUserAsync(adminId, groupId, userId, cancellationToken);
+        var inviterId = trustedCaller.RequireUserId();
+        await RequireGroupParticipantAsync(inviterId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.InviteUserAsync(inviterId, groupId, userId, cancellationToken);
     }
 
     public async Task<bool> AddGroupMemberAsync(long groupId, long userId, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
@@ -288,8 +289,9 @@ public class Mutation
 
     public async Task<bool> RemoveGroupMemberAsync(long groupId, long userId, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), groupId, groupGraphService, cancellationToken);
-        return await groupGraphService.RemoveMemberAsync(groupId, userId, cancellationToken);
+        var adminId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(adminId, groupId, groupGraphService, cancellationToken);
+        return await groupGraphService.RemoveMemberAsync(adminId, groupId, userId, cancellationToken);
     }
 
     public async Task<bool> AddGroupAdminAsync(long groupId, long userId, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
@@ -339,7 +341,13 @@ public class Mutation
 
     public async Task<bool> DeleteContentAsync(long contentId, [Service] IContentGraphService contentGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        await RequireContentAuthorAsync(trustedCaller.RequireUserId(), contentId, contentGraphService, cancellationToken);
+        if (!await contentGraphService.CanDeleteContentAsync(
+                trustedCaller.RequireUserId(),
+                contentId,
+                cancellationToken))
+        {
+            throw Forbidden("Only the content author or an administrator of its group can delete this content.");
+        }
         return await contentGraphService.DeleteContentAsync(contentId, cancellationToken);
     }
 
@@ -373,9 +381,9 @@ public class Mutation
     {
         var actorId = trustedCaller.RequireUserId();
         var sourceId = await contentGraphService.ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
-        if (!await readModels.CanShareTargetAsync(actorId, sourceId, cancellationToken))
+        if (!await readModels.CanShareStoryTargetAsync(actorId, sourceId, cancellationToken))
         {
-            throw Forbidden("Only visible public feed posts and reels can be shared to a story.");
+            throw Forbidden("The source is unavailable or not visible to the current user.");
         }
 
         return await contentGraphService.CreateShareStoryAsync(input with { AuthorId = actorId, SharedSourceId = sourceId }, cancellationToken);
@@ -397,13 +405,19 @@ public class Mutation
         return contentGraphService.CreateReelAsync(input with { AuthorId = actorId }, cancellationToken);
     }
 
-    public async Task<ContentResult> SharePostAsync(SharePostInput input, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
+    public async Task<ContentResult> SharePostAsync(SharePostInput input, [Service] IContentGraphService contentGraphService, [Service] ISocialReadModelService readModels, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
         var actorId = trustedCaller.RequireUserId();
         var sourceId = await contentGraphService.ResolveCanonicalShareSourceIdAsync(input.SourceId, cancellationToken);
         if (!await readModels.CanShareTargetAsync(actorId, sourceId, cancellationToken))
         {
-            throw Forbidden("Only visible public feed posts and reels can be shared.");
+            throw Forbidden("The source is unavailable or not visible to the current user.");
+        }
+
+        if (input.DestinationGroupId is > 0 &&
+            !await groupGraphService.IsParticipantAsync(actorId, input.DestinationGroupId.Value, cancellationToken))
+        {
+            throw Forbidden("Only group members and administrators can publish group posts.");
         }
 
         return await contentGraphService.SharePostAsync(input with { AuthorId = actorId, SourceId = sourceId }, cancellationToken);
@@ -489,6 +503,18 @@ public class Mutation
         if (!await groupGraphService.IsAdminAsync(viewerId, groupId, cancellationToken))
         {
             throw Forbidden("Group administrator permission is required.");
+        }
+    }
+
+    private static async Task RequireGroupParticipantAsync(
+        long viewerId,
+        long groupId,
+        IGroupGraphService groupGraphService,
+        CancellationToken cancellationToken)
+    {
+        if (!await groupGraphService.IsParticipantAsync(viewerId, groupId, cancellationToken))
+        {
+            throw Forbidden("Current group membership is required.");
         }
     }
 

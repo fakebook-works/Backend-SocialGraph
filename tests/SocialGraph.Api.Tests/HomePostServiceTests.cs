@@ -226,6 +226,72 @@ public sealed class HomePostServiceTests
     }
 
     [Theory]
+    [InlineData(1, GraphAssociationType.Followed)]
+    [InlineData(2, GraphAssociationType.Friend)]
+    public async Task SharedFeedWrapper_ProjectsPrivateSourceForAnAuthorizedViewer(
+        int sourcePrivacy,
+        short relationType)
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_205;
+        const long sourceId = 2_206;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Authorized viewer"),
+            User(FeedAuthorId, "Private source author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "wrapper", privacy: 0),
+            Post(sourceId, GraphObjectType.FeedPost, "authorized private source", privacy: sourcePrivacy));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(ViewerId, relationType, FeedAuthorId));
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await service.GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.True(wrapper.SharedSource.IsAvailable);
+        Assert.Equal("authorized private source", wrapper.SharedSource.Content);
+        Assert.Equal(sourcePrivacy, wrapper.SharedSource.Privacy);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SharedFeedWrapper_HidesPrivateSourceWithoutCurrentAccess(bool blocked)
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_207;
+        const long sourceId = 2_208;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Wrapper viewer"),
+            User(FeedAuthorId, "Private source author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "wrapper", privacy: 0),
+            Post(sourceId, GraphObjectType.FeedPost, "friends only", privacy: 2));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId));
+        if (blocked)
+        {
+            context.AssociationsTb.AddRange(
+                Edge(ViewerId, GraphAssociationType.Friend, FeedAuthorId),
+                Edge(ViewerId, GraphAssociationType.BlockedBy, FeedAuthorId));
+        }
+        await context.SaveChangesAsync();
+        var service = CreateContentService(context);
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await service.GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.False(wrapper.SharedSource.IsAvailable);
+        Assert.Null(wrapper.SharedSource.Content);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task SharedFeedWrapper_RemainsVisibleWhenSourceIsPrivateOrDeleted(bool sourceExists)
@@ -257,6 +323,134 @@ public sealed class HomePostServiceTests
         Assert.False(wrapper.SharedSource.IsAvailable);
         Assert.Equal(sourceId, wrapper.SharedSource.Id);
         Assert.Null(wrapper.SharedSource.Content);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public async Task SharedGroupPost_ProjectsFullSourceOnlyForCurrentGroupAudience(int groupPrivacy, bool member)
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_220;
+        const long sourceId = 2_221;
+        const long groupId = 2_222;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Viewer"),
+            User(FeedAuthorId, "Group author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "wrapper", 0),
+            Post(sourceId, GraphObjectType.GroupPost, "group source", 0),
+            Group(groupId, "Source group", groupPrivacy));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(sourceId, GraphAssociationType.PublishedIn, groupId));
+        if (member) context.AssociationsTb.Add(Edge(ViewerId, GraphAssociationType.Member, groupId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.True(wrapper.SharedSource.IsAvailable);
+        Assert.Equal(GraphObjectType.GroupPost, wrapper.SharedSource.Type);
+        Assert.Equal("group source", wrapper.SharedSource.Content);
+        Assert.Equal("Group author", wrapper.SharedSource.Author?.Name);
+        Assert.Equal(groupPrivacy, wrapper.SharedSource.Privacy);
+        Assert.Equal(groupId, wrapper.SharedSource.Group?.Id);
+        Assert.Equal(member, wrapper.SharedSource.Group?.ViewerIsMember);
+        Assert.False(wrapper.SharedSource.RequiresGroupMembership);
+    }
+
+    [Fact]
+    public async Task SharedPrivateGroupPost_ReturnsJoinableGroupMetadataButNoProtectedSourceFields()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_223;
+        const long sourceId = 2_224;
+        const long groupId = 2_225;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Viewer"),
+            User(FeedAuthorId, "Hidden author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "wrapper", 0),
+            Post(sourceId, GraphObjectType.GroupPost, "must stay private", 0),
+            Group(groupId, "Private source group", 1));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(sourceId, GraphAssociationType.PublishedIn, groupId),
+            Edge(FeedAuthorId, GraphAssociationType.Member, groupId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.False(wrapper.SharedSource.IsAvailable);
+        Assert.True(wrapper.SharedSource.RequiresGroupMembership);
+        Assert.Equal(groupId, wrapper.SharedSource.Group?.Id);
+        Assert.Equal(1, wrapper.SharedSource.Group?.MemberCount);
+        Assert.Null(wrapper.SharedSource.Content);
+        Assert.Null(wrapper.SharedSource.Author);
+        Assert.Empty(wrapper.SharedSource.Media);
+        Assert.Empty(wrapper.SharedSource.Mentions ?? Array.Empty<MentionUserResult>());
+    }
+
+    [Fact]
+    public async Task SharedGroup_ProjectsOnlySafeGroupCardMetadata()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_226;
+        const long groupId = 2_227;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Viewer"),
+            Post(wrapperId, GraphObjectType.FeedPost, "group recommendation", 0),
+            Group(groupId, "Shared group", 1));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, groupId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.True(wrapper.SharedSource.IsAvailable);
+        Assert.Equal(GraphObjectType.Group, wrapper.SharedSource.Type);
+        Assert.Equal("Shared group", wrapper.SharedSource.Group?.Name);
+        Assert.Null(wrapper.SharedSource.Author);
+        Assert.Null(wrapper.SharedSource.Content);
+        Assert.Empty(wrapper.SharedSource.Media);
+    }
+
+    [Fact]
+    public async Task GroupShareWrapper_ProjectsItsCanonicalSharedSource()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_228;
+        const long sourceId = 2_229;
+        const long destinationGroupId = 2_230;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Viewer"),
+            User(FeedAuthorId, "Source author"),
+            Group(destinationGroupId, "Destination", 0),
+            Post(wrapperId, GraphObjectType.GroupPost, "shared to group", 0),
+            Post(sourceId, GraphObjectType.FeedPost, "source", 0));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.PublishedIn, destinationGroupId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<GroupPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.True(wrapper.SharedSource.IsAvailable);
+        Assert.Equal(sourceId, wrapper.SharedSource.Id);
+        Assert.Equal("source", wrapper.SharedSource.Content);
     }
 
     private static long PostId(IHomePostResult post) => post switch

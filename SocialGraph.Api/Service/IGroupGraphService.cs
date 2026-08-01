@@ -6,9 +6,10 @@ public interface IGroupGraphService
 {
     Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default);
     Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, CancellationToken cancellationToken = default);
-    Task<bool> DeleteGroupAsync(long groupId, CancellationToken cancellationToken = default);
+    Task<bool> DeleteGroupAsync(long actorId, long groupId, CancellationToken cancellationToken = default);
     Task<GroupResult?> GetGroupAsync(long groupId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GroupSuggestionResult>> GetGroupSuggestionsAsync(long userId, int limit, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<GroupSuggestionFriendResult>> GetGroupFriendMembersAsync(long viewerId, long groupId, int limit, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupAvatarAsync(long actorId, long groupId, string avatarUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupBackgroundAsync(long actorId, long groupId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<VisitedGroupPageResult> GetVisitedGroupsAsync(long userId, int limit, string? cursor, CancellationToken cancellationToken = default);
@@ -19,10 +20,10 @@ public interface IGroupGraphService
     Task<bool> CancelJoinRequestAsync(long userId, long groupId, CancellationToken cancellationToken = default);
     Task<bool> ApproveJoinRequestAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> RejectJoinRequestAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
-    Task<bool> InviteUserAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
+    Task<bool> InviteUserAsync(long inviterId, long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> LeaveGroupAsync(long userId, long groupId, CancellationToken cancellationToken = default);
     Task<bool> AddMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
-    Task<bool> RemoveMemberAsync(long groupId, long userId, CancellationToken cancellationToken = default);
+    Task<bool> RemoveMemberAsync(long adminId, long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> AddAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default);
     Task<bool> RemoveAdminAsync(long groupId, long userId, CancellationToken cancellationToken = default);
 }

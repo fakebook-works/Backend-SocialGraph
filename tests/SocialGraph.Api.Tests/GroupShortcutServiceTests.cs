@@ -220,6 +220,69 @@ public sealed class GroupShortcutServiceTests
     }
 
     [Fact]
+    public async Task GroupJoinRequests_UsesTrustedAdminAndTypedBoundedReadModel()
+    {
+        const long groupId = 355;
+        var expected = new UserSummaryPageResult(
+            new[] { new UserSummaryResult(101, "Pending", "", false) },
+            null,
+            false);
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsAdminAsync(UserId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var reads = new Mock<ISocialReadModelService>(MockBehavior.Strict);
+        reads.Setup(item => item.GetGroupJoinRequestsAsync(
+                UserId,
+                groupId,
+                null,
+                50,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expected);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(UserId);
+
+        var result = await new Query().GetGroupJoinRequestsAsync(
+            groupId,
+            null,
+            500,
+            reads.Object,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None);
+
+        Assert.Same(expected, result);
+        reads.VerifyAll();
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task GroupJoinRequests_RejectsAuthenticatedNonAdminBeforeReadingEdges()
+    {
+        const long groupId = 356;
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsAdminAsync(UserId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var reads = new Mock<ISocialReadModelService>(MockBehavior.Strict);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(UserId);
+
+        var exception = await Assert.ThrowsAsync<GraphQLException>(() => new Query().GetGroupJoinRequestsAsync(
+            groupId,
+            null,
+            50,
+            reads.Object,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        Assert.Equal("FORBIDDEN", exception.Errors.Single().Code);
+        reads.VerifyNoOtherCalls();
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
     public async Task RecordGroupVisit_UpsertsVisitedAssociationForVisibleGroup()
     {
         await using var context = CreateContext();
@@ -241,6 +304,109 @@ public sealed class GroupShortcutServiceTests
 
         Assert.True(recorded);
         associations.VerifyAll();
+    }
+
+    [Fact]
+    public async Task LeaveGroup_DelegatesToTheAtomicAssociationOperation()
+    {
+        await using var context = CreateContext();
+        const long groupId = 321;
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.LeaveGroupWithAdminTransferAsync(
+                UserId,
+                groupId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = CreateService(context, associations: associations);
+
+        Assert.True(await service.LeaveGroupAsync(UserId, groupId));
+        associations.VerifyAll();
+    }
+
+    [Fact]
+    public async Task LeaveGroup_PropagatesAnAtomicLeaveRejection()
+    {
+        await using var context = CreateContext();
+        const long groupId = 322;
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.LeaveGroupWithAdminTransferAsync(
+                UserId,
+                groupId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var service = CreateService(context, associations: associations);
+
+        Assert.False(await service.LeaveGroupAsync(UserId, groupId));
+        associations.VerifyAll();
+    }
+
+    [Fact]
+    public async Task RemoveGroupMember_DelegatesTrustedAdministratorAndVisitedCleanupToTheAtomicOperation()
+    {
+        await using var context = CreateContext();
+        const long groupId = 324;
+        const long targetUserId = 325;
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.RemoveGroupMemberByAdminAsync(
+                UserId,
+                targetUserId,
+                groupId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = CreateService(context, associations: associations);
+
+        Assert.True(await service.RemoveMemberAsync(UserId, groupId, targetUserId));
+        associations.VerifyAll();
+    }
+
+    [Fact]
+    public async Task RemoveGroupMemberMutation_ForwardsOnlyTheTrustedAdministratorActor()
+    {
+        const long groupId = 326;
+        const long targetUserId = 327;
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsAdminAsync(UserId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        groups.Setup(item => item.RemoveMemberAsync(
+                UserId,
+                groupId,
+                targetUserId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(UserId);
+
+        Assert.True(await new Mutation().RemoveGroupMemberAsync(
+            groupId,
+            targetUserId,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        groups.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task LeaveGroup_RejectsAnUntrustedCallerBeforeTouchingTheGraph()
+    {
+        const long groupId = 323;
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId(UserId)).Throws(new GraphQLException("untrusted"));
+
+        await Assert.ThrowsAsync<GraphQLException>(() => new Mutation().LeaveGroupAsync(
+            UserId,
+            groupId,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        groups.Verify(item => item.LeaveGroupAsync(
+            It.IsAny<long>(),
+            It.IsAny<long>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+        trusted.VerifyAll();
     }
 
     [Fact]
@@ -268,7 +434,7 @@ public sealed class GroupShortcutServiceTests
     }
 
     [Fact]
-    public async Task PublicGroupJoin_AddsMemberWithoutPendingApproval()
+    public async Task PublicGroupJoin_CreatesPendingEdgeAndWaitsForApproval()
     {
         await using var context = CreateContext();
         var objects = new Mock<IObjectService>();
@@ -277,25 +443,26 @@ public sealed class GroupShortcutServiceTests
         objects.Setup(item => item.RetrieveObjectAsync(331, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(331, GraphObjectType.Group, GroupJson("Public", 0)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
-        associations.Setup(item => item.ApplyMutationsAsync(It.IsAny<IReadOnlyCollection<AssociationMutation>>(), It.IsAny<CancellationToken>()))
+        associations.Setup(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 331, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
-        var service = CreateService(context, objects, associations);
+        associations.Setup(item => item.RetrieveAssociationAsync(331, GraphAssociationType.HaveAdmin, null, 100, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(200, 1) }, null));
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = CreateService(context, objects, associations, external.Object);
 
         var result = await service.RequestJoinAsync(UserId, 331);
 
         Assert.True(result);
-        associations.Verify(item => item.ApplyMutationsAsync(
-            It.Is<IReadOnlyCollection<AssociationMutation>>(items =>
-                items.Contains(new AssociationMutation(UserId, GraphAssociationType.Member, 331, true))),
-            It.IsAny<CancellationToken>()), Times.Once);
-        associations.Verify(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 331, It.IsAny<CancellationToken>()), Times.Never);
+        associations.Verify(item => item.AddAssociationAsync(UserId, GraphAssociationType.GroupJoinRequest, 331, It.IsAny<CancellationToken>()), Times.Once);
+        associations.Verify(item => item.ApplyMutationsAsync(It.IsAny<IReadOnlyCollection<AssociationMutation>>(), It.IsAny<CancellationToken>()), Times.Never);
+        external.Verify(item => item.NotifyAsync(UserId, 200, ExternalNotificationAction.GroupJoin, 331, null, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task GroupInvite_RequiresAdminAndQueuesCanonicalNotification()
+    public async Task GroupInvite_RequiresCurrentParticipantAndFriendAndQueuesCanonicalNotification()
     {
         await using var context = CreateContext();
-        const long adminId = 200;
+        const long inviterId = 200;
         const long groupId = 340;
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.RetrieveObjectAsync(UserId, It.IsAny<CancellationToken>()))
@@ -303,25 +470,129 @@ public sealed class GroupShortcutServiceTests
         objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson("Invite", 1)));
         var associations = new Mock<IAssociationService>(MockBehavior.Loose);
-        associations.Setup(item => item.HasAssociationAsync(adminId, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
+        associations.Setup(item => item.HasAssociationAsync(inviterId, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(item => item.HasAssociationAsync(inviterId, GraphAssociationType.Friend, UserId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
         var service = CreateService(context, objects, associations, external.Object);
 
-        var invited = await service.InviteUserAsync(adminId, groupId, UserId);
+        var invited = await service.InviteUserAsync(inviterId, groupId, UserId);
 
         Assert.True(invited);
         external.Verify(item => item.NotifyAsync(
-            adminId,
+            inviterId,
             UserId,
             ExternalNotificationAction.GroupInvite,
             groupId,
             null,
             It.IsAny<CancellationToken>()), Times.Once);
 
-        associations.Setup(item => item.HasAssociationAsync(201, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+        associations.Setup(item => item.HasAssociationAsync(201, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        associations.Setup(item => item.HasAssociationAsync(201, GraphAssociationType.Admin, groupId, It.IsAny<CancellationToken>())).ReturnsAsync(false);
         Assert.False(await service.InviteUserAsync(201, groupId, UserId));
+
+        associations.Setup(item => item.HasAssociationAsync(202, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        associations.Setup(item => item.HasAssociationAsync(202, GraphAssociationType.Friend, UserId, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        Assert.False(await service.InviteUserAsync(202, groupId, UserId));
+    }
+
+    [Fact]
+    public async Task DeleteGroup_RejectsAdministratorWhileAnotherParticipantExists()
+    {
+        await using var context = CreateContext();
+        const long groupId = 370;
+        const long otherMemberId = 371;
+        context.AssociationsTb.AddRange(
+            Edge(UserId, GraphAssociationType.Member, groupId, 1),
+            Edge(UserId, GraphAssociationType.Admin, groupId, 1),
+            Edge(groupId, GraphAssociationType.HaveMember, UserId, 1),
+            Edge(groupId, GraphAssociationType.HaveAdmin, UserId, 1),
+            Edge(otherMemberId, GraphAssociationType.Member, groupId, 2),
+            Edge(groupId, GraphAssociationType.HaveMember, otherMemberId, 2));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        var service = CreateService(context, objects, associations);
+
+        Assert.False(await service.DeleteGroupAsync(UserId, groupId));
+
+        objects.VerifyNoOtherCalls();
+        associations.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task DeleteGroup_FailsClosedWhenAnotherForwardMembershipEdgeHasNoInverse()
+    {
+        await using var context = CreateContext();
+        const long groupId = 374;
+        const long otherMemberId = 375;
+        context.AssociationsTb.AddRange(
+            Edge(UserId, GraphAssociationType.Member, groupId, 1),
+            Edge(UserId, GraphAssociationType.Admin, groupId, 1),
+            Edge(groupId, GraphAssociationType.HaveMember, UserId, 1),
+            Edge(groupId, GraphAssociationType.HaveAdmin, UserId, 1),
+            Edge(otherMemberId, GraphAssociationType.Member, groupId, 2));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        var service = CreateService(context, objects, associations);
+
+        Assert.False(await service.DeleteGroupAsync(UserId, groupId));
+
+        objects.VerifyNoOtherCalls();
+        associations.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task DeleteGroup_AllowsOnlyTheFinalAdministratorParticipant()
+    {
+        await using var context = CreateContext();
+        const long groupId = 372;
+        context.AssociationsTb.AddRange(
+            Edge(UserId, GraphAssociationType.Member, groupId, 1),
+            Edge(UserId, GraphAssociationType.Admin, groupId, 1),
+            Edge(groupId, GraphAssociationType.HaveMember, UserId, 1),
+            Edge(groupId, GraphAssociationType.HaveAdmin, UserId, 1));
+        await context.SaveChangesAsync();
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson("Final", 1)));
+        objects.Setup(item => item.DeleteObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.DeleteObjectAssociationsAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(4);
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = CreateService(context, objects, associations, external.Object);
+
+        Assert.True(await service.DeleteGroupAsync(UserId, groupId));
+
+        objects.VerifyAll();
+        associations.VerifyAll();
+        external.Verify(item => item.DeleteSearchIndexAsync(groupId, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteGroupMutation_ForwardsOnlyTheTrustedAdministratorActor()
+    {
+        const long groupId = 373;
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        groups.Setup(item => item.IsAdminAsync(UserId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        groups.Setup(item => item.DeleteGroupAsync(UserId, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(UserId);
+
+        Assert.True(await new Mutation().DeleteGroupAsync(
+            groupId,
+            groups.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        groups.VerifyAll();
+        trusted.VerifyAll();
     }
 
     private static GroupGraphService CreateService(

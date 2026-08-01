@@ -98,12 +98,25 @@ những trường không đánh dấu là không được sửa đổi khi đã 
 
     user1 -(15)-> group1: user1 là quản trị của những group nào
     group1 -(16)-> user1: group1 có những quản trị nào
+    * khi quản trị viên duy nhất rời nhóm, server tự chọn thành viên hiện tại vào sớm nhất theo
+      `Member.time ASC`, rồi `userId ASC`; client không được chỉ định người kế nhiệm
+    * promote người kế nhiệm và xoá Admin/Member/Visited của người rời nằm trong cùng transaction;
+      pending request không bao giờ là ứng viên, không còn ứng viên thì toàn bộ thao tác bị từ chối
+    * gỡ quyền quản trị dùng transaction Serializable và advisory lock theo group; chỉ được gỡ khi
+      còn quản trị viên khác, giữ nguyên cạnh Member và không thể để nhóm có 0 quản trị viên
+    * deleteGroup chỉ nhận groupId công khai nhưng actor được lấy từ trusted Gateway context; backend
+      chỉ xoá khi actor vừa là Admin vừa là Member cuối cùng hiện tại của group; kiểm tra và xoá local
+      chạy trong transaction Serializable với cùng advisory lock theo group, cleanup ngoài service chạy sau commit
 
 -- 17  group_join_request (user->group) -- 17 18
 -- 18  have_group_join_request (group->user)
 
     user1 -(17)-> group1: user1 đã gửi yêu cầu tham gia những group nào
     group1 -(18)-> user1: group1 nhận được yêu cầu tham gia từ những user nào
+    * cả group công khai lẫn riêng tư đều tạo request và chỉ thành member sau khi admin duyệt;
+      privacy của group chỉ quyết định quyền đọc nội dung, không tự động cấp membership
+    * pendingGroupJoins đọc cạnh 17 từ phía user; groupJoinRequests đọc cạnh inverse 18 từ phía group,
+      chỉ admin hiện tại được gọi, trả UserSummary đã lọc với page tối đa 50 thay vì raw association
 
 -- 19  watched (user->reel/story) -- 19 20
 -- 20  watched_by (reel/story->user)
@@ -117,18 +130,24 @@ những trường không đánh dấu là không được sửa đổi khi đã 
     post1 -(21)-> comment1: post1 có những comment nào
     comment1 -(22)-> post1: comment1 thuộc post/reel/comment nào
 
--- 23  share (post feed/story->post feed(privacy 0)/reel) 
--- 24  shared_by (post feed(privacy 0)/reel->post feed/story)
+-- 23  share (post feed/post group->group/post feed/post group/reel; story->post feed/reel)
+-- 24  shared_by (inverse của share)
 
-    postfeed1 -(23)-> postfeed2: post1 chia sẻ postfeed/reel nào
-    postfeed2 -(24)-> postfeed1: postfeed2 được chia sẻ bởi những postfeed/story nào
-    * source của share luôn được chuẩn hoá về bài gốc: nếu chia sẻ một postfeed đã là wrapper chia sẻ thì cạnh (23) mới trỏ thẳng tới postfeed/reel gốc, không tạo chuỗi wrapper lồng nhau
-    * projection SharedPostSource trả thêm privacy và create của bài gốc để frontend hiển thị metadata giống bài đăng thường
+    postfeed1 -(23)-> postgroup1: post feed chia sẻ bài trong group
+    postgroup2 -(23)-> group1: bài đăng trong group chia sẻ thẻ giới thiệu một group
+    * source của post share luôn được chuẩn hoá về đối tượng gốc: wrapper FeedPost/GroupPost đã có cạnh Share được bóc tới nguồn cuối, không tạo chuỗi wrapper lồng nhau
+    * SharePostInput.destinationGroupId là optional. Khi có, resolver bắt buộc actor hiện tại là member/admin của group đích và tạo GroupPost wrapper; khi không có thì tạo FeedPost wrapper với privacy 0/1/2/3
+    * cả create GroupPost thường và share vào group đều kiểm tra lại Member/Admin trong transaction, giữ row lock trên cạnh membership tới commit; thao tác rời/xoá thành viên đồng thời không thể chen giữa policy check và cạnh Published
+    * projection SharedPostSource trả privacy/create và metadata group an toàn. GroupPost riêng tư chỉ trả full content/author/media/mentions khi viewer hiện là member/admin; người ngoài chỉ nhận metadata group tối thiểu cùng requiresGroupMembership, tuyệt đối không nhận trường nội dung được bảo vệ
+    * source loại Group chỉ trả thẻ group (bìa/avatar/tên/privacy/số thành viên/trạng thái viewer), không giả lập author bài viết
+    * mutation lấy actor từ trusted Gateway context rồi kiểm tra privacy 0/1/2/3 và block hai chiều ở thời điểm ghi; input authorId không cấp quyền
+    * mỗi lần đọc wrapper đều kiểm tra lại quyền của chính viewer với source; privacy của wrapper không mở rộng quyền source. Story vẫn chỉ nhận FeedPost/Reel và đi qua CanShareStoryTargetAsync riêng, nên Group/GroupPost không thể lách union Story
 
--- 25  tagged (post feed->user)
+-- 25  tagged (post feed/post group->user)
 
-    postfeed1 -(25)-> user1: postfeed1 tag những ai
-    * không cần inverse vì không cần biết user1 được tag bởi những postfeed nào
+    post1 -(25)-> user1: post feed hoặc post group tag những ai
+    * không cần inverse vì không cần biết user1 được tag bởi những post nào
+    * với post group, user được tag/mention phải đồng thời là bạn hiện tại của author và member/admin của đúng group; block hai chiều luôn thắng
 
 -- 26  mentioned (post/reel/story/comment->user)
 
@@ -151,6 +170,11 @@ những trường không đánh dấu là không được sửa đổi khi đã 
     user1 -(29)-> group1: user1 đã ghé thăm những group nào
     * không cần inverse vì không cần biết group1 được những user nào ghé thăm
     * visitedGroups trả `visitedAt` từ `Associations.time` để frontend hiển thị lần truy cập gần nhất
+    * leaveGroup thành công xoá Visited của chính caller cùng transaction với Member/Admin và thao tác
+      chuyển quyền quản trị viên duy nhất (nếu cần); leave bị từ chối không thay đổi Visited
+    * khi quản trị viên xoá một thành viên không phải admin, server kiểm tra lại quyền admin dưới
+      transaction Serializable/advisory lock của group rồi xoá Member/HaveMember cùng Visited của
+      đúng cặp user-group; Visited của user tới group khác và của user khác không bị ảnh hưởng
 
 
 Association thể hiện mối quan hệ giữa 2 object
@@ -196,14 +220,20 @@ quản trị hoặc đang chờ duyệt và lọc nguồn bạn bè bị block h
 thành viên distinct, tối đa ba preview chỉ có `id/name/avatar`, và tổng GroupPost còn tồn tại được `Published`
 trong khoảng UTC `[00:00 hôm qua, 00:00 hôm nay)`. Đây là projection tổng hợp có giới hạn: nó không cấp quyền
 đọc nội dung post riêng tư và không lộ phần còn lại của member list nhóm riêng tư.
+`groupFriendMembers(groupId, limit)` là projection đích danh cho header profile nhóm. Viewer luôn lấy từ trusted
+Gateway context; kết quả clamp tối đa 12 và chỉ là giao của Friend hiện tại với Member/Admin hiện tại của đúng
+group, sau khi lọc block hai chiều và user đã xoá. Query vẫn dùng được khi group riêng tư có request chờ duyệt,
+nhưng không trả người lạ hay phần còn lại của roster riêng tư.
 `profilePosts(userId, cursor, limit)` là luồng authored hợp nhất của tab Tất cả trên profile: trả cả
-`FeedPostDetail` và `ReelDetail` theo thứ tự association, còn `profileReels` vẫn chỉ trả Reel cho tab riêng.
+`FeedPostDetail` và `ReelDetail` theo thứ tự association; `GroupPostDetail` luôn bị loại và chỉ được đọc
+qua query có scope group (`groupPosts`/`groupUserPosts`). `profileReels` vẫn chỉ trả Reel cho tab riêng.
 Viewer luôn lấy từ trusted Gateway accessor; target `userId` không phải caller identity. Resolver chặn block
 hai chiều trước khi đọc và toàn bộ item tiếp tục đi qua `ContentGraphService.GetPostDetailsAsync`, nên privacy
 0/1/2/3, trạng thái xoá và block hiện tại vẫn được áp dụng trước khi item xuất hiện.
 Mỗi bucket của `homeStories` trả thêm `unseenCount`, được tính chính xác từ các story chưa có association `Watched` của viewer; `hasUnseen` tương đương `unseenCount > 0`.
 userPhotos(userId, cursor, limit) lấy ảnh từ feed post của user mà viewer được xem.
-groupPhotos(groupId, cursor, limit) lấy ảnh từ group post của group mà viewer được xem.
+groupPhotos(groupId, cursor, limit) chỉ lấy ảnh từ group post của group mà viewer được xem.
+groupMedia(groupId, cursor, limit) lấy cả ảnh và video từ group post mà viewer được xem; file/audio/link không xuất hiện.
 groupUserPhotos(groupId, userId, cursor, limit) lấy ảnh từ group post do user tạo trong group.
 myFeedPhotoCandidates/groupPhotoCandidates là nguồn ảnh hợp lệ để chọn avatar/background.
 Ảnh đại diện user được lưu từ bản cắt; nếu người dùng tải file mới thì ảnh gốc tạo một feed post công khai
@@ -225,7 +255,8 @@ frontend không dò nguồn bằng URL hay nội dung `đã cập nhật ảnh �
 groupUserPosts(groupId, userId, cursor, limit) áp dụng group privacy và block/content visibility.
 likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trusted gateway header.
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.
-inviteGroupUser chỉ gửi notification action 6, không tự thêm member; share feed/story gửi action 9 cho source author và bỏ qua self-notify.
+inviteGroupUser yêu cầu người mời là member/admin hiện tại và target là bạn hiện tại, áp dụng block hai chiều,
+chỉ gửi notification action 6 và không tự thêm member; share feed/story gửi action 9 cho source author và bỏ qua self-notify.
 
 -- ** Mention trong content ** --
 --------------------------------
@@ -254,4 +285,11 @@ Profile của người khác dùng hai read model target-scoped riêng:
 Hai query trên không nới `profileConnections`: API đó vẫn caller-owned và vẫn yêu cầu `userId` trùng trusted actor. Vì vậy input ID không thể được dùng để giả mạo caller.
 
 Feed post detail trả thêm `taggedUsers { id name avatar isVerified }`. Danh sách này được hydrate cùng batch association/object của trang feed, không gọi query riêng cho từng post.
+Group post detail cũng trả `taggedUsers { id name avatar isVerified }`. Khi tạo group post, cả
+`taggedUserIds` lẫn user ID derive từ mention token đều phải vừa là bạn của author vừa là
+member/admin hiện tại của group; lỗi dùng thông báo chung để không làm lộ friend/member/block state.
+
+`deleteContent(contentId)` cho phép author xoá nội dung của mình. Ngoại lệ duy nhất là GroupPost:
+admin hiện tại của đúng group lấy từ cạnh `PublishedIn` cũng có thể xoá. FeedPost/Reel/comment/story
+không thể có thêm quyền xoá nhờ association Admin ở một group bất kỳ.
 

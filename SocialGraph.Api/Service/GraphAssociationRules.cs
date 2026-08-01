@@ -79,8 +79,8 @@ public static class GraphAssociationRules
             GraphAssociationType.Comment =>
                 Is(sourceType, GraphObjectType.Comment) && IsCommentTarget(targetType),
 
-            GraphAssociationType.Share => IsShareContainer(sourceType) && IsShareTarget(targetType),
-            GraphAssociationType.SharedBy => IsShareTarget(sourceType) && IsShareContainer(targetType),
+            GraphAssociationType.Share => IsValidShare(sourceType, targetType),
+            GraphAssociationType.SharedBy => IsValidShare(targetType, sourceType),
             GraphAssociationType.Tagged =>
                 Is(sourceType, GraphObjectType.FeedPost) && Is(targetType, GraphObjectType.User),
             GraphAssociationType.Mentioned =>
@@ -100,8 +100,13 @@ public static class GraphAssociationRules
     private static bool IsAuthoredContent(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story or GraphObjectType.Comment;
     private static bool IsWatchable(short value) => value is GraphObjectType.Reel or GraphObjectType.Story;
     private static bool IsCommentTarget(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Comment;
-    private static bool IsShareContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.Story;
-    private static bool IsShareTarget(short value) => value is GraphObjectType.FeedPost or GraphObjectType.Reel;
+    private static bool IsShareContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Story;
+    private static bool IsShareTarget(short value) => value is GraphObjectType.Group or GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel;
+    private static bool IsValidShare(short containerType, short targetType) =>
+        IsShareContainer(containerType) &&
+        (containerType == GraphObjectType.Story
+            ? targetType is GraphObjectType.FeedPost or GraphObjectType.Reel
+            : IsShareTarget(targetType));
     private static bool IsMentionSource(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story or GraphObjectType.Comment;
     private static bool IsSaveable(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel;
     private static bool IsMediaContainer(short value) => value is GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel or GraphObjectType.Story or GraphObjectType.Comment;

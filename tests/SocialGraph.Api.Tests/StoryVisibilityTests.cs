@@ -8,8 +8,7 @@ using SocialGraph.Api.Service;
 
 /// <summary>
 /// Regression coverage for the story read path.
-/// IsStoryShareSourceVisible returned true unconditionally for reels, so a "friends only" or
-/// "only me" reel shared into a story was rendered in full to every story viewer.
+/// Shared-story sources must use the same viewer-aware privacy policy as normal post reads.
 /// The author list also applied no block filtering at all, so someone who had blocked the viewer
 /// still appeared in their story tray. Following an author is, by design, sufficient on its own.
 /// </summary>
@@ -23,10 +22,21 @@ public sealed class StoryVisibilityTests
     [Theory]
     [InlineData(1)] // friends and current followers
     [InlineData(2)] // friends
-    [InlineData(3)] // author only
-    public async Task Story_share_of_a_non_public_reel_is_hidden(int privacy)
+    public async Task Story_share_of_a_private_reel_is_visible_to_an_authorized_friend(int privacy)
     {
         await using var context = await SeedSharedReelAsync(privacy);
+        var service = CreateService(context, Relations(friends: [AuthorId]));
+
+        var result = await service.GetHomeStoriesAsync(ViewerId, 20, null);
+
+        var bucket = Assert.Single(result.Items);
+        Assert.NotEmpty(bucket.Stories);
+    }
+
+    [Fact]
+    public async Task Story_share_of_an_author_only_reel_is_hidden_from_a_friend()
+    {
+        await using var context = await SeedSharedReelAsync(3);
         var service = CreateService(context, Relations(friends: [AuthorId]));
 
         var result = await service.GetHomeStoriesAsync(ViewerId, 20, null);
@@ -109,6 +119,8 @@ public sealed class StoryVisibilityTests
             new Objects { id = SourceId, otype = GraphObjectType.Reel, data = PostJson(reelPrivacy) });
         context.AssociationsTb.AddRange(
             Edge(AuthorId, GraphAssociationType.Authored, StoryId),
+            Edge(SourceId, GraphAssociationType.AuthoredBy, AuthorId),
+            Edge(ViewerId, GraphAssociationType.Friend, AuthorId),
             Edge(StoryId, GraphAssociationType.Share, SourceId));
         await context.SaveChangesAsync();
         return context;
