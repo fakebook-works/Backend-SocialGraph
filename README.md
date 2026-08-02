@@ -203,7 +203,10 @@ Use environment variables for machine-specific values and secrets:
 
 ```text
 ConnectionStrings__PostgreSQL=<social-graph-postgres-connection>
+ConnectionStrings__PostgreSQLMigration=<optional-ddl-capable-postgres-connection>
 ConnectionStrings__Redis=localhost:6379
+DatabaseMigrations__Enabled=true
+DatabaseMigrations__CommandTimeoutSeconds=300
 InternalServices__SocialGraph__SharedSecret=<inbound-at-least-32-bytes>
 InternalServices__Authentication__BaseUrl=http://localhost:1001
 InternalServices__Authentication__SharedSecret=<auth-target-secret>
@@ -229,7 +232,7 @@ StoryCleanup__IntervalMinutes=15
 StoryCleanup__BatchSize=100
 ```
 
-Each target service has a separate secret/header. Do not commit real credentials. `appsettings.json` contains localhost placeholders only.
+Each target service has a separate secret/header. Do not commit real credentials. `appsettings.json` contains localhost placeholders only. `ConnectionStrings:PostgreSQLMigration` is optional and falls back to `ConnectionStrings:PostgreSQL`; configure it with a DDL-capable role in shared environments so the runtime SocialGraph role can remain least-privileged.
 
 ## Internal Security
 
@@ -269,6 +272,13 @@ dotnet restore .\SocialGraphService.sln
 dotnet run --project .\SocialGraph.Api\SocialGraph.Api.csproj
 ```
 
+Startup applies the embedded `schema.sql` baseline and each additive SQL file in version
+order. A PostgreSQL session advisory lock serializes replicas, and
+`social_graph.schema_migrations` records a SHA-256 checksum so an already-applied file cannot
+be edited silently. A migration error aborts startup. Set
+`DatabaseMigrations__Enabled=false` only when the same migrations are applied by a separate
+deployment job before the service starts.
+
 The default HTTP launch URL is `http://localhost:1002`; GraphQL is at `/graphql`.
 
 ## Tests
@@ -281,7 +291,7 @@ The suite verifies the 0..29 association contract and migration mapping, precede
 
 ## Durable integration outbox
 
-SocialGraph creates `social_graph.integration_outbox` additively with `CREATE TABLE IF NOT EXISTS`; it does not alter the object or association tables. Workers claim rows with `FOR UPDATE SKIP LOCKED`, recover stale processing locks, send a stable `Idempotency-Key` to each target, and retain completed rows for the configured retention period. Idle polling backs off from `PollMilliseconds` to `MaxIdlePollMilliseconds` and resets immediately after work is found. HTTP 408/425/429/5xx and transport errors retry; invalid payloads/configuration and other 4xx responses dead-letter immediately.
+The versioned startup migration creates `social_graph.integration_outbox` additively with `CREATE TABLE IF NOT EXISTS`; it does not alter object or association data. Workers claim rows with `FOR UPDATE SKIP LOCKED`, recover stale processing locks, send a stable `Idempotency-Key` to each target, and retain completed rows for the configured retention period. Idle polling backs off from `PollMilliseconds` to `MaxIdlePollMilliseconds` and resets immediately after work is found. HTTP 408/425/429/5xx and transport errors retry; invalid payloads/configuration and other 4xx responses dead-letter immediately.
 
 User create, user update-name projection, and user delete write domain state plus outbox rows in the same PostgreSQL transaction because they share the scoped `MyDbContext`. Other content, group, relationship, and notification flows enqueue immediately after their domain write, but their existing service-level transaction boundaries still leave a small crash window between the domain commit and outbox insert. The downstream endpoints must honor `Idempotency-Key`; replaying a partially delivered operation is otherwise only at-least-once.
 
@@ -289,7 +299,7 @@ User-create credentials are AES-GCM encrypted in the outbox. Keep `IntegrationOu
 
 ## Association migration
 
-Normal startup never changes association codes. Preview the legacy v1 to canonical v2 migration with an always-rollback transaction:
+Normal startup applies only idempotent schema/index migrations and never changes association codes. Numeric legacy and canonical codes overlap, so inferring the source contract from populated data is unsafe. Preview the legacy v1 to canonical v2 migration with an always-rollback transaction:
 
 ```powershell
 dotnet run --project .\SocialGraph.Api -- --migrate-association-contract

@@ -1,19 +1,15 @@
 -- Social graph domain (PostgreSQL) for Fakebook.
 --
--- Until now the only definition of these two tables was a prose code block inside
--- SocialGraphSchema.md, and nothing in the service creates them: Program.cs registers the
--- DbContext but never calls Migrate or EnsureCreated. That meant the database could not be
--- recreated from the repository at all. This file is the authoritative definition;
--- SocialGraphSchema.md remains documentation of the model, not its source of truth.
+-- This file is the authoritative baseline definition. The startup migration runner embeds
+-- and applies it before the versioned scripts under Migrations; SocialGraphSchema.md remains
+-- documentation of the model, not its source of truth.
 --
--- Apply once against an empty database, then apply everything under migrations/ in
--- filename order. Existing deployments already have these tables — running this file is
--- harmless there because every statement is guarded, but the migrations still need to be
--- applied.
+-- Existing deployments already have these tables. Applying this baseline is harmless there
+-- because every statement is guarded, after which the runner records its checksum in
+-- social_graph.schema_migrations.
 --
--- social_graph.integration_outbox is deliberately absent: the service creates it itself on
--- startup through OutboxSchemaHostedService, and duplicating that DDL here would leave two
--- definitions to drift apart.
+-- social_graph.integration_outbox is deliberately absent from the baseline. It is owned by
+-- the versioned 20260802_create_integration_outbox.sql migration.
 
 CREATE SCHEMA IF NOT EXISTS social_graph;
 

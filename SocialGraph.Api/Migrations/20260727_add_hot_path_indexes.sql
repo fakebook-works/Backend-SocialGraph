@@ -35,7 +35,8 @@
 -- a way that looks like it applied. The script above goes through Fakebook.Maintenance,
 -- which already carries the database client this repository depends on.
 --
--- The statements are wrapped in a transaction and are idempotent, so re-running is safe.
+-- The startup runner wraps this script and its history insert in one transaction. Every DDL
+-- statement is idempotent, so manual recovery/re-running is safe.
 -- CREATE INDEX takes a lock that blocks writes to the table for the duration of the
 -- build; on the current data this is milliseconds. If this is ever applied to a database
 -- large enough for that to matter, run the same statements with CONCURRENTLY instead and
@@ -43,8 +44,6 @@
 -- left invalid by an interrupted build:
 --
 --   SELECT i.indexrelid::regclass FROM pg_index i WHERE NOT i.indisvalid;
-
-BEGIN;
 
 -- Paged reads of an association bucket, newest first. id2 completes the key so the
 -- (time, id2) keyset cursor is satisfied by the index alone.
@@ -65,5 +64,3 @@ CREATE INDEX IF NOT EXISTS idx_objects_media_url
 -- Identical to the primary key. Dropped after the replacements above exist, so the table
 -- is never left without an index the read paths were relying on.
 DROP INDEX IF EXISTS social_graph.idx_associations;
-
-COMMIT;

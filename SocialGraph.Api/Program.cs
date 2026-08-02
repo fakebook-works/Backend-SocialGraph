@@ -67,6 +67,15 @@ builder.Services.Configure<SocialGraphCacheOptions>(options =>
 
 builder.Services.AddDbContext<MyDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("PostgreSQL")));
+builder.Services
+    .AddOptions<DatabaseMigrationOptions>()
+    .Bind(builder.Configuration.GetSection(DatabaseMigrationOptions.SectionName))
+    .Validate(
+        options => options.CommandTimeoutSeconds is >= 1 and <= 3_600,
+        "DatabaseMigrations:CommandTimeoutSeconds must be between 1 and 3600.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<SocialGraphDatabaseMigrator>();
+builder.Services.AddHostedService<SocialGraphDatabaseMigrationHostedService>();
 
 // 1. Đăng ký kết nối Redis (Dòng code của bạn)
 builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>

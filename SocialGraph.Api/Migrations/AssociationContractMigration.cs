@@ -32,10 +32,16 @@ public static class AssociationContractMigrationCommand
             return 2;
         }
 
-        var connectionString = configuration.GetConnectionString("PostgreSQL");
+        var connectionString = configuration.GetConnectionString("PostgreSQLMigration");
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            logger.LogError("ConnectionStrings:PostgreSQL is required for the association migration command.");
+            connectionString = configuration.GetConnectionString("PostgreSQL");
+        }
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            logger.LogError(
+                "ConnectionStrings:PostgreSQLMigration or ConnectionStrings:PostgreSQL is required for the association migration command.");
             return 2;
         }
 

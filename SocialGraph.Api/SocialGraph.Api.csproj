@@ -38,4 +38,10 @@
       <Folder Include="Service\" />
     </ItemGroup>
 
+    <ItemGroup>
+      <EmbeddedResource Include="schema.sql" LogicalName="SocialGraph.Api.Migrations.Sql.00000000_schema.sql" />
+      <EmbeddedResource Include="Migrations\20260727_add_hot_path_indexes.sql" LogicalName="SocialGraph.Api.Migrations.Sql.20260727_add_hot_path_indexes.sql" />
+      <EmbeddedResource Include="Migrations\20260802_create_integration_outbox.sql" LogicalName="SocialGraph.Api.Migrations.Sql.20260802_create_integration_outbox.sql" />
+    </ItemGroup>
+
 </Project>

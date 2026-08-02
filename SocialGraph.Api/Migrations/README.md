@@ -1,6 +1,17 @@
-# SocialGraph association contract migration
+# SocialGraph database migrations
 
-The application never runs this migration during normal startup.
+Normal startup embeds and applies `schema.sql` followed by versioned `.sql` migrations in
+filename/version order. Replicas serialize this work with a PostgreSQL advisory lock;
+`social_graph.schema_migrations` stores each version and SHA-256 checksum. Failures abort
+startup. `DatabaseMigrations:Enabled=false` is the opt-out for deployments that run the same
+files in a separate migration job. `ConnectionStrings:PostgreSQLMigration` may name a
+DDL-capable role and falls back to `ConnectionStrings:PostgreSQL` when omitted.
+
+## Association contract data migration
+
+The startup runner deliberately never runs this migration. Legacy and canonical numeric
+association codes overlap, and this operation rewrites data, so it requires an operator to
+verify and declare the source contract.
 
 Preview against the configured database (transaction is always rolled back):
 
