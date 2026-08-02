@@ -26,7 +26,10 @@ internal static class FakebookServiceDefaults
             metrics.AddAspNetCoreInstrumentation().AddHttpClientInstrumentation().AddRuntimeInstrumentation();
             if (endpoint is not null) metrics.AddOtlpExporter(options => options.Endpoint = endpoint);
         });
-        services.ConfigureHttpClientDefaults(http => http.AddStandardResilienceHandler(options => options.Retry.DisableForUnsafeHttpMethods()));
+        // Safe methods may be retried by the shared resilience pipeline; unsafe
+        // mutations are deliberately left to the signed outbox/idempotency flow.
+        services.ConfigureHttpClientDefaults(http =>
+            http.AddStandardResilienceHandler(options => options.Retry.DisableForUnsafeHttpMethods()));
         return services;
     }
     private static double ReadSampleRatio(IConfiguration configuration) =>

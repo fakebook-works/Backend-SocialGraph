@@ -88,6 +88,20 @@ public sealed class ExternalServiceOutboxDispatchTests
     }
 
     [Fact]
+    public async Task RecommendationContentProjection_UsesDedicatedBoundedLongRunningClient()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var (client, factory) = CreateClientWithFactory(handler);
+        var message = Message(
+            IntegrationEventType.RecommendationContentUpsert,
+            JsonSerializer.Serialize(new ContentEmbeddingEvent(123, "embedding text", Array.Empty<string>())));
+
+        await client.DispatchAsync(message);
+
+        Assert.Equal("recommendation-content", Assert.Single(factory.RequestedNames));
+    }
+
+    [Fact]
     public async Task AuthUserCreate_DecryptsCredentialsAndDispatchesOnlyAuthEvent()
     {
         var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));
@@ -155,15 +169,23 @@ public sealed class ExternalServiceOutboxDispatchTests
         CapturingHandler handler,
         IConfiguration? configuration = null,
         IOutboxPayloadProtector? protector = null)
+        => CreateClientWithFactory(handler, configuration, protector).Client;
+
+    private static (ExternalServiceClient Client, SingleClientFactory Factory) CreateClientWithFactory(
+        CapturingHandler handler,
+        IConfiguration? configuration = null,
+        IOutboxPayloadProtector? protector = null)
     {
         configuration ??= Configuration();
         protector ??= new OutboxPayloadProtector(configuration);
-        return new ExternalServiceClient(
-            new SingleClientFactory(new HttpClient(handler)),
+        var factory = new SingleClientFactory(new HttpClient(handler));
+        var client = new ExternalServiceClient(
+            factory,
             configuration,
             new HttpContextAccessor { HttpContext = new DefaultHttpContext() },
             NullLogger<ExternalServiceClient>.Instance,
             protector);
+        return (client, factory);
     }
 
     private static IConfiguration Configuration()
@@ -246,6 +268,12 @@ public sealed class ExternalServiceOutboxDispatchTests
             _client = client;
         }
 
-        public HttpClient CreateClient(string name) => _client;
+        public ConcurrentQueue<string> RequestedNames { get; } = new();
+
+        public HttpClient CreateClient(string name)
+        {
+            RequestedNames.Enqueue(name);
+            return _client;
+        }
     }
 }

@@ -18,6 +18,7 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
     private const string MessagingSecretHeader = "X-Internal-MessengerService-Secret";
     private const string UploadSecretHeader = "X-Internal-UploadService-Secret";
     private const string IdempotencyHeader = "Idempotency-Key";
+    private const string RecommendationContentClientName = "recommendation-content";
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
@@ -153,7 +154,8 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
                             RecommendationSecretHeader,
                             "InternalServices:Recommendation:SharedSecret",
                             message.idempotency_key,
-                            cancellationToken);
+                            cancellationToken,
+                            clientName: RecommendationContentClientName);
                     }
                     break;
                 }
@@ -669,7 +671,8 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
         string secretConfigurationKey,
         string idempotencyKey,
         CancellationToken cancellationToken,
-        bool notFoundIsSuccess = false)
+        bool notFoundIsSuccess = false,
+        string clientName = "external-services")
     {
         if (string.IsNullOrWhiteSpace(url))
         {
@@ -691,7 +694,7 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             secretConfigurationKey,
             idempotencyKey);
         using var response = await _httpClientFactory
-            .CreateClient("external-services")
+            .CreateClient(clientName)
             .SendAsync(request, cancellationToken);
         if (response.IsSuccessStatusCode ||
             notFoundIsSuccess && response.StatusCode == System.Net.HttpStatusCode.NotFound)

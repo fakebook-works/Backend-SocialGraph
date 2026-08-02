@@ -218,6 +218,7 @@ InternalServices__Messaging__SharedSecret=<messaging-target-secret>
 InternalServices__Upload__BaseUrl=http://localhost:4001
 InternalServices__Upload__SharedSecret=<upload-target-secret>
 InternalServices__TimeoutSeconds=10
+InternalServices__Recommendation__ContentTimeoutSeconds=180
 IntegrationOutbox__PayloadEncryptionKey=<at-least-32-bytes>
 IntegrationOutbox__PollMilliseconds=500
 IntegrationOutbox__MaxIdlePollMilliseconds=2000
