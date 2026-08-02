@@ -861,7 +861,16 @@ public sealed class ContentGraphService : IContentGraphService
                             BuildMentionUsers(sourceContent, relatedObjects, blocked, viewerId),
                             sourcePrivacy,
                             GraphJson.String(sourceData, "create"),
-                            sharedGroup);
+                            sharedGroup,
+                            AspectRatio: source.otype == GraphObjectType.Reel
+                                ? GraphJson.NullableDouble(sourceData, "aspectRatio")
+                                : null,
+                            FocalPointX: source.otype == GraphObjectType.Reel
+                                ? GraphJson.NullableDouble(sourceData, "focalPointX")
+                                : null,
+                            FocalPointY: source.otype == GraphObjectType.Reel
+                                ? GraphJson.NullableDouble(sourceData, "focalPointY")
+                                : null);
                     }
                 }
             }

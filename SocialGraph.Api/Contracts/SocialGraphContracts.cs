@@ -253,7 +253,10 @@ public sealed record SharedPostSourceResult(
     int? Privacy = null,
     string? Create = null,
     SharedPostGroupResult? Group = null,
-    bool RequiresGroupMembership = false);
+    bool RequiresGroupMembership = false,
+    double? AspectRatio = null,
+    double? FocalPointX = null,
+    double? FocalPointY = null);
 
 public sealed record SharedPostGroupResult(
     long Id,

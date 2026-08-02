@@ -225,6 +225,37 @@ public sealed class HomePostServiceTests
         Assert.Equal("https://cdn.example/source.jpg", Assert.Single(wrapper.SharedSource.Media).Url);
     }
 
+    [Fact]
+    public async Task SharedFeedWrapper_ProjectsVisibleReelPresentationMetadata()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_203;
+        const long sourceId = 2_204;
+        const long sourceMediaId = 2_205;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Sharer"),
+            User(FeedAuthorId, "Reel author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "shared reel", privacy: 0),
+            Post(sourceId, GraphObjectType.Reel, "cropped reel", privacy: 0, aspectRatio: 9d / 16d, focalPointX: 0.2d, focalPointY: 0.8d),
+            Media(sourceMediaId, "https://cdn.example/source-reel.mp4", GraphMediaType.Video));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId),
+            Edge(sourceId, GraphAssociationType.Contained, sourceMediaId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.True(wrapper.SharedSource.IsAvailable);
+        Assert.Equal(GraphObjectType.Reel, wrapper.SharedSource.Type);
+        Assert.Equal(9d / 16d, wrapper.SharedSource.AspectRatio.GetValueOrDefault(), precision: 6);
+        Assert.Equal(0.2d, wrapper.SharedSource.FocalPointX);
+        Assert.Equal(0.8d, wrapper.SharedSource.FocalPointY);
+    }
+
     [Theory]
     [InlineData(1, GraphAssociationType.Followed)]
     [InlineData(2, GraphAssociationType.Friend)]
@@ -289,6 +320,34 @@ public sealed class HomePostServiceTests
         Assert.NotNull(wrapper.SharedSource);
         Assert.False(wrapper.SharedSource.IsAvailable);
         Assert.Null(wrapper.SharedSource.Content);
+    }
+
+    [Fact]
+    public async Task SharedFeedWrapper_HidesReelPresentationMetadataWithoutCurrentAccess()
+    {
+        await using var context = CreateContext();
+        const long wrapperId = 2_209;
+        const long sourceId = 2_210;
+        context.ObjectsTb.AddRange(
+            User(ViewerId, "Wrapper viewer"),
+            User(FeedAuthorId, "Private Reel author"),
+            Post(wrapperId, GraphObjectType.FeedPost, "wrapper", privacy: 0),
+            Post(sourceId, GraphObjectType.Reel, "private crop", privacy: 3, aspectRatio: 9d / 16d, focalPointX: 0.1d, focalPointY: 0.9d));
+        context.AssociationsTb.AddRange(
+            Edge(wrapperId, GraphAssociationType.AuthoredBy, ViewerId),
+            Edge(wrapperId, GraphAssociationType.Share, sourceId),
+            Edge(sourceId, GraphAssociationType.AuthoredBy, FeedAuthorId));
+        await context.SaveChangesAsync();
+
+        var wrapper = Assert.IsType<FeedPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, wrapperId));
+
+        Assert.NotNull(wrapper.SharedSource);
+        Assert.False(wrapper.SharedSource.IsAvailable);
+        Assert.Null(wrapper.SharedSource.Content);
+        Assert.Null(wrapper.SharedSource.AspectRatio);
+        Assert.Null(wrapper.SharedSource.FocalPointX);
+        Assert.Null(wrapper.SharedSource.FocalPointY);
     }
 
     [Theory]
