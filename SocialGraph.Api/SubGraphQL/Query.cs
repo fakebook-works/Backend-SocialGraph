@@ -837,6 +837,18 @@ public class Query
             cancellationToken);
     }
 
+    public Task<IReadOnlyList<CommentEditRevisionResult>> GetCommentEditHistoryAsync(
+        long commentId,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        return readModels.GetCommentEditHistoryAsync(
+            trustedCaller.RequireUserId(),
+            commentId,
+            cancellationToken);
+    }
+
     public Task<ContentEngagementResult?> GetContentEngagementAsync(
         long targetId,
         [Service] ISocialReadModelService readModels,

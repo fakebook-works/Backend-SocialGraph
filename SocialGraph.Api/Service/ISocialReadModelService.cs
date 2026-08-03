@@ -21,6 +21,7 @@ public interface ISocialReadModelService
     Task<ProfileReelPageResult> GetSharedReelsAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<ProfileReelPageResult> GetWatchedReelsAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<CommentPageResult> GetCommentsAsync(long viewerId, long targetId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CommentEditRevisionResult>> GetCommentEditHistoryAsync(long viewerId, long commentId, CancellationToken cancellationToken = default);
     Task<ContentEngagementResult?> GetEngagementAsync(long viewerId, long targetId, CancellationToken cancellationToken = default);
     Task<SavedContentPageResult> GetSavedContentAsync(long viewerId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<UserSummaryPageResult> GetLikedUsersAsync(long viewerId, long targetId, string? cursor, int limit, CancellationToken cancellationToken = default);

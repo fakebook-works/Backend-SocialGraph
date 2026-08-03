@@ -214,6 +214,104 @@ public sealed class SocialReadModelServiceTests
     }
 
     [Fact]
+    public async Task Comments_ProjectADeletedParentAsATombstoneAndRejectNewInteractions()
+    {
+        await using var context = CreateContext();
+        const long postId = 420;
+        const long commentId = 421;
+        const long replyId = 422;
+        var tombstoneData = new JsonObject
+        {
+            ["content"] = string.Empty,
+            ["create"] = "2026-08-03T00:00:00Z",
+            ["deletedAt"] = "2026-08-03T01:00:00Z"
+        }.ToJsonString();
+        context.ObjectsTb.AddRange(
+            new Objects { id = TargetUserId, otype = GraphObjectType.User, data = UserJson("Former commenter") },
+            new Objects { id = commentId, otype = GraphObjectType.Comment, data = tombstoneData },
+            new Objects { id = replyId, otype = GraphObjectType.Comment, data = ContentJson("reply remains") });
+        context.AssociationsTb.AddRange(
+            Edge(commentId, GraphAssociationType.AuthoredBy, TargetUserId),
+            Edge(commentId, GraphAssociationType.HaveComment, replyId),
+            Edge(commentId, GraphAssociationType.LikedBy, 900));
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("post")));
+        objects.Setup(item => item.RetrieveObjectAsync(commentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(commentId, GraphObjectType.Comment, tombstoneData));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(postId, GraphAssociationType.HaveComment, null, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(commentId, 1)], null));
+        associations.Setup(item => item.RetrieveAssociationAsync(commentId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(TargetUserId, 1)], null));
+        associations.Setup(item => item.RetrieveAssociationAsync(commentId, GraphAssociationType.Comment, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(postId, 1)], null));
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(FeedPost(postId, TargetUserId));
+        var service = CreateService(context, objects, associations, content);
+
+        var projected = Assert.Single((await service.GetCommentsAsync(ViewerId, postId, null, 20)).Items);
+        Assert.True(projected.IsDeleted);
+        Assert.Equal(string.Empty, projected.Content);
+        Assert.Equal(0, projected.LikeCount);
+        Assert.Equal(1, projected.ReplyCount);
+        Assert.Null(projected.Media);
+        Assert.Empty(projected.Mentions ?? []);
+        Assert.False(await service.CanViewTargetAsync(ViewerId, commentId));
+        Assert.False(await service.CanCommentTargetAsync(ViewerId, commentId));
+        Assert.Empty(await service.GetCommentEditHistoryAsync(ViewerId, commentId));
+    }
+
+    [Fact]
+    public async Task CommentEditHistory_ResolvesCurrentMentionNamesOnlyAfterCanonicalVisibilityChecks()
+    {
+        await using var context = CreateContext();
+        const long postId = 430;
+        const long commentId = 431;
+        const long mentionedId = 432;
+        var commentData = new JsonObject
+        {
+            ["content"] = "current",
+            ["create"] = "2026-08-03T00:00:00Z",
+            ["editedAt"] = "2026-08-03T02:00:00Z",
+            ["editHistory"] = new JsonArray(new JsonObject
+            {
+                ["content"] = $"hello [[mention:{mentionedId}]]",
+                ["editedAt"] = "2026-08-03T01:00:00Z"
+            })
+        }.ToJsonString();
+        context.ObjectsTb.AddRange(
+            new Objects { id = TargetUserId, otype = GraphObjectType.User, data = UserJson("Commenter") },
+            new Objects { id = mentionedId, otype = GraphObjectType.User, data = UserJson("Current mention name") },
+            new Objects { id = commentId, otype = GraphObjectType.Comment, data = commentData });
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(commentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(commentId, GraphObjectType.Comment, commentData));
+        objects.Setup(item => item.RetrieveObjectAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(postId, GraphObjectType.FeedPost, ContentJson("post")));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(commentId, GraphAssociationType.AuthoredBy, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(TargetUserId, 1)], null));
+        associations.Setup(item => item.RetrieveAssociationAsync(commentId, GraphAssociationType.Comment, null, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(postId, 1)], null));
+        var content = new Mock<IContentGraphService>(MockBehavior.Loose);
+        content.Setup(item => item.GetPostDetailAsync(ViewerId, postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(FeedPost(postId, TargetUserId));
+        var service = CreateService(context, objects, associations, content);
+
+        var revision = Assert.Single(await service.GetCommentEditHistoryAsync(ViewerId, commentId));
+        var mention = Assert.Single(revision.Mentions ?? []);
+        Assert.Equal(mentionedId, mention.UserId);
+        Assert.Equal("Current mention name", mention.Name);
+        Assert.True(mention.Available);
+    }
+
+    [Fact]
     public async Task Engagement_CountsTheEntireVisibleCommentTree()
     {
         await using var context = CreateContext();

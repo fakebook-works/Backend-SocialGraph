@@ -60,6 +60,52 @@ public sealed class HomePostServiceTests
     }
 
     [Fact]
+    public async Task Public_group_post_projects_the_viewers_pending_join_request()
+    {
+        await using var context = CreateContext();
+        const long groupPostId = 1_002;
+        context.ObjectsTb.AddRange(
+            User(GroupAuthorId, "Group Author"),
+            Group(GroupId, "Pending Group", privacy: 0),
+            Post(groupPostId, GraphObjectType.GroupPost, "public group post", privacy: 0));
+        context.AssociationsTb.AddRange(
+            Edge(groupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(groupPostId, GraphAssociationType.PublishedIn, GroupId),
+            Edge(ViewerId, GraphAssociationType.GroupJoinRequest, GroupId));
+        await context.SaveChangesAsync();
+
+        var groupPost = Assert.IsType<GroupPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, groupPostId));
+
+        Assert.True(groupPost.Group.CanJoin);
+        Assert.True(groupPost.Group.JoinRequestPending);
+    }
+
+    [Fact]
+    public async Task Public_group_post_does_not_expose_another_users_pending_join_request()
+    {
+        await using var context = CreateContext();
+        const long otherUserId = 101;
+        const long groupPostId = 1_003;
+        context.ObjectsTb.AddRange(
+            User(GroupAuthorId, "Group Author"),
+            User(otherUserId, "Other User"),
+            Group(GroupId, "Pending Group", privacy: 0),
+            Post(groupPostId, GraphObjectType.GroupPost, "public group post", privacy: 0));
+        context.AssociationsTb.AddRange(
+            Edge(groupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(groupPostId, GraphAssociationType.PublishedIn, GroupId),
+            Edge(otherUserId, GraphAssociationType.GroupJoinRequest, GroupId));
+        await context.SaveChangesAsync();
+
+        var groupPost = Assert.IsType<GroupPostDetailResult>(
+            await CreateContentService(context).GetPostDetailAsync(ViewerId, groupPostId));
+
+        Assert.True(groupPost.Group.CanJoin);
+        Assert.False(groupPost.Group.JoinRequestPending);
+    }
+
+    [Fact]
     public async Task PostDetails_FiltersBlockedAuthorsAndInaccessiblePrivatePosts()
     {
         await using var context = CreateContext();

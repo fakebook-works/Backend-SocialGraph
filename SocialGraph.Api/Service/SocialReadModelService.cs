@@ -456,7 +456,13 @@ public sealed class SocialReadModelService : ISocialReadModelService
                 group => group.Key,
                 group => group.OrderBy(item => item.time).ThenBy(item => item.id2).First().id2);
         var mentionedUserIds = comments.Values
-            .SelectMany(comment => MentionTokenCodec.ExtractUserIds(GraphJson.String(GraphJson.ParseObject(comment.data), "content")))
+            .SelectMany(comment =>
+            {
+                var data = GraphJson.ParseObject(comment.data);
+                return GraphJson.IsCommentDeleted(data)
+                    ? Array.Empty<long>()
+                    : MentionTokenCodec.ExtractUserIds(GraphJson.String(data, "content"));
+            })
             .Distinct()
             .ToArray();
         var authorIds = authorByComment.Values.Distinct().ToArray();
@@ -485,14 +491,17 @@ public sealed class SocialReadModelService : ISocialReadModelService
             }
 
             var data = GraphJson.ParseObject(comment.data);
-            var content = GraphJson.String(data, "content");
-            var mentions = MentionTokenCodec.ExtractUserIds(content)
-                .Select(userId => summaries.TryGetValue(userId, out var mentionedUser)
-                    ? new MentionUserResult(userId, mentionedUser.Name, true)
-                    : new MentionUserResult(userId, string.Empty, false))
-                .ToArray();
+            var isDeleted = GraphJson.IsCommentDeleted(data);
+            var content = isDeleted ? string.Empty : GraphJson.String(data, "content");
+            var mentions = isDeleted
+                ? Array.Empty<MentionUserResult>()
+                : MentionTokenCodec.ExtractUserIds(content)
+                    .Select(userId => summaries.TryGetValue(userId, out var mentionedUser)
+                        ? new MentionUserResult(userId, mentionedUser.Name, true)
+                        : new MentionUserResult(userId, string.Empty, false))
+                    .ToArray();
             MediaResult? media = null;
-            if (mediaIdByComment.TryGetValue(comment.id, out var mediaId) && mediaById.TryGetValue(mediaId, out var mediaObject))
+            if (!isDeleted && mediaIdByComment.TryGetValue(comment.id, out var mediaId) && mediaById.TryGetValue(mediaId, out var mediaObject))
             {
                 var mediaData = GraphJson.ParseObject(mediaObject.data);
                 media = new MediaResult(
@@ -507,13 +516,15 @@ public sealed class SocialReadModelService : ISocialReadModelService
                 content,
                 GraphJson.String(data, "create"),
                 author,
-                likeCountByComment.GetValueOrDefault(comment.id),
+                isDeleted ? 0 : likeCountByComment.GetValueOrDefault(comment.id),
                 replyCountByComment.GetValueOrDefault(comment.id),
-                viewerLikes.Contains(comment.id),
-                authorViewerState.CanFollow,
-                authorViewerState.IsFollowing,
+                !isDeleted && viewerLikes.Contains(comment.id),
+                !isDeleted && authorViewerState.CanFollow,
+                !isDeleted && authorViewerState.IsFollowing,
                 mentions,
-                media));
+                media,
+                isDeleted,
+                isDeleted ? null : GraphJson.NullableString(data, "editedAt")));
             if (result.Count == take)
             {
                 break;
@@ -527,12 +538,62 @@ public sealed class SocialReadModelService : ISocialReadModelService
             hasNext);
     }
 
+    public async Task<IReadOnlyList<CommentEditRevisionResult>> GetCommentEditHistoryAsync(
+        long viewerId,
+        long commentId,
+        CancellationToken cancellationToken = default)
+    {
+        var comment = await _objectService.RetrieveObjectAsync(commentId, cancellationToken);
+        if (comment?.otype != GraphObjectType.Comment)
+        {
+            return Array.Empty<CommentEditRevisionResult>();
+        }
+
+        var data = GraphJson.ParseObject(comment.data);
+        if (GraphJson.IsCommentDeleted(data) ||
+            !await CanViewTargetCoreAsync(viewerId, commentId, 0, cancellationToken))
+        {
+            return Array.Empty<CommentEditRevisionResult>();
+        }
+
+        var history = GraphJson.CommentEditHistory(data);
+        if (history.Count == 0)
+        {
+            return Array.Empty<CommentEditRevisionResult>();
+        }
+
+        var mentionedUserIds = history
+            .SelectMany(item => MentionTokenCodec.ExtractUserIds(item.Content))
+            .Distinct()
+            .ToArray();
+        var blockedUserIds = await _blockVisibility.GetBlockedUserIdsAsync(
+            viewerId,
+            mentionedUserIds,
+            cancellationToken);
+        var summaries = await GetUserSummariesAsync(
+            mentionedUserIds
+                .Where(userId => userId == viewerId || !blockedUserIds.Contains(userId))
+                .ToArray(),
+            cancellationToken);
+
+        return history
+            .Select(item => new CommentEditRevisionResult(
+                item.Content,
+                item.EditedAt,
+                MentionTokenCodec.ExtractUserIds(item.Content)
+                    .Select(userId => summaries.TryGetValue(userId, out var mentionedUser)
+                        ? new MentionUserResult(userId, mentionedUser.Name, true)
+                        : new MentionUserResult(userId, string.Empty, false))
+                    .ToArray()))
+            .ToArray();
+    }
+
     public async Task<ContentEngagementResult?> GetEngagementAsync(
         long viewerId,
         long targetId,
         CancellationToken cancellationToken = default)
     {
-        if (!await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken))
+        if (!await CanViewTargetAsync(viewerId, targetId, cancellationToken))
         {
             return null;
         }
@@ -614,7 +675,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
 
     public async Task<UserSummaryPageResult> GetLikedUsersAsync(long viewerId, long targetId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {
-        return await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken)
+        return await CanViewTargetAsync(viewerId, targetId, cancellationToken)
             ? await GetAssociatedUsersAsync(viewerId, targetId, GraphAssociationType.LikedBy, cursor, limit, cancellationToken)
             : EmptyUsers();
     }
@@ -640,17 +701,24 @@ public sealed class SocialReadModelService : ISocialReadModelService
 
     public async Task<UserSummaryPageResult> GetMentionedUsersAsync(long viewerId, long sourceId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {
-        return await CanViewTargetCoreAsync(viewerId, sourceId, 0, cancellationToken)
+        return await CanViewTargetAsync(viewerId, sourceId, cancellationToken)
             ? await GetAssociatedUsersAsync(viewerId, sourceId, GraphAssociationType.Mentioned, cursor, limit, cancellationToken)
             : EmptyUsers();
     }
 
-    public Task<bool> CanViewTargetAsync(
+    public async Task<bool> CanViewTargetAsync(
         long viewerId,
         long targetId,
         CancellationToken cancellationToken = default)
     {
-        return CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
+        var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
+        if (target?.otype == GraphObjectType.Comment &&
+            GraphJson.IsCommentDeleted(GraphJson.ParseObject(target.data)))
+        {
+            return false;
+        }
+
+        return await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
     }
 
     public Task<bool> CanCommentTargetAsync(long viewerId, long targetId, CancellationToken cancellationToken = default)
@@ -845,6 +913,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
         var target = await _objectService.RetrieveObjectAsync(targetId, cancellationToken);
         return target is not null &&
                allowedTypes.Contains(target.otype) &&
+               !(target.otype == GraphObjectType.Comment &&
+                 GraphJson.IsCommentDeleted(GraphJson.ParseObject(target.data))) &&
                await CanViewTargetCoreAsync(viewerId, targetId, 0, cancellationToken);
     }
 

@@ -4,6 +4,10 @@ using System.Text.Json.Nodes;
 
 internal static class GraphJson
 {
+    public const int CommentEditHistoryLimit = 20;
+
+    internal sealed record CommentEditSnapshot(string Content, string EditedAt);
+
     public static JsonObject ParseObject(string json)
     {
         return JsonNode.Parse(json) as JsonObject ?? new JsonObject();
@@ -108,6 +112,97 @@ internal static class GraphJson
             ["privacy"] = privacy,
             ["create"] = UtcNowString()
         }.ToJsonString();
+    }
+
+    public static bool IsCommentDeleted(JsonObject data)
+    {
+        // Presence is intentionally fail-closed. A malformed/null tombstone must never make old
+        // content visible again after a partial deployment or a failed cleanup retry.
+        return data.ContainsKey("deletedAt");
+    }
+
+    public static IReadOnlyList<CommentEditSnapshot> CommentEditHistory(JsonObject data)
+    {
+        if (data["editHistory"] is not JsonArray revisions)
+        {
+            return Array.Empty<CommentEditSnapshot>();
+        }
+
+        var result = new List<CommentEditSnapshot>(Math.Min(revisions.Count, CommentEditHistoryLimit));
+        foreach (var revision in revisions.TakeLast(CommentEditHistoryLimit))
+        {
+            if (revision is not JsonObject item)
+            {
+                continue;
+            }
+
+            try
+            {
+                var content = String(item, "content");
+                var editedAt = NullableString(item, "editedAt");
+                if (!string.IsNullOrWhiteSpace(editedAt))
+                {
+                    result.Add(new CommentEditSnapshot(content, editedAt));
+                }
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or FormatException)
+            {
+                // Ignore a malformed legacy revision without failing the whole comment page.
+            }
+        }
+
+        return result;
+    }
+
+    public static bool ApplyCommentEdit(JsonObject data, string content, string editedAt)
+    {
+        if (IsCommentDeleted(data))
+        {
+            return false;
+        }
+
+        var currentContent = String(data, "content");
+        if (string.Equals(currentContent, content, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // Match Messenger's revision semantics: a historical timestamp is when that
+        // version became current, not when it was replaced by the next edit.
+        var previousVersionAt = NullableString(data, "editedAt");
+        if (string.IsNullOrWhiteSpace(previousVersionAt))
+        {
+            previousVersionAt = NullableString(data, "create");
+        }
+        if (string.IsNullOrWhiteSpace(previousVersionAt))
+        {
+            // Legacy comments should remain editable even if their create timestamp is
+            // malformed; use the current server edit time as a conservative fallback.
+            previousVersionAt = editedAt;
+        }
+
+        var history = CommentEditHistory(data)
+            .Append(new CommentEditSnapshot(currentContent, previousVersionAt))
+            .TakeLast(CommentEditHistoryLimit)
+            .Select(item => (JsonNode)new JsonObject
+            {
+                ["content"] = item.Content,
+                ["editedAt"] = item.EditedAt
+            })
+            .ToArray();
+
+        data["content"] = content;
+        data["editedAt"] = editedAt;
+        data["editHistory"] = new JsonArray(history);
+        return true;
+    }
+
+    public static void ApplyCommentTombstone(JsonObject data, string deletedAt)
+    {
+        data["content"] = string.Empty;
+        data.Remove("editedAt");
+        data.Remove("editHistory");
+        data["deletedAt"] = deletedAt;
     }
 
     public static string ReelJson(

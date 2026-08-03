@@ -32,9 +32,17 @@ location: String 1, verify: DateTime 0, privacy: Short(0/1) 1, create: DateTime}
     lần render dùng lại đúng vùng đã chọn; video upload gốc không bị cắt hoặc mã hoá lại. Reel cũ không có metadata
     này vẫn dùng tỉ lệ media thích ứng và tâm giữa như trước.
 -- 5  story {content: String, create: DateTime, expire: DateTime}
--- 6  comment {content: String, create: DateTime}; comment may contain at most one image through association 28.
+-- 6  comment {content: String, create: DateTime, editedAt?: DateTime, editHistory?: [{content, editedAt}], deletedAt?: DateTime}; comment may contain at most one image through association 28.
 Comment pages return direct children for lazy expansion, per-comment like/reply counts, and batched viewer-relative
 `canFollowAuthor` / `isFollowingAuthor` state. The post/Reel engagement `commentCount` includes every descendant reply.
+Text edits are serialized against the comment row, append the previous tokenized content with the UTC time when that version became current
+(the original `create` time or the preceding `editedAt`, matching Messenger revision semantics),
+and retain only the latest 20 revisions. `commentEditHistory(commentId)` resolves current mention names lazily and reuses
+the canonical root-content privacy, group-membership and bidirectional-block checks; it never accepts a browser-supplied
+viewer ID. Deleting a comment writes a tombstone before cleanup: the object, author/parent edges and reply children stay
+in place, while content, edit history, mentions, likes and media are hidden/removed. A tombstone cannot be liked, replied
+to, edited or mentioned, and repeated deletion is idempotent. No database migration is required because these fields live
+inside the existing JSONB `objects.data` document.
 
 -- 7  media {type: Short(0/1/2/3/4), url: Url} 
 
@@ -117,6 +125,8 @@ những trường không đánh dấu là không được sửa đổi khi đã 
       privacy của group chỉ quyết định quyền đọc nội dung, không tự động cấp membership
     * pendingGroupJoins đọc cạnh 17 từ phía user; groupJoinRequests đọc cạnh inverse 18 từ phía group,
       chỉ admin hiện tại được gọi, trả UserSummary đã lọc với page tối đa 50 thay vì raw association
+    * `PostGroup.joinRequestPending` được hydrate theo batch từ cạnh 17 của trusted viewer; client dùng
+      trạng thái này để hiện `Đã yêu cầu` và cho phép huỷ ngay trên group post, không gọi N+1 theo từng post
 
 -- 19  watched (user->reel/story) -- 19 20
 -- 20  watched_by (reel/story->user)
@@ -289,7 +299,8 @@ Group post detail cũng trả `taggedUsers { id name avatar isVerified }`. Khi t
 `taggedUserIds` lẫn user ID derive từ mention token đều phải vừa là bạn của author vừa là
 member/admin hiện tại của group; lỗi dùng thông báo chung để không làm lộ friend/member/block state.
 
-`deleteContent(contentId)` cho phép author xoá nội dung của mình. Ngoại lệ duy nhất là GroupPost:
+`deleteContent(contentId)` cho phép author xoá nội dung của mình. Comment được soft-delete thành tombstone để giữ cây
+phản hồi; các loại nội dung khác vẫn được xoá theo vòng đời hiện có. Ngoại lệ duy nhất là GroupPost:
 admin hiện tại của đúng group lấy từ cạnh `PublishedIn` cũng có thể xoá. FeedPost/Reel/comment/story
 không thể có thêm quyền xoá nhờ association Admin ở một group bất kỳ.
 

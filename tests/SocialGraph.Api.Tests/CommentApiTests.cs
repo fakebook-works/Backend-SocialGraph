@@ -1,5 +1,6 @@
 namespace SocialGraph.Api.Tests;
 
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Moq;
 using SocialGraph.Api.Contracts;
@@ -113,6 +114,117 @@ public sealed class CommentApiTests
             new UpdateCommentInput(CommentId, "edited", new MediaInput(GraphMediaType.Video, "/media/files/a.mp4"))));
     }
 
+    [Fact]
+    public async Task Update_comment_persists_text_and_keeps_only_the_latest_twenty_revisions()
+    {
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        var originalData = GraphJson.ContentJson("version-0");
+        context.ObjectsTb.Add(new Objects { id = CommentId, otype = GraphObjectType.Comment, data = originalData });
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(CommentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(CommentId, GraphObjectType.Comment, originalData));
+        objects.Setup(item => item.InvalidateObjectCacheAsync(CommentId)).Returns(Task.CompletedTask);
+        var associations = EmptyAssociations();
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        for (var version = 1; version <= 22; version++)
+        {
+            var updated = await service.UpdateCommentAsync(new UpdateCommentInput(CommentId, $"version-{version}"));
+            Assert.Equal($"version-{version}", updated?.Content);
+        }
+
+        var data = GraphJson.ParseObject((await context.ObjectsTb.SingleAsync()).data);
+        var history = GraphJson.CommentEditHistory(data);
+        Assert.Equal("version-22", GraphJson.String(data, "content"));
+        Assert.Equal(20, history.Count);
+        Assert.Equal("version-2", history[0].Content);
+        Assert.Equal("version-21", history[^1].Content);
+
+        await service.UpdateCommentAsync(new UpdateCommentInput(CommentId, "version-22"));
+        Assert.Equal(20, GraphJson.CommentEditHistory(GraphJson.ParseObject((await context.ObjectsTb.SingleAsync()).data)).Count);
+        objects.Verify(item => item.UpdateObjectAsync(
+            It.IsAny<long>(),
+            GraphObjectType.Comment,
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public void Comment_edit_history_records_when_each_version_became_current()
+    {
+        var data = new JsonObject
+        {
+            ["content"] = "first",
+            ["create"] = "2026-08-03T01:00:00Z"
+        };
+
+        Assert.True(GraphJson.ApplyCommentEdit(data, "second", "2026-08-03T02:00:00Z"));
+        Assert.True(GraphJson.ApplyCommentEdit(data, "third", "2026-08-03T03:00:00Z"));
+
+        var history = GraphJson.CommentEditHistory(data);
+        Assert.Collection(
+            history,
+            first =>
+            {
+                Assert.Equal("first", first.Content);
+                Assert.Equal("2026-08-03T01:00:00Z", first.EditedAt);
+            },
+            second =>
+            {
+                Assert.Equal("second", second.Content);
+                Assert.Equal("2026-08-03T02:00:00Z", second.EditedAt);
+            });
+        Assert.Equal("2026-08-03T03:00:00Z", GraphJson.NullableString(data, "editedAt"));
+    }
+
+    [Fact]
+    public async Task Delete_comment_writes_an_idempotent_tombstone_without_removing_the_reply_tree()
+    {
+        await using var context = new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .Options);
+        var originalData = new JsonObject
+        {
+            ["content"] = "private text",
+            ["create"] = "2026-08-03T00:00:00Z",
+            ["editedAt"] = "2026-08-03T00:01:00Z",
+            ["editHistory"] = new JsonArray(new JsonObject
+            {
+                ["content"] = "older private text",
+                ["editedAt"] = "2026-08-03T00:01:00Z"
+            })
+        }.ToJsonString();
+        context.ObjectsTb.Add(new Objects { id = CommentId, otype = GraphObjectType.Comment, data = originalData });
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(CommentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(CommentId, GraphObjectType.Comment, originalData));
+        objects.Setup(item => item.InvalidateObjectCacheAsync(CommentId)).Returns(Task.CompletedTask);
+        var associations = EmptyAssociations();
+        var service = new ContentGraphService(context, objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        Assert.True(await service.DeleteContentAsync(CommentId));
+        var first = GraphJson.ParseObject((await context.ObjectsTb.SingleAsync()).data);
+        var deletedAt = GraphJson.NullableString(first, "deletedAt");
+        Assert.True(GraphJson.IsCommentDeleted(first));
+        Assert.Equal(string.Empty, GraphJson.String(first, "content"));
+        Assert.False(first.ContainsKey("editedAt"));
+        Assert.False(first.ContainsKey("editHistory"));
+
+        Assert.True(await service.DeleteContentAsync(CommentId));
+        var second = GraphJson.ParseObject((await context.ObjectsTb.SingleAsync()).data);
+        Assert.Equal(deletedAt, GraphJson.NullableString(second, "deletedAt"));
+        objects.Verify(item => item.DeleteObjectAsync(CommentId, It.IsAny<CancellationToken>()), Times.Never);
+        associations.Verify(item => item.DeleteObjectAssociationsAsync(CommentId, It.IsAny<CancellationToken>()), Times.Never);
+        associations.Verify(item => item.DeleteAllAssociationAsync(CommentId, GraphAssociationType.LikedBy, It.IsAny<CancellationToken>()), Times.Exactly(2));
+        associations.Verify(item => item.DeleteAllAssociationAsync(CommentId, GraphAssociationType.Mentioned, It.IsAny<CancellationToken>()), Times.Exactly(2));
+    }
+
     private static void Setup(Mock<IObjectService> objects, long id, short objectType) =>
         objects
             .Setup(item => item.RetrieveObjectAsync(id, It.IsAny<CancellationToken>()))
@@ -131,6 +243,19 @@ public sealed class CommentApiTests
                     ? Array.Empty<AssociationEdgeResult>()
                     : new[] { new AssociationEdgeResult(parentId, 1) },
                 null));
+
+    private static Mock<IAssociationService> EmptyAssociations()
+    {
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                It.IsAny<long>(),
+                It.IsAny<short>(),
+                It.IsAny<string?>(),
+                It.IsAny<int>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(Array.Empty<AssociationEdgeResult>(), null));
+        return associations;
+    }
 
     private static ContentGraphService CreateService(
         Mock<IObjectService> objects,

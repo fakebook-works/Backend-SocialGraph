@@ -129,6 +129,51 @@ public sealed class AdvancedMutationContractTests
     }
 
     [Fact]
+    public async Task UpdateComment_RejectsANonAuthorBeforeTheDomainWrite()
+    {
+        const long viewerId = 100;
+        const long commentId = 200;
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.IsAuthorAsync(viewerId, commentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(viewerId);
+
+        var exception = await Assert.ThrowsAsync<GraphQLException>(() => new Mutation().UpdateCommentAsync(
+            new UpdateCommentInput(commentId, "spoofed edit"),
+            content.Object,
+            trusted.Object,
+            CancellationToken.None));
+
+        Assert.Equal("FORBIDDEN", exception.Errors.Single().Code);
+        content.Verify(item => item.UpdateCommentAsync(It.IsAny<UpdateCommentInput>(), It.IsAny<CancellationToken>()), Times.Never);
+        content.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
+    public async Task UpdateComment_UsesTheTrustedCallerAndForwardsOnlyAfterOwnershipPasses()
+    {
+        const long viewerId = 100;
+        const long commentId = 200;
+        var input = new UpdateCommentInput(commentId, "edited");
+        var expected = new ContentResult(commentId, GraphObjectType.Comment, "edited", 0, "now", viewerId, []);
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.IsAuthorAsync(viewerId, commentId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        content.Setup(item => item.UpdateCommentAsync(input, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expected);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(viewerId);
+
+        var result = await new Mutation().UpdateCommentAsync(input, content.Object, trusted.Object, CancellationToken.None);
+
+        Assert.Same(expected, result);
+        content.VerifyAll();
+        trusted.VerifyAll();
+    }
+
+    [Fact]
     public async Task ChangeUserAvatar_UsesTrustedOwnerAndForwardsExactSourcePair()
     {
         const long userId = 100;

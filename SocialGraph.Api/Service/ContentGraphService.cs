@@ -3,6 +3,7 @@ namespace SocialGraph.Api.Service;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
@@ -323,6 +324,10 @@ public sealed class ContentGraphService : IContentGraphService
         }
 
         var currentData = GraphJson.ParseObject(current.data);
+        if (GraphJson.IsCommentDeleted(currentData))
+        {
+            return null;
+        }
         var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
         await EnsureMediaOwnedAsync(authorId, input.Media, cancellationToken);
         if (input.Content is not null)
@@ -332,11 +337,11 @@ public sealed class ContentGraphService : IContentGraphService
 
         var comment = input.Content is null
             ? current
-            : await _objectService.UpdateObjectAsync(
+            : await MutateCommentObjectAsync(
                 input.Id,
-                GraphObjectType.Comment,
-                GraphJson.PatchJson(("content", input.Content)),
-                cancellationToken);
+                data => GraphJson.ApplyCommentEdit(data, input.Content, GraphJson.UtcNowString()),
+                cancellationToken,
+                () => SyncMentionAssociationsAsync(input.Id, authorId, input.Content, cancellationToken));
         if (comment is null)
         {
             return null;
@@ -367,10 +372,23 @@ public sealed class ContentGraphService : IContentGraphService
             await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
         }
 
-        var content = input.Content ?? GraphJson.String(currentData, "content");
-        if (input.Content is not null)
+        var latest = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+        if (latest?.otype == GraphObjectType.Comment &&
+            GraphJson.IsCommentDeleted(GraphJson.ParseObject(latest.data)))
         {
-            await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
+            // A media-only update is not part of the row mutation above. If delete won the race,
+            // remove anything this request attached after tombstone cleanup and never project it.
+            var racedMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
+            foreach (var mediaId in racedMediaIds)
+            {
+                await _associationService.DeleteOneAssociationAsync(
+                    input.Id,
+                    GraphAssociationType.Contained,
+                    mediaId,
+                    cancellationToken);
+            }
+            await DeleteOrphanMediaAsync(racedMediaIds, cancellationToken);
+            return null;
         }
 
         return await BuildContentResultAsync(comment, authorId, media, cancellationToken);
@@ -427,6 +445,11 @@ public sealed class ContentGraphService : IContentGraphService
             return false;
         }
 
+        if (item.otype == GraphObjectType.Comment)
+        {
+            return await DeleteCommentAsync(contentId, cancellationToken);
+        }
+
         var mediaIds = await GetContainedMediaIdsAsync(contentId, cancellationToken);
         await _associationService.DeleteObjectAssociationsAsync(contentId, cancellationToken);
         var deleted = await _objectService.DeleteObjectAsync(contentId, cancellationToken);
@@ -443,6 +466,48 @@ public sealed class ContentGraphService : IContentGraphService
         }
 
         return deleted;
+    }
+
+    private async Task<bool> DeleteCommentAsync(long commentId, CancellationToken cancellationToken)
+    {
+        var mediaIds = await GetContainedMediaIdsAsync(commentId, cancellationToken);
+
+        // Write the tombstone first. If association/media cleanup is interrupted, every read path
+        // still fails closed and cannot expose the former content, mentions, history or media.
+        var tombstone = await MutateCommentObjectAsync(
+            commentId,
+            data =>
+            {
+                if (!GraphJson.IsCommentDeleted(data))
+                {
+                    GraphJson.ApplyCommentTombstone(data, GraphJson.UtcNowString());
+                }
+                return true;
+            },
+            cancellationToken);
+        if (tombstone is null)
+        {
+            return false;
+        }
+
+        await _associationService.DeleteAllAssociationAsync(
+            commentId,
+            GraphAssociationType.LikedBy,
+            cancellationToken);
+        await _associationService.DeleteAllAssociationAsync(
+            commentId,
+            GraphAssociationType.Mentioned,
+            cancellationToken);
+        foreach (var mediaId in mediaIds)
+        {
+            await _associationService.DeleteOneAssociationAsync(
+                commentId,
+                GraphAssociationType.Contained,
+                mediaId,
+                cancellationToken);
+        }
+        await DeleteOrphanMediaAsync(mediaIds, cancellationToken);
+        return true;
     }
 
     public async Task<ContentResult?> GetContentAsync(long contentId, CancellationToken cancellationToken = default)
@@ -890,7 +955,8 @@ public sealed class ContentGraphService : IContentGraphService
                         group.id,
                         GraphJson.String(groupData, "name"),
                         GraphJson.String(groupData, "avatar"),
-                        !participatingGroups.Contains(group.id)),
+                        !participatingGroups.Contains(group.id),
+                        pendingGroups.Contains(group.id)),
                     media,
                     mentions,
                     groupTaggedUsers,
@@ -1576,6 +1642,11 @@ public sealed class ContentGraphService : IContentGraphService
         {
             return false;
         }
+        if (source.otype == GraphObjectType.Comment &&
+            GraphJson.IsCommentDeleted(GraphJson.ParseObject(source.data)))
+        {
+            return false;
+        }
 
         var authorId = await GetAuthorIdAsync(sourceId, cancellationToken);
         var groupId = source.otype == GraphObjectType.GroupPost
@@ -1707,15 +1778,16 @@ public sealed class ContentGraphService : IContentGraphService
         CancellationToken cancellationToken)
     {
         var data = GraphJson.ParseObject(item.data);
+        var deletedComment = item.otype == GraphObjectType.Comment && GraphJson.IsCommentDeleted(data);
         var privacy = await GetContentPrivacyAsync(item, data, cancellationToken);
         return new ContentResult(
             item.id,
             item.otype,
-            GraphJson.String(data, "content"),
+            deletedComment ? string.Empty : GraphJson.String(data, "content"),
             privacy,
             GraphJson.String(data, "create"),
             authorId,
-            media,
+            deletedComment ? Array.Empty<MediaResult>() : media,
             item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "aspectRatio") : null,
             item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "focalPointX") : null,
             item.otype == GraphObjectType.Reel ? GraphJson.NullableDouble(data, "focalPointY") : null);
@@ -2014,6 +2086,86 @@ public sealed class ContentGraphService : IContentGraphService
                 // when it was written), not from the current request, so no owner filter applies.
                 await _externalServiceClient.DeleteMediaAsync(new[] { mediaUrl }, null, cancellationToken);
             }
+        }
+    }
+
+    /// <summary>
+    /// Serializes edits and tombstones against the comment row. This prevents concurrent edits
+    /// from dropping a revision and prevents an edit racing with delete from reviving content.
+    /// </summary>
+    private async Task<SocialGraphObjectResult?> MutateCommentObjectAsync(
+        long commentId,
+        Func<JsonObject, bool> mutate,
+        CancellationToken cancellationToken,
+        Func<Task>? mutateAssociations = null)
+    {
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
+        {
+            Objects? row;
+            if (_dbContext.Database.IsRelational())
+            {
+                row = await _dbContext.ObjectsTb
+                    .FromSqlInterpolated($"SELECT * FROM social_graph.objects WHERE id = {commentId} AND otype = {GraphObjectType.Comment} FOR UPDATE")
+                    .SingleOrDefaultAsync(cancellationToken);
+            }
+            else
+            {
+                row = await _dbContext.ObjectsTb
+                    .SingleOrDefaultAsync(
+                        item => item.id == commentId && item.otype == GraphObjectType.Comment,
+                        cancellationToken);
+            }
+
+            if (row is null)
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
+            var data = GraphJson.ParseObject(row.data);
+            if (!mutate(data))
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
+            var nextData = data.ToJsonString();
+            var changed = !string.Equals(row.data, nextData, StringComparison.Ordinal);
+            if (changed)
+            {
+                row.data = nextData;
+                await _dbContext.SaveChangesAsync(cancellationToken);
+            }
+            if (mutateAssociations is not null)
+            {
+                // Mention edges and their outbox notifications commit under the same row lock as
+                // the text revision, so delete cannot interleave and recreate references on a
+                // tombstone after its cleanup has completed.
+                await mutateAssociations();
+            }
+
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+            if (changed)
+            {
+                await _objectService.InvalidateObjectCacheAsync(commentId);
+            }
+
+            return new SocialGraphObjectResult(row.id, row.otype, row.data);
+        }
+        catch
+        {
+            await RollbackAndInvalidateAsync(transaction, commentId);
+            throw;
         }
     }
 

@@ -240,7 +240,8 @@ public sealed record PostGroupResult(
     long Id,
     string Name,
     string Avatar,
-    bool CanJoin);
+    bool CanJoin,
+    bool JoinRequestPending = false);
 
 public sealed record SharedPostSourceResult(
     long Id,
@@ -420,7 +421,14 @@ public sealed record CommentThreadItemResult(
     bool CanFollowAuthor,
     bool IsFollowingAuthor,
     IReadOnlyList<MentionUserResult>? Mentions = null,
-    MediaResult? Media = null);
+    MediaResult? Media = null,
+    bool IsDeleted = false,
+    string? EditedAt = null);
+
+public sealed record CommentEditRevisionResult(
+    string Content,
+    string EditedAt,
+    IReadOnlyList<MentionUserResult>? Mentions = null);
 
 public sealed record CommentPageResult(
     IReadOnlyList<CommentThreadItemResult> Items,
