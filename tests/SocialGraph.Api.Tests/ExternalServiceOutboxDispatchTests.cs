@@ -149,7 +149,10 @@ public sealed class ExternalServiceOutboxDispatchTests
     [Fact]
     public async Task MediaFinalizeDispatch_UsesUploadInternalContract()
     {
-        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"finalized\":1}")
+        });
         var client = CreateClient(handler);
         var message = Message(
             IntegrationEventType.MediaFinalize,
@@ -163,6 +166,21 @@ public sealed class ExternalServiceOutboxDispatchTests
         Assert.Equal(SharedSecret, Assert.Single(request.Headers["X-Internal-UploadService-Secret"]));
         using var body = JsonDocument.Parse(request.Body!);
         Assert.Equal("/media/files/a.jpg", body.RootElement.GetProperty("urls")[0].GetString());
+    }
+
+    [Fact]
+    public async Task MediaFinalize_IncompleteAcknowledgement_IsRetryable()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"finalized\":0}")
+        });
+        var client = CreateClient(handler);
+        var message = Message(
+            IntegrationEventType.MediaFinalize,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(new[] { "/media/files/a.jpg" })));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.DispatchAsync(message));
     }
 
     private static ExternalServiceClient CreateClient(

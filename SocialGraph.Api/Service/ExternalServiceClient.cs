@@ -199,7 +199,7 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             case IntegrationEventType.MediaFinalize:
                 {
                     var payload = Deserialize<MediaLifecycleEvent>(message.payload);
-                    await SendOutboxRequiredAsync(
+                    var responseBody = await SendOutboxRequiredResponseAsync(
                         "UploadServiceFinalizeMedia",
                         HttpMethod.Post,
                         GetInternalServiceUrl("Upload", "internal/media/finalize"),
@@ -208,6 +208,7 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
                         "InternalServices:Upload:SharedSecret",
                         message.idempotency_key,
                         cancellationToken);
+                    EnsureMediaFinalizeCompleted(payload.Urls, responseBody);
                     break;
                 }
             case IntegrationEventType.MediaDelete:
@@ -674,6 +675,31 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
         bool notFoundIsSuccess = false,
         string clientName = "external-services")
     {
+        await SendOutboxRequiredResponseAsync(
+            endpointName,
+            method,
+            url,
+            payload,
+            secretHeader,
+            secretConfigurationKey,
+            idempotencyKey,
+            cancellationToken,
+            notFoundIsSuccess,
+            clientName);
+    }
+
+    private async Task<string?> SendOutboxRequiredResponseAsync(
+        string endpointName,
+        HttpMethod method,
+        string? url,
+        object? payload,
+        string secretHeader,
+        string secretConfigurationKey,
+        string idempotencyKey,
+        CancellationToken cancellationToken,
+        bool notFoundIsSuccess = false,
+        string clientName = "external-services")
+    {
         if (string.IsNullOrWhiteSpace(url))
         {
             throw new PermanentOutboxException($"{endpointName} endpoint is not configured.");
@@ -699,7 +725,9 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
         if (response.IsSuccessStatusCode ||
             notFoundIsSuccess && response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            return;
+            return response.Content is null
+                ? null
+                : await response.Content.ReadAsStringAsync(cancellationToken);
         }
 
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -710,6 +738,34 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
         }
 
         throw new PermanentOutboxException(message);
+    }
+
+    private static void EnsureMediaFinalizeCompleted(
+        IReadOnlyList<string> urls,
+        string? responseBody)
+    {
+        var expected = urls
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        if (expected == 0) return;
+
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody ?? string.Empty);
+            if (!document.RootElement.TryGetProperty("finalized", out var finalizedElement) ||
+                !finalizedElement.TryGetInt32(out var finalized) ||
+                finalized != expected)
+            {
+                throw new HttpRequestException("Upload media finalize acknowledged an incomplete batch.");
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new HttpRequestException(
+                "Upload media finalize returned an invalid lifecycle response.",
+                exception);
+        }
     }
 
     private static T Deserialize<T>(string payload)
