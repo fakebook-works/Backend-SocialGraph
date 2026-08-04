@@ -54,6 +54,7 @@ Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
           profileFriends, profileContact, profileAvatarSource,
           group, groups, groupSuggestions, groupFriendMembers, groupViewerState, memberGroups, adminGroups,
+          profileMemberGroups, profileAdminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
           visitedGroups, userPhotos, groupPhotos, groupMedia, groupUserPhotos,
           myFeedPhotoCandidates, groupPhotoCandidates, likedReels, sharedReels, watchedReels,
@@ -67,6 +68,13 @@ Mutation: createUser, updateUser, change/remove user avatar/background,
           create/update/delete content, like/unlike, save/unsave, watch,
           tag, mention, create/share/delete Story
 ```
+
+User profile `privacy` is an account mode, not a post audience: `0=normal` supports
+friendships only, while `1=advanced` additionally allows followers. `updateUser` rejects
+values outside `0..1`; switching explicitly to normal atomically removes the target's
+incoming follower edges and their inverses. `followUser` rechecks the target's current
+mode server-side after deriving the follower from trusted Gateway context, so hiding the
+button in the browser is never the authorization boundary.
 
 `recommendFeed` is owned by Recommendation. Each returned `RecommendationItem` is hydrated through SocialGraph's internal Fusion lookup, so frontend can request `post` in the same operation. The `post` field is the `HomePost` union: `FeedPostDetail` for user posts or `GroupPostDetail` for group posts. Group posts include `group { id name avatar canJoin }`.
 
@@ -104,6 +112,12 @@ the trusted Gateway context, applies the existing two-way block check, and hydra
 page through `ContentGraphService`, so all four feed/Reel privacy values are evaluated
 from current state. `profileReels` remains the Reel-only collection for the dedicated tab.
 
+Group-profile reads keep a deliberately narrow shared-group exception to bidirectional block
+filtering. A current member/admin can still see blocked participants in that exact group's roster
+and GroupPosts published in that exact group. The group id is verified from canonical associations;
+the exception does not apply to Home, user profiles, search, comments, shares, contacts or Messenger.
+Public-group outsiders continue to receive the normal block-filtered projection.
+
 Post sharing is viewer-aware and supports four canonical source types: Group, FeedPost,
 GroupPost and Reel. The resolver derives the actor from trusted Gateway context, unwraps an
 existing FeedPost/GroupPost wrapper to its final source, checks current source visibility, and
@@ -136,6 +150,11 @@ relationship with the viewer and caps the public result at 200. Contact email re
 owned by Authentication: SocialGraph reads only `{ userId, email }` for an active account
 through the existing signed internal REST client with timestamp/nonce replay protection.
 There is no browser-to-Authentication shortcut and no credential/session field is exposed.
+
+`profileMemberGroups(userId, cursor, limit)` and `profileAdminGroups(userId, cursor, limit)`
+serve the Groups tab on another user's profile. They derive the viewer from trusted Gateway
+context, reject a missing target or a two-way block, clamp pages to 50, and return group metadata
+only. The caller-owned `memberGroups`/`adminGroups` operations remain self-only.
 
 Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. A feed post or reel may be shared only while the trusted actor can read it. Every Story read independently rechecks the Story viewer against the source's current privacy and two-way block state, so changing privacy or relationships hides the source only from viewers who no longer have access. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
 

@@ -1,6 +1,8 @@
 namespace SocialGraph.Api.Tests;
 
+using System.Text.Json.Nodes;
 using Moq;
+using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Service;
 
 public sealed class UserRelationshipServiceTests
@@ -106,15 +108,95 @@ public sealed class UserRelationshipServiceTests
         Assert.Contains(applied, item => item == new AssociationMutation(UserA, GraphAssociationType.Blocked, UserB, true));
     }
 
-    private static Mock<IObjectService> UsersExist()
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public async Task FollowUser_RequiresTheTargetToUseAdvancedAccountMode(int targetPrivacy, bool expected)
+    {
+        var objects = UsersExist(targetPrivacy);
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations
+            .Setup(item => item.AddAssociationAsync(UserA, GraphAssociationType.Followed, UserB, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new UserGraphService(objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        var result = await service.FollowUserAsync(UserA, UserB);
+
+        Assert.Equal(expected, result);
+        associations.Verify(
+            item => item.AddAssociationAsync(UserA, GraphAssociationType.Followed, UserB, It.IsAny<CancellationToken>()),
+            expected ? Times.Once() : Times.Never());
+    }
+
+    [Fact]
+    public async Task UpdateUser_ToNormalMode_RemovesAllIncomingFollowers()
+    {
+        var updatedObject = new SocialGraphObjectResult(UserB, GraphObjectType.User, UserData(privacy: 0));
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects
+            .Setup(item => item.UpdateObjectAsync(
+                UserB,
+                GraphObjectType.User,
+                It.Is<string>(data => JsonNode.Parse(data)!["privacy"]!.GetValue<int>() == 0),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(updatedObject);
+        objects
+            .Setup(item => item.RetrieveObjectAsync(UserB, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(updatedObject);
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations
+            .Setup(item => item.DeleteAllAssociationAsync(UserB, GraphAssociationType.FollowedBy, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var service = new UserGraphService(objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        var result = await service.UpdateUserAsync(new UpdateUserInput(
+            UserB, null, null, null, null, null, null, null, Privacy: 0));
+
+        Assert.Equal(0, result?.Privacy);
+        associations.Verify(item => item.DeleteAllAssociationAsync(
+            UserB,
+            GraphAssociationType.FollowedBy,
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(2)]
+    public async Task UpdateUser_RejectsUnknownAccountPrivacyBeforeWriting(int privacy)
+    {
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        var service = new UserGraphService(objects.Object, associations.Object, Mock.Of<IExternalServiceClient>());
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.UpdateUserAsync(new UpdateUserInput(
+            UserB, null, null, null, null, null, null, null, privacy)));
+
+        objects.Verify(item => item.UpdateObjectAsync(
+            It.IsAny<long>(), It.IsAny<short>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    private static Mock<IObjectService> UsersExist(int targetPrivacy = 0)
     {
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects
             .Setup(item => item.RetrieveObjectAsync(UserA, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(UserA, GraphObjectType.User, "{}"));
+            .ReturnsAsync(new SocialGraphObjectResult(UserA, GraphObjectType.User, UserData(privacy: 0)));
         objects
             .Setup(item => item.RetrieveObjectAsync(UserB, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new SocialGraphObjectResult(UserB, GraphObjectType.User, "{}"));
+            .ReturnsAsync(new SocialGraphObjectResult(UserB, GraphObjectType.User, UserData(targetPrivacy)));
         return objects;
     }
+
+    private static string UserData(int privacy) => new JsonObject
+    {
+        ["avatar"] = "",
+        ["background"] = "",
+        ["name"] = "User",
+        ["bio"] = "",
+        ["gender"] = 0,
+        ["birthdate"] = "",
+        ["location"] = "",
+        ["privacy"] = privacy,
+        ["create"] = "2026-01-01T00:00:00Z"
+    }.ToJsonString();
 }

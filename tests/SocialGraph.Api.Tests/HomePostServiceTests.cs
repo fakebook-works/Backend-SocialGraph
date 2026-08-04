@@ -130,6 +130,41 @@ public sealed class HomePostServiceTests
         Assert.Empty(results);
     }
 
+    [Theory]
+    [InlineData(GraphAssociationType.Blocked)]
+    [InlineData(GraphAssociationType.BlockedBy)]
+    public async Task GroupScopedDetails_KeepBlockedAuthorsOnlyInsideTheExactGroup(short blockType)
+    {
+        await using var context = CreateContext();
+        const long otherGroupId = 301;
+        const long groupPostId = 1_020;
+        const long otherGroupPostId = 1_021;
+        const long feedPostId = 1_022;
+        context.ObjectsTb.AddRange(
+            User(GroupAuthorId, "Shared group member"),
+            Group(GroupId, "Expected group", privacy: 1),
+            Group(otherGroupId, "Other group", privacy: 0),
+            Post(groupPostId, GraphObjectType.GroupPost, "visible in shared group", privacy: 0),
+            Post(otherGroupPostId, GraphObjectType.GroupPost, "must stay hidden", privacy: 0),
+            Post(feedPostId, GraphObjectType.FeedPost, "must stay hidden", privacy: 0));
+        context.AssociationsTb.AddRange(
+            Edge(groupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(groupPostId, GraphAssociationType.PublishedIn, GroupId),
+            Edge(otherGroupPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(otherGroupPostId, GraphAssociationType.PublishedIn, otherGroupId),
+            Edge(feedPostId, GraphAssociationType.AuthoredBy, GroupAuthorId),
+            Edge(ViewerId, GraphAssociationType.Member, GroupId),
+            Edge(ViewerId, blockType, GroupAuthorId));
+        await context.SaveChangesAsync();
+
+        var results = await CreateContentService(context).GetGroupPostDetailsAsync(
+            ViewerId,
+            GroupId,
+            new[] { groupPostId, otherGroupPostId, feedPostId });
+
+        Assert.Equal(groupPostId, PostId(Assert.Single(results)));
+    }
+
     [Fact]
     public async Task PostDetails_AllowsPrivateFriendPost_AndRejectsOversizedBatch()
     {

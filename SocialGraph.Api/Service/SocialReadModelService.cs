@@ -144,7 +144,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
         bool admins,
         CancellationToken cancellationToken = default)
     {
-        if (!await CanViewGroupAsync(viewerId, groupId, cancellationToken))
+        var viewerState = await GetGroupViewerStateAsync(viewerId, groupId, cancellationToken);
+        if (viewerState?.CanViewPosts != true)
         {
             return EmptyUsers();
         }
@@ -155,7 +156,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
             admins ? GraphAssociationType.HaveAdmin : GraphAssociationType.HaveMember,
             cursor,
             limit,
-            cancellationToken);
+            cancellationToken,
+            includeBlocked: viewerState.IsMember || viewerState.IsAdmin);
     }
 
     public async Task<GroupPostPageResult> GetGroupPostsAsync(
@@ -165,7 +167,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
         int limit,
         CancellationToken cancellationToken = default)
     {
-        if (!await CanViewGroupAsync(viewerId, groupId, cancellationToken))
+        var viewerState = await GetGroupViewerStateAsync(viewerId, groupId, cancellationToken);
+        if (viewerState?.CanViewPosts != true)
         {
             return new GroupPostPageResult(Array.Empty<GroupPostDetailResult>(), null, false);
         }
@@ -177,10 +180,10 @@ public sealed class SocialReadModelService : ISocialReadModelService
             cursor,
             Math.Min(take * 2, 50),
             cancellationToken);
-        var posts = await _contentGraphService.GetPostDetailsAsync(
-            viewerId,
-            page.items.Select(item => item.id2).ToArray(),
-            cancellationToken);
+        var postIds = page.items.Select(item => item.id2).ToArray();
+        var posts = viewerState.IsMember || viewerState.IsAdmin
+            ? await _contentGraphService.GetGroupPostDetailsAsync(viewerId, groupId, postIds, cancellationToken)
+            : await _contentGraphService.GetPostDetailsAsync(viewerId, postIds, cancellationToken);
         var byId = posts.OfType<GroupPostDetailResult>().ToDictionary(item => item.Id);
         var items = new List<GroupPostDetailResult>(take);
         var processed = 0;
@@ -209,7 +212,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
         int limit,
         CancellationToken cancellationToken = default)
     {
-        if (!await CanViewGroupAsync(viewerId, groupId, cancellationToken))
+        var viewerState = await GetGroupViewerStateAsync(viewerId, groupId, cancellationToken);
+        if (viewerState?.CanViewPosts != true)
         {
             return new GroupPostPageResult(Array.Empty<GroupPostDetailResult>(), null, false);
         }
@@ -221,10 +225,10 @@ public sealed class SocialReadModelService : ISocialReadModelService
             cursor,
             Math.Min(take * 4, 100),
             cancellationToken);
-        var posts = await _contentGraphService.GetPostDetailsAsync(
-            viewerId,
-            page.items.Select(item => item.id2).ToArray(),
-            cancellationToken);
+        var postIds = page.items.Select(item => item.id2).ToArray();
+        var posts = viewerState.IsMember || viewerState.IsAdmin
+            ? await _contentGraphService.GetGroupPostDetailsAsync(viewerId, groupId, postIds, cancellationToken)
+            : await _contentGraphService.GetPostDetailsAsync(viewerId, postIds, cancellationToken);
         var byId = posts
             .OfType<GroupPostDetailResult>()
             .Where(item => item.Author.Id == userId)
@@ -1228,7 +1232,8 @@ public sealed class SocialReadModelService : ISocialReadModelService
         short associationType,
         string? cursor,
         int limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeBlocked = false)
     {
         var page = await _associationService.RetrieveAssociationAsync(
             sourceId,
@@ -1237,7 +1242,9 @@ public sealed class SocialReadModelService : ISocialReadModelService
             Math.Clamp(limit, 1, 50),
             cancellationToken);
         var candidateIds = page.items.Select(item => item.id2).Distinct().ToArray();
-        var blockedUserIds = await _blockVisibility.GetBlockedUserIdsAsync(viewerId, candidateIds, cancellationToken);
+        var blockedUserIds = includeBlocked
+            ? new HashSet<long>()
+            : await _blockVisibility.GetBlockedUserIdsAsync(viewerId, candidateIds, cancellationToken);
         var visibleIds = candidateIds
             .Where(userId => userId == viewerId || !blockedUserIds.Contains(userId))
             .ToArray();

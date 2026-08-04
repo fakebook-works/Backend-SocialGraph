@@ -47,6 +47,38 @@ public sealed class BlockVisibilityRegressionTests
     [Theory]
     [InlineData(GraphAssociationType.Blocked)]
     [InlineData(GraphAssociationType.BlockedBy)]
+    public async Task GroupMemberProjection_KeepsBlockedUsersForCurrentGroupParticipants(short blockType)
+    {
+        await using var context = CreateContext();
+        const long groupId = 41;
+        context.ObjectsTb.Add(User(BlockedUserId, "Shared group member"));
+        context.AssociationsTb.Add(Edge(ViewerId, blockType, BlockedUserId));
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>();
+        objects.Setup(service => service.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, new JsonObject { ["privacy"] = 1 }.ToJsonString()));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(service => service.HasAssociationAsync(
+                ViewerId, GraphAssociationType.Member, groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        associations.Setup(service => service.RetrieveAssociationAsync(
+                groupId, GraphAssociationType.HaveMember, null, 20, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult([new AssociationEdgeResult(BlockedUserId, 1)], null));
+        var service = new SocialReadModelService(
+            context,
+            objects.Object,
+            associations.Object,
+            new Mock<IContentGraphService>().Object);
+
+        var page = await service.GetGroupMembersAsync(ViewerId, groupId, null, 20, admins: false);
+
+        Assert.Equal(BlockedUserId, Assert.Single(page.Items).Id);
+    }
+
+    [Theory]
+    [InlineData(GraphAssociationType.Blocked)]
+    [InlineData(GraphAssociationType.BlockedBy)]
     public async Task CommentProjection_HidesBlockedAuthors(short blockType)
     {
         await using var context = CreateContext();

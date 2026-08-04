@@ -580,7 +580,28 @@ public sealed class ContentGraphService : IContentGraphService
     public async Task<IReadOnlyList<IHomePostResult>> GetPostDetailsAsync(
         long viewerId,
         IReadOnlyList<long> postIds,
+        CancellationToken cancellationToken = default) =>
+        await GetPostDetailsCoreAsync(viewerId, postIds, null, cancellationToken);
+
+    public async Task<IReadOnlyList<IHomePostResult>> GetGroupPostDetailsAsync(
+        long viewerId,
+        long groupId,
+        IReadOnlyList<long> postIds,
         CancellationToken cancellationToken = default)
+    {
+        if (groupId <= 0)
+        {
+            return Array.Empty<IHomePostResult>();
+        }
+
+        return await GetPostDetailsCoreAsync(viewerId, postIds, groupId, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<IHomePostResult>> GetPostDetailsCoreAsync(
+        long viewerId,
+        IReadOnlyList<long> postIds,
+        long? groupContextId,
+        CancellationToken cancellationToken)
     {
         if (postIds.Count > MaxPostDetailIds)
         {
@@ -764,8 +785,16 @@ public sealed class ContentGraphService : IContentGraphService
             if (!posts.TryGetValue(postId, out var post) ||
                 !authorByPost.TryGetValue(postId, out var authorId) ||
                 !relatedObjects.TryGetValue(authorId, out var author) ||
-                author.otype != GraphObjectType.User ||
-                viewerId != authorId && blocked.Contains(authorId))
+                author.otype != GraphObjectType.User)
+            {
+                continue;
+            }
+
+            var isExactGroupContext = groupContextId is > 0 &&
+                post.otype == GraphObjectType.GroupPost &&
+                groupByPost.GetValueOrDefault(postId) == groupContextId.Value;
+            if ((groupContextId is not null && !isExactGroupContext) ||
+                (viewerId != authorId && blocked.Contains(authorId) && !isExactGroupContext))
             {
                 continue;
             }

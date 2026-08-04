@@ -837,6 +837,62 @@ public class Query
             cancellationToken);
     }
 
+    public async Task<GroupMembershipPageResult> GetProfileMemberGroupsAsync(
+        long userId,
+        string? cursor,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] IAssociationService associationService,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] IBlockVisibilityService blockVisibility,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        var viewerId = trustedCaller.RequireUserId();
+        if (await blockVisibility.IsBlockedEitherDirectionAsync(viewerId, userId, cancellationToken) ||
+            await userGraphService.GetProfileAsync(userId, cancellationToken) is null)
+        {
+            return EmptyGroupMembershipPage();
+        }
+
+        return await GetGroupMembershipPageAsync(
+            userId,
+            GraphAssociationType.Member,
+            cursor,
+            limit,
+            associationService,
+            groupGraphService,
+            cancellationToken);
+    }
+
+    public async Task<GroupMembershipPageResult> GetProfileAdminGroupsAsync(
+        long userId,
+        string? cursor,
+        int limit,
+        [Service] IUserGraphService userGraphService,
+        [Service] IAssociationService associationService,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] IBlockVisibilityService blockVisibility,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        var viewerId = trustedCaller.RequireUserId();
+        if (await blockVisibility.IsBlockedEitherDirectionAsync(viewerId, userId, cancellationToken) ||
+            await userGraphService.GetProfileAsync(userId, cancellationToken) is null)
+        {
+            return EmptyGroupMembershipPage();
+        }
+
+        return await GetGroupMembershipPageAsync(
+            userId,
+            GraphAssociationType.Admin,
+            cursor,
+            limit,
+            associationService,
+            groupGraphService,
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<CommentEditRevisionResult>> GetCommentEditHistoryAsync(
         long commentId,
         [Service] ISocialReadModelService readModels,
@@ -1026,4 +1082,7 @@ public class Query
 
         return new GroupMembershipPageResult(groups, page.nextCursor, page.nextCursor is not null);
     }
+
+    private static GroupMembershipPageResult EmptyGroupMembershipPage() =>
+        new(Array.Empty<GroupResult>(), null, false);
 }

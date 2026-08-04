@@ -18,7 +18,7 @@ using SocialGraph.Api.Service;
 /// same block filtering in both directions, so a blocked or missing user is simply absent
 /// from the result — which is exactly the null the resolver returned before.
 /// </remarks>
-public sealed class FederatedUserByIdDataLoader : BatchDataLoader<long, FederatedUser>
+public sealed class FederatedUserByIdDataLoader : BatchDataLoader<long, FederatedUser?>
 {
     private readonly IUserGraphService _userGraphService;
     private readonly ITrustedCallerAccessor _trustedCaller;
@@ -34,7 +34,7 @@ public sealed class FederatedUserByIdDataLoader : BatchDataLoader<long, Federate
         _trustedCaller = trustedCaller;
     }
 
-    protected override async Task<IReadOnlyDictionary<long, FederatedUser>> LoadBatchAsync(
+    protected override async Task<IReadOnlyDictionary<long, FederatedUser?>> LoadBatchAsync(
         IReadOnlyList<long> keys,
         CancellationToken cancellationToken)
     {
@@ -42,17 +42,25 @@ public sealed class FederatedUserByIdDataLoader : BatchDataLoader<long, Federate
         var viewerId = _trustedCaller.RequireUserId();
         var profiles = await _userGraphService.GetProfilesForViewerAsync(viewerId, keys, cancellationToken);
 
-        return profiles.ToDictionary(
-            profile => profile.Id,
-            profile => new FederatedUser(
-                profile.Id,
-                profile.Name,
-                profile.Avatar,
-                profile.Bio,
-                profile.IsVerified,
-                profile.FriendCount,
-                profile.FollowerCount,
-                profile.FollowingCount,
-                profile.Privacy));
+        var profilesById = profiles.ToDictionary(profile => profile.Id);
+
+        // DataLoader must return a value for every requested key. A blocked user is
+        // intentionally absent from GetProfilesForViewerAsync; mapping that key to
+        // null preserves the nullable User field in the federated schema instead of
+        // turning one hidden participant into an error for the whole inbox query.
+        return keys.ToDictionary(
+            id => id,
+            id => profilesById.TryGetValue(id, out var profile)
+                ? new FederatedUser(
+                    profile.Id,
+                    profile.Name,
+                    profile.Avatar,
+                    profile.Bio,
+                    profile.IsVerified,
+                    profile.FriendCount,
+                    profile.FollowerCount,
+                    profile.FollowingCount,
+                    profile.Privacy)
+                : null);
     }
 }

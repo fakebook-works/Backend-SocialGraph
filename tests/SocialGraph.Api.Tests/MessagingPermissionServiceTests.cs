@@ -44,6 +44,32 @@ public sealed class MessagingPermissionServiceTests
             new MessagingPermissionCheckRequest(1, new long[] { 2 }, "UNKNOWN")));
     }
 
+    [Fact]
+    public async Task InspectBlock_ReturnsDirectionalStateWithoutGrantingMessagingPermission()
+    {
+        await using var context = CreateContext();
+        context.ObjectsTb.AddRange(User(1), User(2), User(3));
+        context.AssociationsTb.AddRange(
+            Edge(1, GraphAssociationType.Blocked, 2),
+            Edge(1, GraphAssociationType.BlockedBy, 3));
+        await context.SaveChangesAsync();
+        var service = new MessagingPermissionService(context);
+
+        var result = await service.CheckAsync(new MessagingPermissionCheckRequest(
+            1,
+            new long[] { 2, 3 },
+            "INSPECT_BLOCK"));
+
+        var actorBlocked = result.Results.Single(item => item.TargetUserId == 2);
+        Assert.True(actorBlocked.Allowed);
+        Assert.True(actorBlocked.ActorBlockedTarget);
+        Assert.False(actorBlocked.TargetBlockedActor);
+        var targetBlocked = result.Results.Single(item => item.TargetUserId == 3);
+        Assert.True(targetBlocked.Allowed);
+        Assert.False(targetBlocked.ActorBlockedTarget);
+        Assert.True(targetBlocked.TargetBlockedActor);
+    }
+
     private static Objects User(long id) => new() { id = id, otype = GraphObjectType.User, data = "{}" };
 
     private static Associations Edge(long id1, short atype, long id2) => new()

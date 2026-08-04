@@ -10,7 +10,9 @@ public sealed record MessagingPermissionDecision(
     bool Allowed,
     bool IsFriend,
     bool BlockedEitherDirection,
-    string? Reason);
+    string? Reason,
+    bool ActorBlockedTarget = false,
+    bool TargetBlockedActor = false);
 
 public sealed record MessagingPermissionCheckResponse(
     IReadOnlyList<MessagingPermissionDecision> Results);

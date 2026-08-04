@@ -84,6 +84,11 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default)
     {
+        if (input.Privacy is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(input.Privacy), "User privacy must be 0 (normal) or 1 (advanced).");
+        }
+
         await EnsureMediaOwnedAsync(input.Id, new[] { input.Avatar, input.Background }, cancellationToken);
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         var patchData = GraphJson.ParseObject(GraphJson.PatchJson(
@@ -105,6 +110,14 @@ public sealed class UserGraphService : IUserGraphService
 
         try
         {
+            if (input.Privacy is not null)
+            {
+                // Serialize an account-mode change with new follow attempts. Without this,
+                // a follower could pass the advanced-mode check immediately before a
+                // downgrade removes existing followers, then insert a new edge afterwards.
+                await AcquireFollowPolicyLockAsync(input.Id, cancellationToken);
+            }
+
             var updated = await _objectService.UpdateObjectAsync(input.Id, GraphObjectType.User, patch, cancellationToken);
             if (updated is null)
             {
@@ -114,6 +127,17 @@ public sealed class UserGraphService : IUserGraphService
                 }
 
                 return null;
+            }
+
+            // Normal profiles support friendships only. Removing the complete incoming
+            // follower bucket also removes every inverse Followed edge, so an old follower
+            // cannot retain access after the account leaves advanced mode.
+            if (input.Privacy == 0)
+            {
+                await _associationService.DeleteAllAssociationAsync(
+                    input.Id,
+                    GraphAssociationType.FollowedBy,
+                    cancellationToken);
             }
 
             if (!string.IsNullOrWhiteSpace(input.Name))
@@ -1210,19 +1234,48 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<bool> FollowUserAsync(long followerId, long targetUserId, CancellationToken cancellationToken = default)
     {
-        if (!await CanCreateUserRelationshipAsync(followerId, targetUserId, cancellationToken) ||
-            await IsBlockedEitherWayAsync(followerId, targetUserId, cancellationToken) ||
-            await _associationService.HasAssociationAsync(followerId, GraphAssociationType.Friend, targetUserId, cancellationToken) ||
-            await _associationService.HasAssociationAsync(followerId, GraphAssociationType.Followed, targetUserId, cancellationToken))
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
         {
-            return false;
-        }
+            await AcquireFollowPolicyLockAsync(targetUserId, cancellationToken);
+            if (!await CanCreateUserRelationshipAsync(
+                    followerId,
+                    targetUserId,
+                    cancellationToken,
+                    requireTargetFollowEnabled: true) ||
+                await IsBlockedEitherWayAsync(followerId, targetUserId, cancellationToken) ||
+                await _associationService.HasAssociationAsync(followerId, GraphAssociationType.Friend, targetUserId, cancellationToken) ||
+                await _associationService.HasAssociationAsync(followerId, GraphAssociationType.Followed, targetUserId, cancellationToken))
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
 
-        return await _associationService.AddAssociationAsync(
-            followerId,
-            GraphAssociationType.Followed,
-            targetUserId,
-            cancellationToken);
+                return false;
+            }
+
+            var followed = await _associationService.AddAssociationAsync(
+                followerId,
+                GraphAssociationType.Followed,
+                targetUserId,
+                cancellationToken);
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            return followed;
+        }
+        catch
+        {
+            if (transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+            }
+
+            throw;
+        }
     }
 
     public Task<bool> UnfollowUserAsync(long followerId, long targetUserId, CancellationToken cancellationToken = default)
@@ -1258,16 +1311,69 @@ public sealed class UserGraphService : IUserGraphService
     private async Task<bool> CanCreateUserRelationshipAsync(
         long userId,
         long targetUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireTargetFollowEnabled = false)
     {
         if (userId <= 0 || targetUserId <= 0 || userId == targetUserId)
         {
             return false;
         }
 
-        var source = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
-        var target = await _objectService.RetrieveObjectAsync(targetUserId, cancellationToken);
-        return source?.otype == GraphObjectType.User && target?.otype == GraphObjectType.User;
+        short? sourceType;
+        short? targetType;
+        string? targetData;
+        if (_dbContext is not null)
+        {
+            // Read from PostgreSQL after the follow-policy lock instead of consulting the
+            // object cache, which may still contain the target's previous account mode.
+            var users = await _dbContext.ObjectsTb
+                .AsNoTracking()
+                .Where(item => item.id == userId || item.id == targetUserId)
+                .Select(item => new { item.id, item.otype, item.data })
+                .ToListAsync(cancellationToken);
+            var source = users.SingleOrDefault(item => item.id == userId);
+            var target = users.SingleOrDefault(item => item.id == targetUserId);
+            sourceType = source?.otype;
+            targetType = target?.otype;
+            targetData = target?.data;
+        }
+        else
+        {
+            var source = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+            var target = await _objectService.RetrieveObjectAsync(targetUserId, cancellationToken);
+            sourceType = source?.otype;
+            targetType = target?.otype;
+            targetData = target?.data;
+        }
+
+        if (sourceType != GraphObjectType.User || targetType != GraphObjectType.User)
+        {
+            return false;
+        }
+
+        return !requireTargetFollowEnabled ||
+               GraphJson.Int(GraphJson.ParseObject(targetData!), "privacy") == 1;
+    }
+
+    private async Task AcquireFollowPolicyLockAsync(long targetUserId, CancellationToken cancellationToken)
+    {
+        if (_dbContext is null ||
+            _dbContext.Database.CurrentTransaction is null ||
+            !string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        // Group lifecycle operations use positive Snowflake IDs as advisory-lock keys.
+        // User follow-policy operations use their negative counterpart to keep both lock
+        // namespaces independent without truncating a 64-bit Snowflake identifier.
+        var lockKey = -targetUserId;
+        await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock({lockKey})",
+            cancellationToken);
     }
 
     private async Task<bool> IsBlockedEitherWayAsync(

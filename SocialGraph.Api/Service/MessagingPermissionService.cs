@@ -11,7 +11,8 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
     {
         "CREATE_DIRECT",
         "SEND_DIRECT",
-        "ADD_GROUP_MEMBERS"
+        "ADD_GROUP_MEMBERS",
+        "INSPECT_BLOCK"
     };
 
     private readonly MyDbContext _dbContext;
@@ -48,13 +49,22 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
                  item.atype == GraphAssociationType.BlockedBy))
             .ToListAsync(cancellationToken);
         var friends = relations.Where(item => item.atype == GraphAssociationType.Friend).Select(item => item.id2).ToHashSet();
-        var blocked = relations.Where(item => item.atype is GraphAssociationType.Blocked or GraphAssociationType.BlockedBy).Select(item => item.id2).ToHashSet();
+        var actorBlocked = relations.Where(item => item.atype == GraphAssociationType.Blocked).Select(item => item.id2).ToHashSet();
+        var targetBlocked = relations.Where(item => item.atype == GraphAssociationType.BlockedBy).Select(item => item.id2).ToHashSet();
         var decisions = targetIds.Select(targetId =>
         {
             var exists = existingUsers.Contains(targetId);
-            var blockedEitherDirection = blocked.Contains(targetId);
+            var actorBlockedTarget = actorBlocked.Contains(targetId);
+            var targetBlockedActor = targetBlocked.Contains(targetId);
+            var blockedEitherDirection = actorBlockedTarget || targetBlockedActor;
             var isFriend = exists && friends.Contains(targetId) && !blockedEitherDirection;
-            var allowed = targetId != request.ActorUserId && exists && isFriend && !blockedEitherDirection;
+            // Read-only inspection is intentionally allowed for every existing
+            // non-self user. It conveys block direction to Messenger so it can
+            // suppress group presence/messages without turning a non-friend into
+            // an authorized messaging target.
+            var allowed = request.Action == "INSPECT_BLOCK"
+                ? targetId != request.ActorUserId && exists
+                : targetId != request.ActorUserId && exists && isFriend && !blockedEitherDirection;
             var reason = allowed
                 ? null
                 : targetId == request.ActorUserId
@@ -64,7 +74,14 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
                         : blockedEitherDirection
                             ? "BLOCKED"
                             : "NOT_FRIENDS";
-            return new MessagingPermissionDecision(targetId, allowed, isFriend, blockedEitherDirection, reason);
+            return new MessagingPermissionDecision(
+                targetId,
+                allowed,
+                isFriend,
+                blockedEitherDirection,
+                reason,
+                actorBlockedTarget,
+                targetBlockedActor);
         }).ToArray();
 
         return new MessagingPermissionCheckResponse(decisions);
@@ -89,7 +106,7 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
 
         if (request.Action is null || !SupportedActions.Contains(request.Action))
         {
-            throw new ArgumentException("action must be CREATE_DIRECT, SEND_DIRECT, or ADD_GROUP_MEMBERS.", nameof(request));
+            throw new ArgumentException("action must be CREATE_DIRECT, SEND_DIRECT, ADD_GROUP_MEMBERS, or INSPECT_BLOCK.", nameof(request));
         }
     }
 }

@@ -75,6 +75,8 @@ public sealed class StorySchemaTests
         Assert.Contains("groupMembers", schema);
         Assert.Contains("groupAdmins", schema);
         Assert.Contains("groupPosts", schema);
+        Assert.Contains("profileMemberGroups", schema);
+        Assert.Contains("profileAdminGroups", schema);
         Assert.Contains("groupUserPosts", schema);
         Assert.Contains("userPhotos", schema);
         Assert.Contains("groupPhotos", schema);

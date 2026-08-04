@@ -10,6 +10,9 @@ location: String 1, verify: DateTime 0, privacy: Short(0/1) 1, create: DateTime}
     gender: 0 female, 1 male
     verify: thời gian hết hạn tích xanh, bình thường luôn null
     privacy: 0 normal (only friend relation), 1 advanced (friend and followed relation) 
+    updateUser chỉ nhận 0/1. followUser chỉ tạo cạnh Followed khi target hiện vẫn ở mode 1;
+    chuyển rõ ràng về mode 0 xoá toàn bộ follower hiện có cùng các cạnh inverse để mode normal
+    thực sự chỉ còn quan hệ bạn bè. Actor của cả update/follow vẫn lấy từ trusted Gateway context.
     
 -- 1  group {avatar: Url 1, background: Url 1, name: String 1, bio: String 1, privacy: Short(0/1) 1, create: DateTime}  
     
@@ -263,6 +266,11 @@ frontend không dò nguồn bằng URL hay nội dung `đã cập nhật ảnh �
 Ảnh bìa user được lưu từ bản cắt; nếu người dùng tải file mới thì ảnh gốc tạo một feed post công khai
 (`privacy=0`) với nội dung `tôi đã cập nhật ảnh bìa của mình`. Chọn lại ảnh đã có không tạo activity post mới.
 groupUserPosts(groupId, userId, cursor, limit) áp dụng group privacy và block/content visibility.
+Trong chính group profile, `groupPosts`, `groupUserPosts` và `groupMembers/groupAdmins` có một ngoại lệ block
+có scope chặt: chỉ viewer đang là Member/Admin hiện tại của đúng group mới tiếp tục thấy bài GroupPost và
+projection roster của người đã block/bị block trong group đó. Ngoại lệ được ràng buộc bằng `groupId` lấy từ
+cạnh Published/Member, không áp dụng cho feed chung, profile user, tìm kiếm, comment, chia sẻ, liên hệ hay chat;
+người ngoài group công khai vẫn đi qua block filter chuẩn.
 likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trusted gateway header.
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.
 inviteGroupUser yêu cầu người mời là member/admin hiện tại và target là bạn hiện tại, áp dụng block hai chiều,
@@ -291,6 +299,11 @@ Profile collections dùng `profileConnections(userId, associationType, limit)` �
 Profile của người khác dùng hai read model target-scoped riêng:
 - `profileFriends(targetUserId, limit)` lấy viewer từ trusted Gateway accessor; `targetUserId` chỉ là resource ID. Resolver kiểm tra block hai chiều giữa viewer-target, giới hạn kết quả tối đa 200, rồi tiếp tục lọc block hai chiều giữa viewer và từng người bạn. `mutualFriendCount` luôn được tính so với viewer thật, không phải target.
 - `profileContact(userId)` chỉ trả `{ email }` khi viewer đã xác thực, canonical SocialGraph profile còn tồn tại, không có block theo cả hai chiều và tài khoản Auth đang active. Email được đọc bằng signed internal REST có timestamp/nonce Redis fail-closed; browser không gọi Auth trực tiếp và không có credential, hash, token hay session field nào đi qua contract này.
+- `profileMemberGroups(userId, cursor, limit)` và `profileAdminGroups(userId, cursor, limit)` cho tab Nhóm
+  trên profile người khác. Viewer luôn lấy từ trusted Gateway context; resolver kiểm tra profile target còn
+  tồn tại và block hai chiều trước khi đọc cạnh Member/Admin của target. Hai query chỉ trả projection metadata
+  group vốn có (không trả roster hay nội dung bài riêng tư), clamp page tối đa 50 và không thay đổi hai query
+  caller-owned `memberGroups`/`adminGroups`.
 
 Hai query trên không nới `profileConnections`: API đó vẫn caller-owned và vẫn yêu cầu `userId` trùng trusted actor. Vì vậy input ID không thể được dùng để giả mạo caller.
 

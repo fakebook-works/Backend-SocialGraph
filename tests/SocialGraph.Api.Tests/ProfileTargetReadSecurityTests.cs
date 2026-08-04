@@ -250,6 +250,61 @@ public sealed class ProfileTargetReadSecurityTests
             CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProfileGroupReads_ReturnNoDataWhenEitherBlockDirectionApplies(bool adminGroups)
+    {
+        var users = new Mock<IUserGraphService>(MockBehavior.Strict);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        var groups = new Mock<IGroupGraphService>(MockBehavior.Strict);
+        var block = new Mock<IBlockVisibilityService>(MockBehavior.Strict);
+        block.Setup(item => item.IsBlockedEitherDirectionAsync(ViewerId, TargetUserId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Returns(ViewerId);
+
+        var query = new Query();
+        var result = adminGroups
+            ? await query.GetProfileAdminGroupsAsync(
+                TargetUserId, null, 25, users.Object, associations.Object, groups.Object,
+                block.Object, trusted.Object, CancellationToken.None)
+            : await query.GetProfileMemberGroupsAsync(
+                TargetUserId, null, 25, users.Object, associations.Object, groups.Object,
+                block.Object, trusted.Object, CancellationToken.None);
+
+        Assert.Empty(result.Items);
+        Assert.Null(result.EndCursor);
+        Assert.False(result.HasNextPage);
+        associations.Verify(item => item.RetrieveAssociationAsync(
+            It.IsAny<long>(), It.IsAny<short>(), It.IsAny<string?>(), It.IsAny<int>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+        groups.Verify(item => item.GetGroupAsync(It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
+        users.Verify(item => item.GetProfileAsync(It.IsAny<long>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProfileGroupReads_RejectAnUntrustedCallerBeforeReadingData(bool adminGroups)
+    {
+        var trusted = new Mock<ITrustedCallerAccessor>(MockBehavior.Strict);
+        trusted.Setup(item => item.RequireUserId()).Throws(new GraphQLException("untrusted"));
+        var query = new Query();
+
+        Task Act() => adminGroups
+            ? query.GetProfileAdminGroupsAsync(
+                TargetUserId, null, 25, Mock.Of<IUserGraphService>(), Mock.Of<IAssociationService>(),
+                Mock.Of<IGroupGraphService>(), Mock.Of<IBlockVisibilityService>(), trusted.Object,
+                CancellationToken.None)
+            : query.GetProfileMemberGroupsAsync(
+                TargetUserId, null, 25, Mock.Of<IUserGraphService>(), Mock.Of<IAssociationService>(),
+                Mock.Of<IGroupGraphService>(), Mock.Of<IBlockVisibilityService>(), trusted.Object,
+                CancellationToken.None);
+
+        await Assert.ThrowsAsync<GraphQLException>(Act);
+    }
+
     private static UserProfileResult Profile(long id) => new(
         id,
         string.Empty,
