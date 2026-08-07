@@ -53,7 +53,8 @@ The business-safe SocialGraph fields exposed by the composed Gateway are:
 Query:    profile, profiles, relationshipState, friends, incomingFriendRequests,
           outgoingFriendRequests, following, followers, blockedUsers,
           profileFriends, profileContact, profileAvatarSource,
-          group, groups, groupSuggestions, groupFriendMembers, groupViewerState, memberGroups, adminGroups,
+          group, groups, groupSuggestions, groupFriendMembers, groupInviteCandidates,
+          groupViewerState, memberGroups, adminGroups,
           profileMemberGroups, profileAdminGroups,
           pendingGroupJoins, groupMembers, groupAdmins, groupPosts, groupUserPosts,
           visitedGroups, userPhotos, groupPhotos, groupMedia, groupUserPhotos,
@@ -92,6 +93,13 @@ derives the viewer from the trusted Gateway context, clamps the result to 12 and
 only that viewer's current, unblocked friends who are current Member/Admin participants of
 the named group. It remains available for a discoverable private group and while the viewer
 has a pending join request, but never exposes strangers or the rest of the private roster.
+
+`groupInviteCandidates(groupId, limit, cursor)` is the participant-only picker for inviting
+people to an existing group. It is intentionally separate from the generic friends list and
+returns only the trusted viewer's current, unblocked friends who are neither a Member/Admin nor
+the subject of a current join request. Both forward and inverse group edges are checked, pages
+are capped at 50, and `inviteGroupUser` independently rechecks the same eligibility before
+queuing a notification.
 
 Viewer-specific feed, shortcut, post, and Story operations require trusted Gateway headers:
 
@@ -158,7 +166,7 @@ only. The caller-owned `memberGroups`/`adminGroups` operations remain self-only.
 
 Story reads are side-effect free: expired/invalid stories are filtered, not deleted. Cleanup runs in a hosted background service and can also be triggered through the authenticated `DELETE /internal/stories/expired` endpoint. A feed post or reel may be shared only while the trusted actor can read it. Every Story read independently rechecks the Story viewer against the source's current privacy and two-way block state, so changing privacy or relationships hides the source only from viewers who no longer have access. `createStory` is not part of the schema; use `createNormalStory` or `createShareStory`.
 
-`updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
+`updatePost` accepts optional `content`, `privacy`, and `media`. Omitted values are preserved; `media: []` detaches every current media item and deletes media whose final `Contained` reference disappears. Each Media object uses the stable Upload lifecycle parent `socialgraph:media:<mediaId>`; user/group avatar and background slots use separate stable references. Therefore replacing/deleting one graph parent only detaches that exact reference, even when another post or profile slot reuses the same URL. New outbox rows send `references + operationAt`; old URL-only rows remain dispatchable for rolling compatibility. Deploy the reference-aware Upload Server before this SocialGraph version: exact authorization requires `exactReferences: true`, `lifecycleVersion >= 3`, and `referenceCount` before a parent can commit, so an older Upload deployment cannot silently treat a reference request as an empty legacy URL request. Parent writes/deletes and their media outbox rows commit in the same database transaction; profile/group slot changes take a row lock. Exact references are authorized before commit, and a failed parent transaction best-effort detaches only reservations made by that attempt with the same operation timestamp. Online ownerless artwork repair is deliberately unsupported; missing legacy references require offline reconciliation with storage metadata authority. Transient media lifecycle failures retain a durable, high-priority row with capped backoff instead of exhausting the generic dead-letter budget, while permanent contract/ownership failures still fail closed. The mutation remains author-only. There is no independent Owned-media library. `userPhotos`, `groupPhotos`, and `groupUserPhotos` derive galleries from visible posts; the two candidate queries provide authorized avatar/background pickers. Viewer reel collections derive identity only from the trusted `X-User-Id` header.
 
 `groupMedia(groupId, cursor, limit)` is the viewer-aware group profile gallery and returns
 only photo/video attachments from currently visible GroupPosts. `groupPhotos` remains the
@@ -200,6 +208,11 @@ member/administrator for one of their current friends, remains block-aware, and 
 the invitation notification. It never silently creates membership; the invited user still
 uses the same request/approval flow. Feed/story shares enqueue canonical Share notifications
 for the original author and suppress self-notifications.
+
+Messaging permission checks deliberately distinguish direct messaging from friend-only
+features. `CREATE_DIRECT` and `SEND_DIRECT` allow any current non-self user when neither block
+direction exists. `ADD_GROUP_MEMBERS` and `VIEW_PRESENCE` still require a current friendship,
+while `INSPECT_BLOCK` exposes only directional block state to Messenger for filtering.
 
 `groupJoinRequests(groupId, cursor, limit)` is a typed, administrator-only projection over
 the group-side inverse edge `HaveGroupJoinRequest(18)`. The trusted caller is checked both at

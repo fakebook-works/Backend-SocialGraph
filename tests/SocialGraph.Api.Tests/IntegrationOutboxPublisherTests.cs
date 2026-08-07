@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using SocialGraph.Api.Database;
 using SocialGraph.Api.Infrastructure.Outbox;
+using SocialGraph.Api.Service;
 
 public sealed class IntegrationOutboxPublisherTests
 {
@@ -96,7 +97,7 @@ public sealed class IntegrationOutboxPublisherTests
     }
 
     [Fact]
-    public async Task MediaLifecycle_QueuesDeduplicatedFinalizeAndDeleteEvents()
+    public async Task MediaLifecycle_DeduplicatesWithinBatchButKeepsLaterSameSlotReattach()
     {
         await using var dbContext = CreateDbContext();
         var store = new PostgresIntegrationOutboxStore(dbContext, Options.Create(new IntegrationOutboxOptions()));
@@ -108,17 +109,30 @@ public sealed class IntegrationOutboxPublisherTests
             new HttpContextAccessor { HttpContext = context },
             new OutboxPayloadProtector(configuration));
 
-        await publisher.FinalizeMediaAsync(new[] { "/media/files/a.jpg", "/media/files/a.jpg" }, 42);
-        await publisher.DeleteMediaAsync(new[] { "/media/files/b.jpg" }, 42);
+        var attached = new MediaLifecycleReference("/media/files/a.jpg", "socialgraph:media:100");
+        var detached = new MediaLifecycleReference("/media/files/b.jpg", "socialgraph:media:200");
+        await publisher.FinalizeMediaAsync(new[] { attached, attached }, 42);
+        await Task.Delay(1);
+        await publisher.FinalizeMediaAsync(new[] { attached }, 42);
+        await publisher.DeleteMediaAsync(new[] { detached }, 42);
 
         var messages = await dbContext.IntegrationOutboxTb.OrderBy(item => item.event_type).ToListAsync();
-        Assert.Equal(2, messages.Count);
-        Assert.Contains(messages, item => item.event_type == IntegrationEventType.MediaFinalize);
+        Assert.Equal(3, messages.Count);
+        Assert.Equal(2, messages.Count(item => item.event_type == IntegrationEventType.MediaFinalize));
         Assert.Contains(messages, item => item.event_type == IntegrationEventType.MediaDelete);
-        var finalize = JsonSerializer.Deserialize<MediaLifecycleEvent>(
-            Assert.Single(messages, item => item.event_type == IntegrationEventType.MediaFinalize).payload,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        Assert.Equal(new[] { "/media/files/a.jpg" }, finalize?.Urls);
+        var finalizePayloads = messages
+            .Where(item => item.event_type == IntegrationEventType.MediaFinalize)
+            .Select(item => JsonSerializer.Deserialize<MediaLifecycleEvent>(
+                item.payload,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)))
+            .ToArray();
+        Assert.All(finalizePayloads, finalize =>
+        {
+            Assert.Null(finalize?.Urls);
+            Assert.Equal(new[] { attached }, finalize?.References);
+            Assert.NotNull(finalize?.OperationAt);
+        });
+        Assert.NotEqual(finalizePayloads[0]!.OperationAt, finalizePayloads[1]!.OperationAt);
     }
 
     private static IConfiguration Configuration()

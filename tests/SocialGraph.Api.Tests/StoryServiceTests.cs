@@ -106,7 +106,9 @@ public sealed class StoryServiceTests
         const long sharedStoryId = 1_020;
         const long sharedMediaId = 1_021;
         const long feedPostId = 1_022;
+        const long activeLowIdStoryId = 900;
         context.ObjectsTb.AddRange(
+            new Objects { id = activeLowIdStoryId, otype = GraphObjectType.Story, data = ActiveStoryJson("still-active") },
             new Objects { id = temporaryStoryId, otype = GraphObjectType.Story, data = ExpiredStoryJson("temporary") },
             new Objects { id = temporaryMediaId, otype = GraphObjectType.Media, data = MediaJson(0, "temporary.jpg") },
             new Objects { id = sharedStoryId, otype = GraphObjectType.Story, data = ExpiredStoryJson("shared") },

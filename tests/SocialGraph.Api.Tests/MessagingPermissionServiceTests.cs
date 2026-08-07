@@ -7,6 +7,39 @@ using SocialGraph.Api.Service;
 
 public sealed class MessagingPermissionServiceTests
 {
+    [Theory]
+    [InlineData("CREATE_DIRECT")]
+    [InlineData("SEND_DIRECT")]
+    public async Task DirectMessaging_AllowsExistingNonFriendAndDeniesEitherBlockDirection(string action)
+    {
+        await using var context = CreateContext();
+        context.ObjectsTb.AddRange(User(1), User(2), User(3), User(4));
+        context.AssociationsTb.AddRange(
+            Edge(1, GraphAssociationType.Blocked, 3),
+            Edge(1, GraphAssociationType.BlockedBy, 4));
+        await context.SaveChangesAsync();
+        var service = new MessagingPermissionService(context);
+
+        var result = await service.CheckAsync(new MessagingPermissionCheckRequest(
+            1,
+            new long[] { 2, 3, 4 },
+            action));
+
+        var nonFriend = result.Results.Single(item => item.TargetUserId == 2);
+        Assert.True(nonFriend.Allowed);
+        Assert.False(nonFriend.IsFriend);
+        Assert.False(nonFriend.BlockedEitherDirection);
+        Assert.Null(nonFriend.Reason);
+        Assert.All(
+            result.Results.Where(item => item.TargetUserId is 3 or 4),
+            blocked =>
+            {
+                Assert.False(blocked.Allowed);
+                Assert.True(blocked.BlockedEitherDirection);
+                Assert.Equal("BLOCKED", blocked.Reason);
+            });
+    }
+
     [Fact]
     public async Task PermissionBatch_AllowsFriendsAndDeniesBlockedOrUnknownTargets()
     {
@@ -30,6 +63,28 @@ public sealed class MessagingPermissionServiceTests
         Assert.True(blocked.BlockedEitherDirection);
         Assert.Equal("BLOCKED", blocked.Reason);
         Assert.Equal("USER_NOT_FOUND", result.Results.Single(item => item.TargetUserId == 4).Reason);
+    }
+
+    [Theory]
+    [InlineData("ADD_GROUP_MEMBERS")]
+    [InlineData("VIEW_PRESENCE")]
+    public async Task FriendOnlyActions_ContinueToDenyUnblockedNonFriends(string action)
+    {
+        await using var context = CreateContext();
+        context.ObjectsTb.AddRange(User(1), User(2));
+        await context.SaveChangesAsync();
+        var service = new MessagingPermissionService(context);
+
+        var result = await service.CheckAsync(new MessagingPermissionCheckRequest(
+            1,
+            new long[] { 2 },
+            action));
+
+        var decision = Assert.Single(result.Results);
+        Assert.False(decision.Allowed);
+        Assert.False(decision.IsFriend);
+        Assert.False(decision.BlockedEitherDirection);
+        Assert.Equal("NOT_FRIENDS", decision.Reason);
     }
 
     [Fact]

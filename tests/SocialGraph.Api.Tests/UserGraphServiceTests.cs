@@ -139,9 +139,16 @@ public sealed class UserGraphServiceTests
             .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, updatedData));
         var externalService = new Mock<IExternalServiceClient>(MockBehavior.Strict);
         externalService
+            .Setup(service => service.GetMediaOperationTimeAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DateTimeOffset.Parse("2026-08-07T00:00:00Z"));
+        externalService
             .Setup(service => service.FinalizeMediaAsync(
-                It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { croppedUrl })),
+                It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                    references.Count == 1 &&
+                    references[0].Url == croppedUrl &&
+                    references[0].ReferenceId == $"socialgraph:user:{UserId}:avatar"),
                 UserId,
+                It.IsAny<DateTimeOffset>(),
                 It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var contentService = new Mock<IContentGraphService>(MockBehavior.Strict);
@@ -211,9 +218,16 @@ public sealed class UserGraphServiceTests
             .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, updatedData));
         var externalService = new Mock<IExternalServiceClient>(MockBehavior.Strict);
         externalService
+            .Setup(service => service.GetMediaOperationTimeAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DateTimeOffset.Parse("2026-08-07T00:00:00Z"));
+        externalService
             .Setup(service => service.FinalizeMediaAsync(
-                It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { croppedUrl })),
+                It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                    references.Count == 1 &&
+                    references[0].Url == croppedUrl &&
+                    references[0].ReferenceId == $"socialgraph:user:{UserId}:avatar"),
                 UserId,
+                It.IsAny<DateTimeOffset>(),
                 It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var contentService = new Mock<IContentGraphService>(MockBehavior.Strict);
@@ -278,9 +292,16 @@ public sealed class UserGraphServiceTests
             .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, updatedData));
         var externalService = new Mock<IExternalServiceClient>(MockBehavior.Strict);
         externalService
+            .Setup(service => service.GetMediaOperationTimeAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DateTimeOffset.Parse("2026-08-07T00:00:00Z"));
+        externalService
             .Setup(service => service.FinalizeMediaAsync(
-                It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { croppedUrl })),
+                It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                    references.Count == 1 &&
+                    references[0].Url == croppedUrl &&
+                    references[0].ReferenceId == $"socialgraph:user:{UserId}:avatar"),
                 UserId,
+                It.IsAny<DateTimeOffset>(),
                 It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var contentService = new Mock<IContentGraphService>(MockBehavior.Strict);
@@ -465,9 +486,16 @@ public sealed class UserGraphServiceTests
             .ReturnsAsync(new SocialGraphObjectResult(UserId, GraphObjectType.User, updatedData));
         var externalService = new Mock<IExternalServiceClient>(MockBehavior.Strict);
         externalService
+            .Setup(service => service.GetMediaOperationTimeAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(DateTimeOffset.Parse("2026-08-07T00:00:00Z"));
+        externalService
             .Setup(service => service.FinalizeMediaAsync(
-                It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { croppedUrl })),
+                It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                    references.Count == 1 &&
+                    references[0].Url == croppedUrl &&
+                    references[0].ReferenceId == $"socialgraph:user:{UserId}:background"),
                 UserId,
+                It.IsAny<DateTimeOffset>(),
                 It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         var contentService = new Mock<IContentGraphService>(MockBehavior.Strict);

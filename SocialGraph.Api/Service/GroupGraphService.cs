@@ -4,6 +4,7 @@ using System.Data;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using SocialGraph.Api.Contracts;
 using SocialGraph.Api.Database;
@@ -12,6 +13,8 @@ public sealed class GroupGraphService : IGroupGraphService
 {
     private const int MaxSuggestionFriendSources = 1_000;
     private const int MaxSuggestionMembershipEdges = 10_000;
+    private const int MaxMediaLifecycleBatchSize = 512;
+    private const int MaxCommentChainDepth = 20;
     private readonly MyDbContext _dbContext;
     private readonly IObjectService _objectService;
     private readonly IAssociationService _associationService;
@@ -44,56 +47,182 @@ public sealed class GroupGraphService : IGroupGraphService
         _mediaOwnershipGuard = mediaOwnershipGuard;
     }
 
-    /// <summary>
-    /// Refuses group media URLs that the acting admin does not own, so group artwork cannot be
-    /// pointed at another user's asset and then destroyed by replacing it.
-    /// </summary>
-    private Task EnsureMediaOwnedAsync(long actorId, IEnumerable<string?> urls, CancellationToken cancellationToken) =>
-        _mediaOwnershipGuard is null
-            ? Task.CompletedTask
-            : _mediaOwnershipGuard.EnsureOwnedAsync(actorId, urls, cancellationToken);
-
     public async Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default)
     {
         ValidateGroupPrivacy(input.Privacy);
 
-        var group = await _objectService.AddObjectAsync(
-            GraphObjectType.Group,
-            GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar, input.Background),
-            cancellationToken);
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? group = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
+        {
+            group = await _objectService.AddObjectAsync(
+                GraphObjectType.Group,
+                GraphJson.GroupJson(input.Name, input.Bio, input.Privacy, input.Avatar, input.Background),
+                cancellationToken);
 
-        await _associationService.ApplyMutationsAsync(
-            new AssociationMutation[]
+            await _associationService.ApplyMutationsAsync(
+                new AssociationMutation[]
+                {
+                    new(input.CreatorId, GraphAssociationType.Member, group.id, true),
+                    new(input.CreatorId, GraphAssociationType.Admin, group.id, true)
+                },
+                cancellationToken);
+            var mediaReferences = new List<MediaLifecycleReference>(2);
+            if (!string.IsNullOrWhiteSpace(input.Avatar))
             {
-                new(input.CreatorId, GraphAssociationType.Member, group.id, true),
-                new(input.CreatorId, GraphAssociationType.Admin, group.id, true)
-            },
-            cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(group.id, "group", input.Name, cancellationToken);
-        return (await GetGroupAsync(group.id, cancellationToken))!;
+                mediaReferences.Add(MediaLifecycleReferences.ForGroupAvatar(group.id, input.Avatar));
+            }
+            if (!string.IsNullOrWhiteSpace(input.Background))
+            {
+                mediaReferences.Add(MediaLifecycleReferences.ForGroupBackground(group.id, input.Background));
+            }
+            if (mediaReferences.Count > 0)
+            {
+                var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    input.CreatorId,
+                    mediaReferences,
+                    operationAt,
+                    cancellationToken);
+            }
+            await _externalServiceClient.CreateSearchIndexAsync(group.id, "group", input.Name, cancellationToken);
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+            return (await GetGroupAsync(group.id, cancellationToken))!;
+        }
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, group?.id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
-    public async Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, CancellationToken cancellationToken = default)
+    public async Task<GroupResult?> UpdateGroupAsync(
+        long actorId,
+        UpdateGroupInput input,
+        CancellationToken cancellationToken = default)
     {
         ValidateGroupPrivacy(input.Privacy);
-
-        var updated = await _objectService.UpdateObjectAsync(
-            input.Id,
-            GraphObjectType.Group,
-            GraphJson.PatchJson(("avatar", input.Avatar), ("background", input.Background), ("name", input.Name), ("bio", input.Bio), ("privacy", input.Privacy)),
-            cancellationToken);
-
-        if (updated is null)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
         {
-            return null;
-        }
+            var currentGroup = await LockGroupRowAsync(input.Id, cancellationToken);
+            if (currentGroup is null)
+            {
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+            var currentData = GraphJson.ParseObject(currentGroup.data);
+            var previousAvatar = GraphJson.String(currentData, "avatar");
+            var previousBackground = GraphJson.String(currentData, "background");
+            var changedReferences = new List<MediaLifecycleReference>(2);
+            if (!string.IsNullOrWhiteSpace(input.Avatar))
+            {
+                var reference = MediaLifecycleReferences.ForGroupAvatar(input.Id, input.Avatar);
+                if (!string.Equals(previousAvatar, input.Avatar, StringComparison.OrdinalIgnoreCase))
+                {
+                    changedReferences.Add(reference);
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(input.Background))
+            {
+                var reference = MediaLifecycleReferences.ForGroupBackground(input.Id, input.Background);
+                if (!string.Equals(previousBackground, input.Background, StringComparison.OrdinalIgnoreCase))
+                {
+                    changedReferences.Add(reference);
+                }
+            }
 
-        if (!string.IsNullOrWhiteSpace(input.Name))
+            var mediaOperationAt = input.Avatar is not null || input.Background is not null
+                ? await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken)
+                : (DateTimeOffset?)null;
+            if (changedReferences.Count > 0 && mediaOperationAt is { } attachAt)
+            {
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    actorId,
+                    changedReferences,
+                    attachAt,
+                    cancellationToken);
+            }
+
+            var updated = await _objectService.UpdateObjectAsync(
+                input.Id,
+                GraphObjectType.Group,
+                GraphJson.PatchJson(("avatar", input.Avatar), ("background", input.Background), ("name", input.Name), ("bio", input.Bio), ("privacy", input.Privacy)),
+                cancellationToken);
+
+            if (updated is null)
+            {
+                if (mediaReservation is null)
+                {
+                    if (transaction is not null)
+                    {
+                        commitAttempted = true;
+                        await transaction.CommitAsync(cancellationToken);
+                    }
+                    committed = true;
+                    return null;
+                }
+                throw new InvalidOperationException("Group profile could not be updated safely.");
+            }
+            if (input.Avatar is not null && !string.IsNullOrWhiteSpace(previousAvatar) &&
+                !string.Equals(previousAvatar, input.Avatar, StringComparison.OrdinalIgnoreCase))
+            {
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForGroupAvatar(input.Id, previousAvatar) },
+                    null,
+                    mediaOperationAt!.Value,
+                    cancellationToken);
+            }
+            if (input.Background is not null && !string.IsNullOrWhiteSpace(previousBackground) &&
+                !string.Equals(previousBackground, input.Background, StringComparison.OrdinalIgnoreCase))
+            {
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForGroupBackground(input.Id, previousBackground) },
+                    null,
+                    mediaOperationAt!.Value,
+                    cancellationToken);
+            }
+
+            if (!string.IsNullOrWhiteSpace(input.Name))
+            {
+                await _externalServiceClient.UpdateSearchIndexAsync(input.Id, "group", input.Name, cancellationToken);
+            }
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+            return await GetGroupAsync(input.Id, cancellationToken);
+        }
+        catch
         {
-            await _externalServiceClient.UpdateSearchIndexAsync(input.Id, "group", input.Name, cancellationToken);
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, input.Id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
         }
-
-        return await GetGroupAsync(input.Id, cancellationToken);
     }
 
     public async Task<bool> DeleteGroupAsync(long actorId, long groupId, CancellationToken cancellationToken = default)
@@ -144,31 +273,74 @@ public sealed class GroupGraphService : IGroupGraphService
             return false;
         }
 
-        var current = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-        if (current?.otype != GraphObjectType.Group)
+        var currentRow = await LockGroupRowAsync(groupId, cancellationToken);
+        if (currentRow is null)
         {
             return false;
         }
 
-        var currentData = current is null ? null : GraphJson.ParseObject(current.data);
-        var profileMedia = currentData is null
-            ? Array.Empty<string>()
-            : new[]
+        var currentData = GraphJson.ParseObject(currentRow.data);
+        var profileMedia = new List<MediaLifecycleReference>(2);
+        if (currentData is not null)
+        {
+            var avatar = GraphJson.String(currentData, "avatar");
+            var background = GraphJson.String(currentData, "background");
+            if (!string.IsNullOrWhiteSpace(avatar))
             {
-                GraphJson.String(currentData, "avatar"),
-                GraphJson.String(currentData, "background")
-            }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                profileMedia.Add(MediaLifecycleReferences.ForGroupAvatar(groupId, avatar));
+            }
+            if (!string.IsNullOrWhiteSpace(background))
+            {
+                profileMedia.Add(MediaLifecycleReferences.ForGroupBackground(groupId, background));
+            }
+        }
         var groupPostIds = await _dbContext.AssociationsTb
             .AsNoTracking()
             .Where(item => item.id1 == groupId && item.atype == GraphAssociationType.Published)
             .Select(item => item.id2)
             .Distinct()
             .ToArrayAsync(cancellationToken);
+        var groupPostCommentIds = await GetDescendantCommentIdsAsync(groupPostIds, cancellationToken);
+        var deletedContentTreeIds = groupPostIds
+            .Concat(groupPostCommentIds)
+            .Distinct()
+            .ToArray();
+        var groupPostMediaRows = await (
+                from contained in _dbContext.AssociationsTb.AsNoTracking()
+                join mediaObject in _dbContext.ObjectsTb.AsNoTracking()
+                    on contained.id2 equals mediaObject.id
+                where deletedContentTreeIds.Contains(contained.id1) &&
+                      contained.atype == GraphAssociationType.Contained &&
+                      mediaObject.otype == GraphObjectType.Media &&
+                      !_dbContext.AssociationsTb.AsNoTracking().Any(other =>
+                          other.atype == GraphAssociationType.Contained &&
+                          other.id2 == contained.id2 &&
+                          !deletedContentTreeIds.Contains(other.id1))
+                select new { mediaObject.id, mediaObject.data })
+            .Distinct()
+            .ToArrayAsync(cancellationToken);
+        var groupPostMedia = groupPostMediaRows
+            .Select(item => new
+            {
+                item.id,
+                Url = GraphJson.String(GraphJson.ParseObject(item.data), "url")
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Url))
+            .Select(item => MediaLifecycleReferences.ForMedia(item.id, item.Url))
+            .ToArray();
         await _associationService.DeleteObjectAssociationsAsync(groupId, cancellationToken);
         var deleted = await _objectService.DeleteObjectAsync(groupId, cancellationToken);
         if (!deleted)
         {
             return false;
+        }
+
+        // The terminal group transaction also owns every exact media detach that becomes
+        // unreachable when this group disappears. Local post-row cleanup remains bounded
+        // and idempotent below, but a crash after commit can no longer strand storage refs.
+        foreach (var batch in profileMedia.Concat(groupPostMedia).Chunk(MaxMediaLifecycleBatchSize))
+        {
+            await _externalServiceClient.DeleteMediaAsync(batch, null, cancellationToken);
         }
 
         if (transaction is not null)
@@ -186,8 +358,6 @@ public sealed class GroupGraphService : IGroupGraphService
             }
         }
         await _externalServiceClient.DeleteSearchIndexAsync(groupId, cancellationToken);
-        // Cascade cleanup of stored group artwork; ownership was validated when it was set.
-        await _externalServiceClient.DeleteMediaAsync(profileMedia, null, cancellationToken);
         return true;
     }
 
@@ -445,6 +615,89 @@ public sealed class GroupGraphService : IGroupGraphService
             .ToArray();
     }
 
+    public async Task<UserSummaryPageResult> GetGroupInviteCandidatesAsync(
+        long viewerId,
+        long groupId,
+        int limit,
+        string? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        var take = Math.Clamp(limit, 1, 50);
+        var groupExists = await _dbContext.ObjectsTb
+            .AsNoTracking()
+            .AnyAsync(item => item.id == groupId && item.otype == GraphObjectType.Group, cancellationToken);
+        var viewerIsParticipant = await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .AnyAsync(edge => edge.id1 == viewerId && edge.id2 == groupId &&
+                (edge.atype == GraphAssociationType.Member || edge.atype == GraphAssociationType.Admin),
+                cancellationToken);
+        if (!groupExists || !viewerIsParticipant)
+        {
+            return new UserSummaryPageResult(Array.Empty<UserSummaryResult>(), null, false);
+        }
+
+        var query =
+            from friend in _dbContext.AssociationsTb.AsNoTracking()
+            join user in _dbContext.ObjectsTb.AsNoTracking()
+                on friend.id2 equals user.id
+            where friend.id1 == viewerId &&
+                  friend.atype == GraphAssociationType.Friend &&
+                  user.otype == GraphObjectType.User &&
+                  !_dbContext.AssociationsTb.Any(edge =>
+                      edge.id1 == viewerId && edge.id2 == friend.id2 &&
+                      (edge.atype == GraphAssociationType.Blocked ||
+                       edge.atype == GraphAssociationType.BlockedBy)) &&
+                  !_dbContext.AssociationsTb.Any(edge =>
+                      (edge.id1 == friend.id2 && edge.id2 == groupId &&
+                       (edge.atype == GraphAssociationType.Member ||
+                        edge.atype == GraphAssociationType.Admin ||
+                        edge.atype == GraphAssociationType.GroupJoinRequest)) ||
+                      (edge.id1 == groupId && edge.id2 == friend.id2 &&
+                       (edge.atype == GraphAssociationType.HaveMember ||
+                        edge.atype == GraphAssociationType.HaveAdmin ||
+                        edge.atype == GraphAssociationType.HaveGroupJoinRequest)))
+            select new { UserId = friend.id2, RelationTime = friend.time };
+
+        if (TryDecodeGroupInviteCandidateCursor(cursor, out var decodedCursor))
+        {
+            query = query.Where(item =>
+                item.RelationTime < decodedCursor.RelationTime ||
+                item.RelationTime == decodedCursor.RelationTime && item.UserId < decodedCursor.UserId);
+        }
+
+        var pageRows = await query
+            .OrderByDescending(item => item.RelationTime)
+            .ThenByDescending(item => item.UserId)
+            .Take(take + 1)
+            .ToArrayAsync(cancellationToken);
+        var selectedRows = pageRows.Take(take).ToArray();
+        if (selectedRows.Length == 0)
+        {
+            return new UserSummaryPageResult(Array.Empty<UserSummaryResult>(), null, false);
+        }
+
+        var candidateIds = selectedRows.Select(item => item.UserId).ToArray();
+        var profiles = await _userGraphService.GetProfilesForViewerAsync(
+            viewerId,
+            candidateIds,
+            cancellationToken);
+        var profilesById = profiles.ToDictionary(profile => profile.Id);
+        var items = candidateIds
+            .Where(profilesById.ContainsKey)
+            .Select(candidateId => profilesById[candidateId])
+            .Select(profile => new UserSummaryResult(
+                profile.Id,
+                profile.Name,
+                profile.Avatar,
+                profile.IsVerified))
+            .ToArray();
+        var lastRow = selectedRows[^1];
+        return new UserSummaryPageResult(
+            items,
+            EncodeGroupInviteCandidateCursor(lastRow.RelationTime, lastRow.UserId),
+            pageRows.Length > take);
+    }
+
     public async Task<GroupResult?> ChangeGroupAvatarAsync(
         long actorId,
         long groupId,
@@ -452,26 +705,46 @@ public sealed class GroupGraphService : IGroupGraphService
         string? originalUrl = null,
         CancellationToken cancellationToken = default)
     {
-        var currentGroup = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-        if (currentGroup is null || currentGroup.otype != GraphObjectType.Group)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
+        {
+        var currentGroup = await LockGroupRowAsync(groupId, cancellationToken);
+        if (currentGroup is null)
         {
             return null;
         }
-        await EnsureMediaOwnedAsync(actorId, new[] { avatarUrl, originalUrl }, cancellationToken);
         var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "avatar");
+        var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(avatarUrl) &&
+            !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            var references = new[] { MediaLifecycleReferences.ForGroupAvatar(groupId, avatarUrl) };
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                actorId,
+                references,
+                operationAt,
+                cancellationToken);
+        }
         var updated = await _objectService.UpdateObjectAsync(groupId, GraphObjectType.Group, GraphJson.PatchJson(("avatar", avatarUrl)), cancellationToken);
+        if (updated is null && mediaReservation is not null)
+        {
+            throw new InvalidOperationException("Group avatar could not be updated safely.");
+        }
         if (updated is not null)
         {
-            if (!string.IsNullOrWhiteSpace(avatarUrl))
-            {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, actorId, cancellationToken);
-            }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
             {
                 // Previous artwork may have been set by a different admin, so it is removed as
                 // stored state rather than under the acting admin's ownership.
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, null, cancellationToken);
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForGroupAvatar(groupId, previousUrl) },
+                    null,
+                    operationAt,
+                    cancellationToken);
             }
         }
         if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
@@ -485,7 +758,23 @@ public sealed class GroupGraphService : IGroupGraphService
                 cancellationToken);
         }
 
+        if (transaction is not null)
+        {
+            commitAttempted = true;
+            await transaction.CommitAsync(cancellationToken);
+        }
+        committed = true;
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
+        }
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, groupId);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
     public async Task<GroupResult?> ChangeGroupBackgroundAsync(
@@ -495,33 +784,53 @@ public sealed class GroupGraphService : IGroupGraphService
         string? originalUrl = null,
         CancellationToken cancellationToken = default)
     {
-        var currentGroup = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
-        if (currentGroup is null || currentGroup.otype != GraphObjectType.Group)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
+        {
+        var currentGroup = await LockGroupRowAsync(groupId, cancellationToken);
+        if (currentGroup is null)
         {
             return null;
         }
 
-        await EnsureMediaOwnedAsync(actorId, new[] { backgroundUrl, originalUrl }, cancellationToken);
         var previousUrl = GraphJson.String(GraphJson.ParseObject(currentGroup.data), "background");
-
+        var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(backgroundUrl) &&
+            !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            var references = new[] { MediaLifecycleReferences.ForGroupBackground(groupId, backgroundUrl) };
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                actorId,
+                references,
+                operationAt,
+                cancellationToken);
+        }
         var updated = await _objectService.UpdateObjectAsync(
             groupId,
             GraphObjectType.Group,
             GraphJson.PatchJson(("background", backgroundUrl)),
             cancellationToken);
 
+        if (updated is null && mediaReservation is not null)
+        {
+            throw new InvalidOperationException("Group background could not be updated safely.");
+        }
+
         if (updated is not null)
         {
-            if (!string.IsNullOrWhiteSpace(backgroundUrl))
-            {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, actorId, cancellationToken);
-            }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
             {
                 // Previous artwork may have been set by a different admin, so it is removed as
                 // stored state rather than under the acting admin's ownership.
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, null, cancellationToken);
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForGroupBackground(groupId, previousUrl) },
+                    null,
+                    operationAt,
+                    cancellationToken);
             }
         }
 
@@ -536,7 +845,23 @@ public sealed class GroupGraphService : IGroupGraphService
                 cancellationToken);
         }
 
+        if (transaction is not null)
+        {
+            commitAttempted = true;
+            await transaction.CommitAsync(cancellationToken);
+        }
+        committed = true;
         return updated is null ? null : await GetGroupAsync(groupId, cancellationToken);
+        }
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, groupId);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
     public async Task<VisitedGroupPageResult> GetVisitedGroupsAsync(
@@ -750,12 +1075,7 @@ public sealed class GroupGraphService : IGroupGraphService
     {
         if (!await IsParticipantAsync(inviterId, groupId, cancellationToken) ||
             !await AreUserAndGroupAsync(userId, groupId, cancellationToken) ||
-            await IsParticipantAsync(userId, groupId, cancellationToken) ||
-            await _associationService.HasAssociationAsync(
-                userId,
-                GraphAssociationType.GroupJoinRequest,
-                groupId,
-                cancellationToken) ||
+            await HasGroupParticipationOrRequestAsync(userId, groupId, cancellationToken) ||
             !await _associationService.HasAssociationAsync(
                 inviterId,
                 GraphAssociationType.Friend,
@@ -845,6 +1165,25 @@ public sealed class GroupGraphService : IGroupGraphService
         return user?.otype == GraphObjectType.User && group?.otype == GraphObjectType.Group;
     }
 
+    private Task<bool> HasGroupParticipationOrRequestAsync(
+        long userId,
+        long groupId,
+        CancellationToken cancellationToken)
+    {
+        return _dbContext.AssociationsTb
+            .AsNoTracking()
+            .AnyAsync(edge =>
+                (edge.id1 == userId && edge.id2 == groupId &&
+                 (edge.atype == GraphAssociationType.Member ||
+                  edge.atype == GraphAssociationType.Admin ||
+                  edge.atype == GraphAssociationType.GroupJoinRequest)) ||
+                (edge.id1 == groupId && edge.id2 == userId &&
+                 (edge.atype == GraphAssociationType.HaveMember ||
+                  edge.atype == GraphAssociationType.HaveAdmin ||
+                  edge.atype == GraphAssociationType.HaveGroupJoinRequest)),
+                cancellationToken);
+    }
+
     public async Task<bool> IsParticipantAsync(long userId, long groupId, CancellationToken cancellationToken = default)
     {
         return await _associationService.HasAssociationAsync(userId, GraphAssociationType.Member, groupId, cancellationToken) ||
@@ -918,4 +1257,188 @@ public sealed class GroupGraphService : IGroupGraphService
     }
 
     private readonly record struct VisitedGroupCursor(long VisitTime, long GroupId);
+
+    private static string EncodeGroupInviteCandidateCursor(long relationTime, long userId)
+    {
+        var payload = JsonSerializer.Serialize(new GroupInviteCandidateCursor(relationTime, userId));
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(payload));
+    }
+
+    private static bool TryDecodeGroupInviteCandidateCursor(
+        string? cursor,
+        out GroupInviteCandidateCursor decodedCursor)
+    {
+        decodedCursor = default;
+        if (string.IsNullOrWhiteSpace(cursor))
+        {
+            return false;
+        }
+
+        try
+        {
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+            var parsed = JsonSerializer.Deserialize<GroupInviteCandidateCursor>(json);
+            if (parsed.RelationTime <= 0 || parsed.UserId <= 0)
+            {
+                return false;
+            }
+
+            decodedCursor = parsed;
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private readonly record struct GroupInviteCandidateCursor(long RelationTime, long UserId);
+
+    private async Task<IReadOnlyList<long>> GetDescendantCommentIdsAsync(
+        IReadOnlyCollection<long> rootContentIds,
+        CancellationToken cancellationToken)
+    {
+        if (rootContentIds.Count == 0)
+        {
+            return Array.Empty<long>();
+        }
+
+        var descendants = new List<long>();
+        var seen = new HashSet<long>();
+        var frontier = rootContentIds.ToHashSet();
+        for (var depth = 0; depth < MaxCommentChainDepth && frontier.Count > 0; depth++)
+        {
+            var next = await (
+                    from edge in _dbContext.AssociationsTb.AsNoTracking()
+                    join obj in _dbContext.ObjectsTb.AsNoTracking() on edge.id2 equals obj.id
+                    where frontier.Contains(edge.id1) &&
+                          edge.atype == GraphAssociationType.HaveComment &&
+                          obj.otype == GraphObjectType.Comment
+                    select edge.id2)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            next = next.Where(seen.Add).ToList();
+            if (next.Count == 0)
+            {
+                return descendants;
+            }
+
+            descendants.AddRange(next);
+            frontier = next.ToHashSet();
+        }
+
+        if (frontier.Count > 0 && await (
+                from edge in _dbContext.AssociationsTb.AsNoTracking()
+                join obj in _dbContext.ObjectsTb.AsNoTracking() on edge.id2 equals obj.id
+                where frontier.Contains(edge.id1) &&
+                      edge.atype == GraphAssociationType.HaveComment &&
+                      obj.otype == GraphObjectType.Comment
+                select edge.id2)
+            .AnyAsync(cancellationToken))
+        {
+            throw new InvalidOperationException(
+                $"Group-post comment depth exceeds the supported bound of {MaxCommentChainDepth}.");
+        }
+
+        return descendants;
+    }
+
+    private async Task<IDbContextTransaction?> BeginTransactionAsync(CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational() || _dbContext.Database.CurrentTransaction is not null)
+        {
+            return null;
+        }
+
+        return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    private async Task<MediaReservation> ReserveAndQueueMediaAsync(
+        long ownerUserId,
+        IReadOnlyList<MediaLifecycleReference> references,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken)
+    {
+        if (references.Count == 0)
+        {
+            throw new ArgumentException("A media reservation requires at least one reference.", nameof(references));
+        }
+
+        if (_mediaOwnershipGuard is not null)
+        {
+            await _mediaOwnershipGuard.EnsureReferencesOwnedAsync(
+                ownerUserId,
+                references,
+                operationAt,
+                cancellationToken);
+        }
+
+        var reservation = new MediaReservation(ownerUserId, references, operationAt);
+        try
+        {
+            await _externalServiceClient.FinalizeMediaAsync(
+                references,
+                ownerUserId,
+                operationAt,
+                cancellationToken);
+            return reservation;
+        }
+        catch
+        {
+            await CancelReservationBestEffortAsync(reservation);
+            throw;
+        }
+    }
+
+    private Task CancelReservationBestEffortAsync(MediaReservation? reservation)
+    {
+        return reservation is null || _mediaOwnershipGuard is null
+            ? Task.CompletedTask
+            : _mediaOwnershipGuard.CancelReferenceReservationBestEffortAsync(
+                reservation.OwnerUserId,
+                reservation.References,
+                reservation.OperationAt,
+                CancellationToken.None);
+    }
+
+    private sealed record MediaReservation(
+        long OwnerUserId,
+        IReadOnlyList<MediaLifecycleReference> References,
+        DateTimeOffset OperationAt);
+
+    private async Task<Objects?> LockGroupRowAsync(long groupId, CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational())
+        {
+            var current = await _objectService.RetrieveObjectAsync(groupId, cancellationToken);
+            return current?.otype == GraphObjectType.Group
+                ? new Objects { id = current.id, otype = current.otype, data = current.data }
+                : null;
+        }
+
+        var row = await _dbContext.ObjectsTb
+                .FromSqlInterpolated($"SELECT * FROM social_graph.objects WHERE id = {groupId} FOR UPDATE")
+                .SingleOrDefaultAsync(cancellationToken);
+        return row?.otype == GraphObjectType.Group ? row : null;
+    }
+
+    private async Task RollbackAndInvalidateAsync(
+        IDbContextTransaction? transaction,
+        long? objectId)
+    {
+        if (transaction is null)
+        {
+            return;
+        }
+
+        await transaction.RollbackAsync(CancellationToken.None);
+        if (objectId is { } id)
+        {
+            await _objectService.InvalidateObjectCacheAsync(id);
+        }
+    }
 }

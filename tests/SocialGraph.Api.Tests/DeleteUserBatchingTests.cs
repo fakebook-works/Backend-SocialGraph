@@ -33,7 +33,7 @@ public sealed class DeleteUserBatchingTests
     }
 
     [Fact]
-    public async Task Deletion_stops_instead_of_looping_when_a_batch_removes_nothing()
+    public async Task Deletion_fails_closed_instead_of_deleting_user_when_a_batch_removes_nothing()
     {
         await using var context = CreateContext(authoredItems: 10);
         var content = new Mock<IContentGraphService>();
@@ -44,10 +44,11 @@ public sealed class DeleteUserBatchingTests
             .ReturnsAsync(false);
         var service = CreateService(context, content.Object);
 
-        var completed = await service.DeleteUserAsync(UserId).WaitAsync(TimeSpan.FromSeconds(10));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.DeleteUserAsync(UserId).WaitAsync(TimeSpan.FromSeconds(10)));
 
-        Assert.True(completed);
         Assert.Equal(10, content.Invocations.Count);
+        Assert.NotEmpty(context.AssociationsTb.Where(item => item.id1 == UserId));
     }
 
     [Fact]

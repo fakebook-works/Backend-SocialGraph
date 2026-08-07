@@ -117,6 +117,67 @@ public sealed class IntegrationOutboxProcessorTests
         store.VerifyAll();
     }
 
+    [Theory]
+    [InlineData(IntegrationEventType.MediaFinalize)]
+    [InlineData(IntegrationEventType.MediaDelete)]
+    [InlineData(IntegrationEventType.MessagingUserDelete)]
+    [InlineData(IntegrationEventType.SearchDelete)]
+    [InlineData(IntegrationEventType.RecommendationUserDelete)]
+    [InlineData(IntegrationEventType.RecommendationContentDelete)]
+    public async Task ExhaustedPostCommitLifecycleFailure_RemainsDurableWithCappedBackoff(
+        string eventType)
+    {
+        var store = new Mock<IIntegrationOutboxStore>(MockBehavior.Strict);
+        var dispatcher = new Mock<IIntegrationOutboxDispatcher>(MockBehavior.Strict);
+        var message = Message(attempts: 100, maxAttempts: 10, eventType: eventType);
+        dispatcher
+            .Setup(item => item.DispatchAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new HttpRequestException("upload temporarily unavailable"));
+        store
+            .Setup(item => item.MarkFailedAsync(
+                message.id,
+                "upload temporarily unavailable",
+                It.Is<TimeSpan>(delay =>
+                    delay >= TimeSpan.FromMinutes(15) &&
+                    delay < TimeSpan.FromMinutes(15) + TimeSpan.FromSeconds(1)),
+                false,
+                CancellationToken.None))
+            .Returns(Task.CompletedTask);
+
+        await Processor().ProcessAsync(store.Object, dispatcher.Object, message);
+
+        store.VerifyAll();
+    }
+
+    [Theory]
+    [InlineData(IntegrationEventType.MediaFinalize)]
+    [InlineData(IntegrationEventType.MediaDelete)]
+    [InlineData(IntegrationEventType.MessagingUserDelete)]
+    public async Task PermanentClassPostCommitFailure_RemainsDurableWithCappedBackoff(
+        string eventType)
+    {
+        var store = new Mock<IIntegrationOutboxStore>(MockBehavior.Strict);
+        var dispatcher = new Mock<IIntegrationOutboxDispatcher>(MockBehavior.Strict);
+        var message = Message(attempts: 100, maxAttempts: 10, eventType: eventType);
+        dispatcher
+            .Setup(item => item.DispatchAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new PermanentOutboxException("exact lifecycle contract mismatch"));
+        store
+            .Setup(item => item.MarkFailedAsync(
+                message.id,
+                "exact lifecycle contract mismatch",
+                It.Is<TimeSpan>(delay =>
+                    delay >= TimeSpan.FromMinutes(15) &&
+                    delay < TimeSpan.FromMinutes(15) + TimeSpan.FromSeconds(1)),
+                false,
+                CancellationToken.None))
+            .Returns(Task.CompletedTask);
+
+        await Processor().ProcessAsync(store.Object, dispatcher.Object, message);
+
+        store.VerifyAll();
+    }
+
     [Fact]
     public async Task PermanentFailure_MovesMessageDirectlyToDeadLetter()
     {

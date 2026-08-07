@@ -53,6 +53,21 @@ public sealed class PostgresIntegrationOutboxStore : IIntegrationOutboxStore
             cancellationToken);
     }
 
+    public Task<DateTimeOffset> GetCurrentTimeAsync(CancellationToken cancellationToken = default)
+    {
+        if (IsInMemory())
+        {
+            return Task.FromResult(DateTimeOffset.UtcNow);
+        }
+
+        // The shared PostgreSQL clock gives serialized parent mutations from different
+        // SocialGraph replicas one authoritative time domain. Client machine clock skew
+        // must not make a later detach appear older than an earlier attach.
+        return _dbContext.Database
+            .SqlQueryRaw<DateTimeOffset>("SELECT clock_timestamp() AS \"Value\"")
+            .SingleAsync(cancellationToken);
+    }
+
     public async Task<IntegrationOutboxMessage> EnqueueAsync(
         string eventType,
         long? aggregateId,
@@ -139,8 +154,18 @@ public sealed class PostgresIntegrationOutboxStore : IIntegrationOutboxStore
             messages = await _dbContext.IntegrationOutboxTb
                 .Where(item =>
                     (item.status == IntegrationOutboxStatus.Pending && item.available_at <= now) ||
-                    (item.status == IntegrationOutboxStatus.Processing && item.locked_at < staleBefore))
-                .OrderBy(item => item.created_at)
+                    (item.status == IntegrationOutboxStatus.Processing && item.locked_at < staleBefore) ||
+                    (item.status == IntegrationOutboxStatus.DeadLetter &&
+                     (item.event_type == IntegrationEventType.MediaFinalize ||
+                      item.event_type == IntegrationEventType.MediaDelete ||
+                      item.event_type == IntegrationEventType.UserDelete ||
+                      item.event_type == IntegrationEventType.SearchDelete ||
+                      item.event_type == IntegrationEventType.RecommendationUserDelete ||
+                      item.event_type == IntegrationEventType.RecommendationContentDelete ||
+                      item.event_type == IntegrationEventType.MessagingUserDelete)))
+                .OrderBy(item => item.event_type == IntegrationEventType.MediaFinalize ||
+                    item.event_type == IntegrationEventType.MediaDelete ? 0 : 1)
+                .ThenBy(item => item.created_at)
                 .Take(take)
                 .ToListAsync(cancellationToken);
         }
@@ -153,14 +178,23 @@ public sealed class PostgresIntegrationOutboxStore : IIntegrationOutboxStore
                     FROM social_graph.integration_outbox
                     WHERE (status = {0} AND available_at <= {1})
                        OR (status = {2} AND locked_at < {3})
-                    ORDER BY created_at
+                       OR (status = {4} AND event_type IN (
+                            'media.finalize.v1', 'media.delete.v1', 'user.delete.v1',
+                            'search.delete.v1', 'recommendation.user-delete.v1',
+                            'recommendation.content-delete.v1', 'messaging.user-delete.v1'))
+                    ORDER BY CASE
+                        WHEN event_type IN ('media.finalize.v1', 'media.delete.v1') THEN 0
+                        ELSE 1
+                    END,
+                    created_at
                     FOR UPDATE SKIP LOCKED
-                    LIMIT {4}
+                    LIMIT {5}
                     """,
                     IntegrationOutboxStatus.Pending,
                     now,
                     IntegrationOutboxStatus.Processing,
                     staleBefore,
+                    IntegrationOutboxStatus.DeadLetter,
                     take)
                 .ToListAsync(cancellationToken);
         }
@@ -235,6 +269,41 @@ public sealed class PostgresIntegrationOutboxStore : IIntegrationOutboxStore
 
         await _dbContext.IntegrationOutboxTb
             .Where(item => item.status == IntegrationOutboxStatus.Completed && item.completed_at < cutoff)
+            .ExecuteDeleteAsync(cancellationToken);
+    }
+
+    public async Task DeleteDeadLettersBeforeAsync(
+        DateTimeOffset cutoff,
+        CancellationToken cancellationToken = default)
+    {
+        if (IsInMemory())
+        {
+            var deadLetters = await _dbContext.IntegrationOutboxTb
+                .Where(item => item.status == IntegrationOutboxStatus.DeadLetter &&
+                              item.event_type != IntegrationEventType.MediaFinalize &&
+                              item.event_type != IntegrationEventType.MediaDelete &&
+                              item.event_type != IntegrationEventType.UserDelete &&
+                              item.event_type != IntegrationEventType.SearchDelete &&
+                              item.event_type != IntegrationEventType.RecommendationUserDelete &&
+                              item.event_type != IntegrationEventType.RecommendationContentDelete &&
+                              item.event_type != IntegrationEventType.MessagingUserDelete &&
+                              item.created_at < cutoff)
+                .ToListAsync(cancellationToken);
+            _dbContext.IntegrationOutboxTb.RemoveRange(deadLetters);
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        await _dbContext.IntegrationOutboxTb
+            .Where(item => item.status == IntegrationOutboxStatus.DeadLetter &&
+                          item.event_type != IntegrationEventType.MediaFinalize &&
+                          item.event_type != IntegrationEventType.MediaDelete &&
+                          item.event_type != IntegrationEventType.UserDelete &&
+                          item.event_type != IntegrationEventType.SearchDelete &&
+                          item.event_type != IntegrationEventType.RecommendationUserDelete &&
+                          item.event_type != IntegrationEventType.RecommendationContentDelete &&
+                          item.event_type != IntegrationEventType.MessagingUserDelete &&
+                          item.created_at < cutoff)
             .ExecuteDeleteAsync(cancellationToken);
     }
 

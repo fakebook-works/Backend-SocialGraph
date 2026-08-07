@@ -67,6 +67,10 @@ public sealed class IntegrationOutboxWorker : BackgroundService
                 {
                     var retention = TimeSpan.FromDays(Math.Clamp(_options.CompletedRetentionDays, 1, 365));
                     await store.DeleteCompletedBeforeAsync(DateTimeOffset.UtcNow - retention, stoppingToken);
+                    var deadLetterRetention = TimeSpan.FromDays(Math.Clamp(_options.DeadLetterRetentionDays, 1, 3_650));
+                    await store.DeleteDeadLettersBeforeAsync(
+                        DateTimeOffset.UtcNow - deadLetterRetention,
+                        stoppingToken);
                     lastCleanup = DateTimeOffset.UtcNow;
                 }
             }

@@ -67,6 +67,60 @@ public sealed class IntegrationOutboxStoreTests
         Assert.Equal(1, claimed.attempts);
     }
 
+    [Fact]
+    public async Task Claim_PrioritizesMediaLifecycleRepairRows()
+    {
+        await using var dbContext = CreateDbContext();
+        var store = CreateStore(dbContext);
+        var media = await store.EnqueueAsync(
+            IntegrationEventType.MediaFinalize,
+            null,
+            "media-key",
+            "{\"references\":[]}");
+        var regular = await store.EnqueueAsync("search.upsert.v1", 42, "regular-key", "{}");
+
+        var claimed = await store.ClaimAsync("worker", 2, TimeSpan.FromMinutes(5));
+
+        Assert.Equal(new[] { media.id, regular.id }, claimed.Select(item => item.id));
+    }
+
+    [Fact]
+    public async Task DeadLetterCleanup_RetainsAndReclaimsUnprocessedMediaLifecycleRows()
+    {
+        await using var dbContext = CreateDbContext();
+        var store = CreateStore(dbContext);
+        var media = await store.EnqueueAsync(
+            IntegrationEventType.MediaDelete,
+            null,
+            "old-media-delete",
+            "{\"references\":[]}");
+        media.status = IntegrationOutboxStatus.DeadLetter;
+        media.created_at = DateTimeOffset.UtcNow.AddDays(-90);
+        media.last_error = "old deployment retired this row";
+        var erasure = await store.EnqueueAsync(
+            IntegrationEventType.MessagingUserDelete,
+            42,
+            "old-messaging-erasure",
+            "{}");
+        erasure.status = IntegrationOutboxStatus.DeadLetter;
+        erasure.created_at = DateTimeOffset.UtcNow.AddDays(-90);
+        erasure.last_error = "old deployment retired erasure";
+        var ordinary = await store.EnqueueAsync("search.upsert.v1", 42, "old-search-upsert", "{}");
+        ordinary.status = IntegrationOutboxStatus.DeadLetter;
+        ordinary.created_at = DateTimeOffset.UtcNow.AddDays(-90);
+        ordinary.last_error = "ordinary poison event";
+        await dbContext.SaveChangesAsync();
+
+        await store.DeleteDeadLettersBeforeAsync(DateTimeOffset.UtcNow.AddDays(-30));
+
+        Assert.DoesNotContain(dbContext.IntegrationOutboxTb, item => item.id == ordinary.id);
+        Assert.Contains(dbContext.IntegrationOutboxTb, item => item.id == media.id);
+        Assert.Contains(dbContext.IntegrationOutboxTb, item => item.id == erasure.id);
+        var reclaimed = await store.ClaimAsync("repair-worker", 10, TimeSpan.FromMinutes(5));
+        Assert.Equal([media.id, erasure.id], reclaimed.Select(item => item.id));
+        Assert.All(reclaimed, item => Assert.Equal(IntegrationOutboxStatus.Processing, item.status));
+    }
+
     private static MyDbContext CreateDbContext()
     {
         return new MyDbContext(new DbContextOptionsBuilder<MyDbContext>()

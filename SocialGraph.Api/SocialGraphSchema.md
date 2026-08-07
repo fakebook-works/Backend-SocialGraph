@@ -221,7 +221,7 @@ CREATE INDEX idx_associations_inverse ON Associations (id2, atype, id1);
 
 -- ** Typed GraphQL additions ** --
 -----------------------------------
-Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng.
+Không còn association Owned. Media graph chỉ tồn tại khi còn ít nhất một association Contained từ post/reel/story; detach parent cuối cùng sẽ xóa Media và asset tương ứng. Mỗi object Media dùng reference ổn định `socialgraph:media:<mediaId>` ở Upload Server; avatar/background user và group dùng reference slot riêng. Vì vậy xoá Media A luôn detach đúng A, không xoá nhầm file đang được Media B hoặc profile khác tái sử dụng. Exact reference được authorize trước commit bằng `operationAt` từ DB; response bắt buộc có `exactReferences=true`, `lifecycleVersion>=3` và `referenceCount`. Nếu parent transaction thất bại, service best-effort detach đúng reservation của attempt đó với cùng timestamp. Outbox mới gửi `references + operationAt`, vẫn đọc được row URL-only cũ khi rolling deploy; lỗi lifecycle tạm thời retry lâu dài bằng backoff có giới hạn thay vì chết sau budget chung. Ownerless attach/repair online không được phép; missing legacy refs phải reconcile offline.
 updatePost(input: { id, privacy?, content?, media? }) áp dụng cho feed post, group post và reel; feed post/reel dùng cùng privacy 0/1/2/3. Field bị omit được giữ nguyên; media=[] detach toàn bộ và garbage-collect media không còn parent.
 Home post candidates gồm feed post, group post và reel. Reel được hydrate thành `ReelDetail` trong union `HomePost` và frontend dùng chung card hiển thị với feed post. `createReel` nhận `aspectRatio` trong khoảng 9/16..16/9 cùng `focalPointX`/`focalPointY` trong [0,1]; `ContentResult` và `ReelDetail` trả lại đủ metadata trình bày này. Client cũ có thể bỏ qua focal point và sẽ được căn giữa.
 Fast-search hydration không nhận `viewerId` từ input. `UserSearchResult` trả `viewerIsSelf`,
@@ -237,6 +237,10 @@ trong khoảng UTC `[00:00 hôm qua, 00:00 hôm nay)`. Đây là projection tổ
 Gateway context; kết quả clamp tối đa 12 và chỉ là giao của Friend hiện tại với Member/Admin hiện tại của đúng
 group, sau khi lọc block hai chiều và user đã xoá. Query vẫn dùng được khi group riêng tư có request chờ duyệt,
 nhưng không trả người lạ hay phần còn lại của roster riêng tư.
+`groupInviteCandidates(groupId, limit, cursor)` là projection riêng cho picker mời thành viên, không tái sử
+dụng danh sách Friend chung. Chỉ Member/Admin hiện tại của group mới đọc được; kết quả tối đa 50 mỗi trang và
+chỉ gồm bạn bè hiện tại không bị block, chưa là Member/Admin và chưa có GroupJoinRequest ở cả chiều forward
+lẫn inverse. `inviteGroupUser` kiểm tra lại cùng trạng thái trước khi tạo notification.
 `profilePosts(userId, cursor, limit)` là luồng authored hợp nhất của tab Tất cả trên profile: trả cả
 `FeedPostDetail` và `ReelDetail` theo thứ tự association; `GroupPostDetail` luôn bị loại và chỉ được đọc
 qua query có scope group (`groupPosts`/`groupUserPosts`). `profileReels` vẫn chỉ trả Reel cho tab riêng.
@@ -275,6 +279,9 @@ likedReels/sharedReels/watchedReels(cursor, limit) luôn lấy viewer từ trust
 removeUserAvatar/removeUserBackground/removeGroupAvatar/removeGroupBackground đặt URL thành chuỗi rỗng với owner/admin authorization.
 inviteGroupUser yêu cầu người mời là member/admin hiện tại và target là bạn hiện tại, áp dụng block hai chiều,
 chỉ gửi notification action 6 và không tự thêm member; share feed/story gửi action 9 cho source author và bỏ qua self-notify.
+Permission nội bộ của Messenger tách rõ direct messaging và feature friend-only: CREATE_DIRECT/SEND_DIRECT
+cho mọi user hiện hữu không tự nhắm chính mình và không block hai chiều; ADD_GROUP_MEMBERS/VIEW_PRESENCE vẫn
+yêu cầu Friend, còn INSPECT_BLOCK chỉ trả trạng thái block theo hướng và không cấp quyền gửi.
 
 -- ** Mention trong content ** --
 --------------------------------

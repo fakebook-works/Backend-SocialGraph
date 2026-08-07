@@ -42,6 +42,7 @@ public sealed class GroupShortcutServiceTests
         var service = CreateService(context, objects);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.UpdateGroupAsync(
+            UserId,
             new UpdateGroupInput(300, null, null, null, null, privacy)));
 
         objects.Verify(item => item.UpdateObjectAsync(
@@ -571,6 +572,75 @@ public sealed class GroupShortcutServiceTests
         objects.VerifyAll();
         associations.VerifyAll();
         external.Verify(item => item.DeleteSearchIndexAsync(groupId, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task DeleteGroup_TerminalTransactionQueuesDescendantCommentMediaBeforePostCleanup()
+    {
+        await using var context = CreateContext();
+        const long groupId = 380;
+        const long postId = 381;
+        const long commentId = 382;
+        const long replyId = 383;
+        const long postMediaId = 384;
+        const long commentMediaId = 385;
+        const long replyMediaId = 386;
+        context.ObjectsTb.AddRange(
+            new Objects { id = commentId, otype = GraphObjectType.Comment, data = "{}" },
+            new Objects { id = replyId, otype = GraphObjectType.Comment, data = "{}" },
+            new Objects { id = postMediaId, otype = GraphObjectType.Media, data = GraphJson.MediaJson(0, "/media/files/post.avif") },
+            new Objects { id = commentMediaId, otype = GraphObjectType.Media, data = GraphJson.MediaJson(0, "/media/files/comment.avif") },
+            new Objects { id = replyMediaId, otype = GraphObjectType.Media, data = GraphJson.MediaJson(0, "/media/files/reply.avif") });
+        context.AssociationsTb.AddRange(
+            Edge(UserId, GraphAssociationType.Member, groupId, 1),
+            Edge(UserId, GraphAssociationType.Admin, groupId, 1),
+            Edge(groupId, GraphAssociationType.HaveMember, UserId, 1),
+            Edge(groupId, GraphAssociationType.HaveAdmin, UserId, 1),
+            Edge(groupId, GraphAssociationType.Published, postId, 2),
+            Edge(postId, GraphAssociationType.HaveComment, commentId, 3),
+            Edge(commentId, GraphAssociationType.HaveComment, replyId, 4),
+            Edge(postId, GraphAssociationType.Contained, postMediaId, 5),
+            Edge(commentId, GraphAssociationType.Contained, commentMediaId, 6),
+            Edge(replyId, GraphAssociationType.Contained, replyMediaId, 7));
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Strict);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson("Terminal", 1)));
+        objects.Setup(item => item.DeleteObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var associations = new Mock<IAssociationService>(MockBehavior.Strict);
+        associations.Setup(item => item.DeleteObjectAssociationsAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(4);
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var content = new Mock<IContentGraphService>(MockBehavior.Strict);
+        content.Setup(item => item.DeleteContentAsync(postId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var userGraph = new UserGraphService(
+            objects.Object,
+            associations.Object,
+            external.Object,
+            context);
+        var service = new GroupGraphService(
+            context,
+            objects.Object,
+            associations.Object,
+            external.Object,
+            new BlockVisibilityService(context),
+            userGraph,
+            TimeProvider.System,
+            content.Object);
+
+        Assert.True(await service.DeleteGroupAsync(UserId, groupId));
+
+        external.Verify(item => item.DeleteMediaAsync(
+            It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                references.Any(reference => reference == MediaLifecycleReferences.ForMedia(postMediaId, "/media/files/post.avif")) &&
+                references.Any(reference => reference == MediaLifecycleReferences.ForMedia(commentMediaId, "/media/files/comment.avif")) &&
+                references.Any(reference => reference == MediaLifecycleReferences.ForMedia(replyMediaId, "/media/files/reply.avif"))),
+            null,
+            It.IsAny<CancellationToken>()), Times.Once);
+        content.VerifyAll();
     }
 
     [Fact]

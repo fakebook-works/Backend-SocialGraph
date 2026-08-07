@@ -25,8 +25,19 @@ public interface IExternalServiceClient
     /// <param name="ownerUserId">
     /// When supplied, the Upload service only acts on assets owned by this user. Callers pass it
     /// wherever the acting user is necessarily the media owner (avatars, covers, authored content)
-    /// so a stored URL can never be used to finalize or delete somebody else's asset.
+    /// so a stored URL can never be used to attach or detach somebody else's asset.
     /// </param>
-    Task FinalizeMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default);
-    Task DeleteMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default);
+    Task<DateTimeOffset> GetMediaOperationTimeAsync(CancellationToken cancellationToken = default);
+    Task FinalizeMediaAsync(IReadOnlyList<MediaLifecycleReference> references, long? ownerUserId, CancellationToken cancellationToken = default);
+    Task FinalizeMediaAsync(
+        IReadOnlyList<MediaLifecycleReference> references,
+        long? ownerUserId,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken = default);
+    Task DeleteMediaAsync(IReadOnlyList<MediaLifecycleReference> references, long? ownerUserId, CancellationToken cancellationToken = default);
+    Task DeleteMediaAsync(
+        IReadOnlyList<MediaLifecycleReference> references,
+        long? ownerUserId,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken = default);
 }

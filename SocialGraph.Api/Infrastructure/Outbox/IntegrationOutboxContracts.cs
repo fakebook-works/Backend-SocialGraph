@@ -1,6 +1,7 @@
 namespace SocialGraph.Api.Infrastructure.Outbox;
 
 using SocialGraph.Api.Database;
+using SocialGraph.Api.Service;
 
 public static class IntegrationEventType
 {
@@ -41,6 +42,7 @@ public sealed class IntegrationOutboxOptions
     public int MaxDelayMinutes { get; set; } = 15;
     public int LockTimeoutMinutes { get; set; } = 5;
     public int CompletedRetentionDays { get; set; } = 7;
+    public int DeadLetterRetentionDays { get; set; } = 30;
 }
 
 public sealed record NotificationCreateEvent(
@@ -74,13 +76,19 @@ public sealed record RecommendationInteractionEvent(long UserId, long TargetId, 
 
 public sealed record MessagingUserEvent(long UserId);
 
-// OwnerUserId is optional so outbox rows written before owner-scoped media lifecycle
-// still deserialize; a null owner means the Upload service applies no ownership filter.
-public sealed record MediaLifecycleEvent(IReadOnlyList<string> Urls, long? OwnerUserId = null);
+// Urls remains nullable for rolling compatibility with outbox rows written before stable parent
+// references were introduced. New rows always use References + OperationAt. OwnerUserId is
+// optional because cleanup of stored group/profile state may legitimately outlive the uploader.
+public sealed record MediaLifecycleEvent(
+    IReadOnlyList<string>? Urls = null,
+    long? OwnerUserId = null,
+    IReadOnlyList<MediaLifecycleReference>? References = null,
+    DateTimeOffset? OperationAt = null);
 
 public interface IIntegrationOutboxStore
 {
     Task EnsureSchemaAsync(CancellationToken cancellationToken = default);
+    Task<DateTimeOffset> GetCurrentTimeAsync(CancellationToken cancellationToken = default);
     Task<IntegrationOutboxMessage> EnqueueAsync(
         string eventType,
         long? aggregateId,
@@ -96,6 +104,7 @@ public interface IIntegrationOutboxStore
     Task MarkFailedAsync(Guid id, string error, TimeSpan delay, bool deadLetter, CancellationToken cancellationToken = default);
     Task ReleaseAsync(Guid id, CancellationToken cancellationToken = default);
     Task DeleteCompletedBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default);
+    Task DeleteDeadLettersBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<IntegrationOutboxMessage>> ListDeadLettersAsync(
         int limit,
         CancellationToken cancellationToken = default);

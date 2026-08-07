@@ -246,7 +246,16 @@ public sealed class ContentProjectionTests
         const long commentId = 9_000_000_000_000_008;
         const long mediaId = 9_000_000_000_000_009;
         const string mediaUrl = "https://cdn.example/comment.jpg";
+        context.ObjectsTb.Add(new Objects
+        {
+            id = PostId,
+            otype = GraphObjectType.FeedPost,
+            data = PostJson("target", 0)
+        });
+        await context.SaveChangesAsync();
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson("target", 0)));
         objects.Setup(item => item.AddObjectAsync(GraphObjectType.Comment, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(commentId, GraphObjectType.Comment, ContentJson(string.Empty)));
         objects.Setup(item => item.AddObjectAsync(GraphObjectType.Media, It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -270,8 +279,12 @@ public sealed class ContentProjectionTests
             mediaId,
             It.IsAny<CancellationToken>()), Times.Once);
         external.Verify(item => item.FinalizeMediaAsync(
-            It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { mediaUrl })),
+            It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                references.Count == 1 &&
+                references[0].Url == mediaUrl &&
+                references[0].ReferenceId == $"socialgraph:media:{mediaId}"),
             It.IsAny<long?>(),
+            It.IsAny<DateTimeOffset>(),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -395,6 +408,14 @@ public sealed class ContentProjectionTests
         const long oldMediaId = 81;
         const long newMediaId = 82;
         string? patch = null;
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = PostId,
+            atype = GraphAssociationType.Contained,
+            id2 = oldMediaId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson("old", 1)));
@@ -408,6 +429,18 @@ public sealed class ContentProjectionTests
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(AuthorId, 1) }, null));
         associations.Setup(item => item.RetrieveAssociationAsync(PostId, GraphAssociationType.Contained, null, 100, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AssociationPageResult(new[] { new AssociationEdgeResult(oldMediaId, 1) }, null));
+        associations.Setup(item => item.DeleteOneAssociationAsync(
+                PostId,
+                GraphAssociationType.Contained,
+                oldMediaId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                context.AssociationsTb.Remove(context.AssociationsTb.Single(edge =>
+                    edge.id1 == PostId && edge.atype == GraphAssociationType.Contained && edge.id2 == oldMediaId));
+                context.SaveChanges();
+                return true;
+            });
         var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
         var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
 
@@ -428,6 +461,102 @@ public sealed class ContentProjectionTests
             PostId,
             "updated",
             It.Is<IReadOnlyList<string>>(urls => urls.SequenceEqual(new[] { "https://cdn/new.jpg" })),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task UpdatePost_ReusedAssetDetachesOnlyTheRemovedMediaObjectReference()
+    {
+        await using var context = CreateContext();
+        const long oldMediaId = 91;
+        const long newMediaId = 92;
+        const string reusedUrl = "/media/files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jpg";
+        context.ObjectsTb.Add(new Objects
+        {
+            id = oldMediaId,
+            otype = GraphObjectType.Media,
+            data = MediaJson(GraphMediaType.Photo, reusedUrl)
+        });
+        context.AssociationsTb.Add(new Associations
+        {
+            id1 = PostId,
+            atype = GraphAssociationType.Contained,
+            id2 = oldMediaId,
+            time = 1
+        });
+        await context.SaveChangesAsync();
+
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(PostId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson("post", 0)));
+        objects.Setup(item => item.UpdateObjectAsync(
+                PostId,
+                GraphObjectType.FeedPost,
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(PostId, GraphObjectType.FeedPost, PostJson("post", 0)));
+        objects.Setup(item => item.AddObjectAsync(
+                GraphObjectType.Media,
+                It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(
+                newMediaId,
+                GraphObjectType.Media,
+                MediaJson(GraphMediaType.Photo, reusedUrl)));
+        objects.Setup(item => item.DeleteObjectAsync(oldMediaId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                PostId,
+                GraphAssociationType.AuthoredBy,
+                null,
+                1,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(AuthorId, 1) },
+                null));
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                PostId,
+                GraphAssociationType.Contained,
+                null,
+                100,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(oldMediaId, 1) },
+                null));
+        associations.Setup(item => item.DeleteOneAssociationAsync(
+                PostId,
+                GraphAssociationType.Contained,
+                oldMediaId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                context.AssociationsTb.Remove(context.AssociationsTb.Single(edge =>
+                    edge.id1 == PostId && edge.atype == GraphAssociationType.Contained && edge.id2 == oldMediaId));
+                context.SaveChanges();
+                return true;
+            });
+
+        var external = new Mock<IExternalServiceClient>(MockBehavior.Loose);
+        var service = new ContentGraphService(context, objects.Object, associations.Object, external.Object);
+
+        await service.UpdatePostAsync(new UpdatePostInput(
+            PostId,
+            Media: new[] { new MediaInput(GraphMediaType.Photo, reusedUrl) }));
+
+        external.Verify(item => item.FinalizeMediaAsync(
+            It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                references.Count == 1 &&
+                references[0] == MediaLifecycleReferences.ForMedia(newMediaId, reusedUrl)),
+            AuthorId,
+            It.IsAny<DateTimeOffset>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+        external.Verify(item => item.DeleteMediaAsync(
+            It.Is<IReadOnlyList<MediaLifecycleReference>>(references =>
+                references.Count == 1 &&
+                references[0] == MediaLifecycleReferences.ForMedia(oldMediaId, reusedUrl)),
+            null,
             It.IsAny<CancellationToken>()), Times.Once);
     }
 

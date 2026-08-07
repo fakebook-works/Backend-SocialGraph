@@ -10,6 +10,7 @@ using SocialGraph.Api.Infrastructure.Outbox;
 
 public sealed class ExternalServiceClient : IExternalServiceTransport
 {
+    private const int MaxMediaLifecycleBatchSize = 512;
     private const string CorrelationHeader = "X-Correlation-ID";
     private const string AuthenticationSecretHeader = "X-Internal-AuthenticationService-Secret";
     private const string SearchSecretHeader = "X-Internal-SearchService-Secret";
@@ -199,31 +200,143 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
             case IntegrationEventType.MediaFinalize:
                 {
                     var payload = Deserialize<MediaLifecycleEvent>(message.payload);
+                    if (payload.References is { Count: > 0 } && payload.Urls is { Count: > 0 })
+                    {
+                        throw new PermanentOutboxException("Upload media finalize payload mixes lifecycle protocol versions.");
+                    }
+                    var references = NormalizeMediaReferences(payload.References);
+                    if (references.Count > 0)
+                    {
+                        if (payload.OperationAt is null)
+                        {
+                            throw new PermanentOutboxException(
+                                "Exact upload media finalize payload is missing its authoritative operation time.");
+                        }
+                        if (payload.OwnerUserId is null or <= 0)
+                        {
+                            throw new PermanentOutboxException(
+                                "Exact upload media finalize payload is missing its trusted owner.");
+                        }
+                        if (message.attempts > 1)
+                        {
+                            var authorizationBody = await SendOutboxRequiredResponseAsync(
+                                "UploadServiceRenewMediaAuthorization",
+                                HttpMethod.Post,
+                                GetInternalServiceUrl("Upload", "internal/media/authorize"),
+                                new
+                                {
+                                    references,
+                                    ownerUserId = payload.OwnerUserId.Value,
+                                    operationAt = payload.OperationAt.Value
+                                },
+                                UploadSecretHeader,
+                                "InternalServices:Upload:SharedSecret",
+                                message.idempotency_key + "-renew",
+                                cancellationToken);
+                            EnsureExactMediaAuthorizationAcknowledged(
+                                references,
+                                authorizationBody);
+                        }
+                        var referenceResponseBody = await SendOutboxRequiredResponseAsync(
+                            "UploadServiceFinalizeMedia",
+                            HttpMethod.Post,
+                            GetInternalServiceUrl("Upload", "internal/media/finalize"),
+                            new
+                            {
+                                references,
+                                ownerUserId = payload.OwnerUserId,
+                                operationAt = payload.OperationAt.Value
+                            },
+                            UploadSecretHeader,
+                            "InternalServices:Upload:SharedSecret",
+                            message.idempotency_key,
+                            cancellationToken);
+                        EnsureMediaLifecycleCompleted(
+                            references.Count,
+                            referenceResponseBody,
+                            "finalized",
+                            "finalize");
+                        break;
+                    }
+
+                    var legacyUrls = NormalizeLegacyMediaUrls(payload.Urls);
+                    if (legacyUrls.Count == 0)
+                    {
+                        throw new PermanentOutboxException("Upload media finalize payload contains no valid lifecycle target.");
+                    }
                     var responseBody = await SendOutboxRequiredResponseAsync(
                         "UploadServiceFinalizeMedia",
                         HttpMethod.Post,
                         GetInternalServiceUrl("Upload", "internal/media/finalize"),
-                        new { urls = payload.Urls, ownerUserId = payload.OwnerUserId },
+                        new { urls = legacyUrls, ownerUserId = payload.OwnerUserId },
                         UploadSecretHeader,
                         "InternalServices:Upload:SharedSecret",
                         message.idempotency_key,
                         cancellationToken);
-                    EnsureMediaFinalizeCompleted(payload.Urls, responseBody);
+                    EnsureMediaFinalizeCompleted(legacyUrls, responseBody);
                     break;
                 }
             case IntegrationEventType.MediaDelete:
                 {
                     var payload = Deserialize<MediaLifecycleEvent>(message.payload);
-                    await SendOutboxRequiredAsync(
+                    if (payload.References is { Count: > 0 } && payload.Urls is { Count: > 0 })
+                    {
+                        throw new PermanentOutboxException("Upload media delete payload mixes lifecycle protocol versions.");
+                    }
+                    var references = NormalizeMediaReferences(payload.References);
+                    if (references.Count > 0)
+                    {
+                        if (payload.OperationAt is null)
+                        {
+                            throw new PermanentOutboxException(
+                                "Exact upload media delete payload is missing its authoritative operation time.");
+                        }
+                        var responseBody = await SendOutboxRequiredResponseAsync(
+                            "UploadServiceDeleteMedia",
+                            HttpMethod.Post,
+                            GetInternalServiceUrl("Upload", "internal/media/delete"),
+                            new
+                            {
+                                references,
+                                ownerUserId = payload.OwnerUserId,
+                                operationAt = payload.OperationAt.Value
+                            },
+                            UploadSecretHeader,
+                            "InternalServices:Upload:SharedSecret",
+                            message.idempotency_key,
+                            cancellationToken,
+                            notFoundIsSuccess: true);
+                        EnsureMediaLifecycleCompleted(
+                            references.Count,
+                            responseBody,
+                            "detached",
+                            "delete");
+                        break;
+                    }
+
+                    var legacyUrls = NormalizeLegacyMediaUrls(payload.Urls);
+                    if (legacyUrls.Count == 0)
+                    {
+                        throw new PermanentOutboxException("Upload media delete payload contains no valid lifecycle target.");
+                    }
+                    var deleteResponseBody = await SendOutboxRequiredResponseAsync(
                         "UploadServiceDeleteMedia",
                         HttpMethod.Post,
                         GetInternalServiceUrl("Upload", "internal/media/delete"),
-                        new { urls = payload.Urls, ownerUserId = payload.OwnerUserId },
+                        new { urls = legacyUrls, ownerUserId = payload.OwnerUserId },
                         UploadSecretHeader,
                         "InternalServices:Upload:SharedSecret",
                         message.idempotency_key,
                         cancellationToken,
                         notFoundIsSuccess: true);
+                    // URL-only delete is retained only for old durable rows. Upload may
+                    // conservatively return scheduled=0 while an active/legacy pin remains;
+                    // acknowledging that would strand the row forever without a later retry.
+                    EnsureMediaLifecycleCompleted(
+                        legacyUrls.Count,
+                        deleteResponseBody,
+                        "scheduled",
+                        "delete");
                     break;
                 }
             default:
@@ -764,6 +877,145 @@ public sealed class ExternalServiceClient : IExternalServiceTransport
         {
             throw new HttpRequestException(
                 "Upload media finalize returned an invalid lifecycle response.",
+                exception);
+        }
+    }
+
+    private static IReadOnlyList<MediaLifecycleReference> NormalizeMediaReferences(
+        IReadOnlyList<MediaLifecycleReference>? references)
+    {
+        if (references is null || references.Count == 0)
+        {
+            return Array.Empty<MediaLifecycleReference>();
+        }
+        if (references.Count > MaxMediaLifecycleBatchSize)
+        {
+            throw new PermanentOutboxException("Upload media lifecycle reference batch is too large.");
+        }
+
+        if (references.Any(reference =>
+                reference is null ||
+                string.IsNullOrWhiteSpace(reference.Url) ||
+                string.IsNullOrWhiteSpace(reference.ReferenceId)))
+        {
+            throw new PermanentOutboxException("Upload media lifecycle payload contains an invalid parent reference.");
+        }
+
+        var normalized = references
+            .DistinctBy(
+                reference => $"{reference.ReferenceId}\n{reference.Url}",
+                StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (normalized
+            .GroupBy(reference => reference.ReferenceId, StringComparer.Ordinal)
+            .Any(group => group.Select(reference => reference.Url).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any()))
+        {
+            throw new PermanentOutboxException("One media parent reference targets multiple assets in one lifecycle event.");
+        }
+
+        return normalized;
+    }
+
+    private static IReadOnlyList<string> NormalizeLegacyMediaUrls(IReadOnlyList<string>? urls)
+    {
+        if (urls is null || urls.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+        if (urls.Count > MaxMediaLifecycleBatchSize)
+        {
+            throw new PermanentOutboxException("Upload media lifecycle URL batch is too large.");
+        }
+        return urls
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static void EnsureMediaLifecycleCompleted(
+        int expected,
+        string? responseBody,
+        string countProperty,
+        string operation)
+    {
+        if (expected == 0)
+        {
+            return;
+        }
+
+        // SendOutboxRequiredResponseAsync represents an allowed 404 as a null body.
+        // The target is already gone, so that is a complete delete; an actual 2xx empty
+        // body remains malformed and must retry/fail closed below.
+        if (responseBody is null && operation == "delete")
+        {
+            return;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody ?? string.Empty);
+            if (!document.RootElement.TryGetProperty(countProperty, out var countElement) ||
+                !countElement.TryGetInt32(out var count) ||
+                count != expected)
+            {
+                throw new HttpRequestException($"Upload media {operation} acknowledged an incomplete reference batch.");
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new HttpRequestException(
+                $"Upload media {operation} returned an invalid lifecycle response.",
+                exception);
+        }
+    }
+
+    private static void EnsureExactMediaAuthorizationAcknowledged(
+        IReadOnlyList<MediaLifecycleReference> references,
+        string? responseBody)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody ?? string.Empty);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("authorized", out var authorizedElement) ||
+                authorizedElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
+                !root.TryGetProperty("unauthorizedUrls", out var unauthorizedElement) ||
+                unauthorizedElement.ValueKind != JsonValueKind.Array ||
+                !root.TryGetProperty("exactReferences", out var exactElement) ||
+                exactElement.ValueKind != JsonValueKind.True ||
+                !root.TryGetProperty("lifecycleVersion", out var versionElement) ||
+                !versionElement.TryGetInt32(out var lifecycleVersion) ||
+                lifecycleVersion < 3 ||
+                !root.TryGetProperty("referenceCount", out var countElement) ||
+                !countElement.TryGetInt32(out var referenceCount) ||
+                referenceCount != references.Count)
+            {
+                throw new HttpRequestException(
+                    "Upload media renewal did not acknowledge the exact reference protocol.");
+            }
+
+            var requestedUrls = references
+                .Select(reference => reference.Url)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var unauthorizedUrls = unauthorizedElement
+                .EnumerateArray()
+                .Select(element => element.ValueKind == JsonValueKind.String ? element.GetString() : null)
+                .ToArray();
+            if (unauthorizedUrls.Any(url =>
+                    string.IsNullOrWhiteSpace(url) || !requestedUrls.Contains(url)) ||
+                authorizedElement.GetBoolean() != (unauthorizedUrls.Length == 0))
+            {
+                throw new HttpRequestException(
+                    "Upload media renewal returned an inconsistent authorization decision.");
+            }
+
+            // A false decision can mean a newer detach won. Finalize must still run with the
+            // original operation time so Upload can acknowledge that stale attach safely.
+        }
+        catch (JsonException exception)
+        {
+            throw new HttpRequestException(
+                "Upload media renewal returned malformed JSON.",
                 exception);
         }
     }

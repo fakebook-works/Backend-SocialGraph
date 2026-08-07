@@ -34,16 +34,6 @@ public sealed class UserGraphService : IUserGraphService
         _mediaOwnershipGuard = mediaOwnershipGuard;
     }
 
-    /// <summary>
-    /// Refuses client-supplied media URLs that <paramref name="ownerUserId"/> does not own.
-    /// Stored URLs drive permanent deletion, so accepting a foreign URL here would let any
-    /// user destroy another user's media by replacing their own avatar twice.
-    /// </summary>
-    private Task EnsureMediaOwnedAsync(long ownerUserId, IEnumerable<string?> urls, CancellationToken cancellationToken) =>
-        _mediaOwnershipGuard is null
-            ? Task.CompletedTask
-            : _mediaOwnershipGuard.EnsureOwnedAsync(ownerUserId, urls, cancellationToken);
-
     public async Task<CreateUserPayload> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
         SocialGraphObjectResult? user = null;
@@ -89,7 +79,17 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentOutOfRangeException(nameof(input.Privacy), "User privacy must be 0 (normal) or 1 (advanced).");
         }
 
-        await EnsureMediaOwnedAsync(input.Id, new[] { input.Avatar, input.Background }, cancellationToken);
+        JsonObject? currentProfileData = null;
+        if (input.Avatar is not null || input.Background is not null)
+        {
+            var currentProfile = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+            if (currentProfile?.otype != GraphObjectType.User)
+            {
+                return null;
+            }
+            currentProfileData = GraphJson.ParseObject(currentProfile.data);
+        }
+
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         var patchData = GraphJson.ParseObject(GraphJson.PatchJson(
             ("avatar", input.Avatar),
@@ -108,8 +108,26 @@ public sealed class UserGraphService : IUserGraphService
         }
         var patch = patchData.ToJsonString();
 
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
         try
         {
+            if (input.Avatar is not null || input.Background is not null)
+            {
+                if (transaction is not null)
+                {
+                    var lockedProfile = await LockUserRowAsync(input.Id, cancellationToken);
+                    if (lockedProfile is null)
+                    {
+                        commitAttempted = true;
+                        await transaction.CommitAsync(cancellationToken);
+                        return null;
+                    }
+                    currentProfileData = GraphJson.ParseObject(lockedProfile.data);
+                }
+            }
+
             if (input.Privacy is not null)
             {
                 // Serialize an account-mode change with new follow attempts. Without this,
@@ -118,14 +136,46 @@ public sealed class UserGraphService : IUserGraphService
                 await AcquireFollowPolicyLockAsync(input.Id, cancellationToken);
             }
 
+            var previousAvatar = input.Avatar is null
+                ? null
+                : GraphJson.String(currentProfileData!, "avatar");
+            var previousBackground = input.Background is null
+                ? null
+                : GraphJson.String(currentProfileData!, "background");
+            var nextReferences = new List<MediaLifecycleReference>(2);
+            if (!string.IsNullOrWhiteSpace(input.Avatar))
+            {
+                nextReferences.Add(MediaLifecycleReferences.ForUserAvatar(input.Id, input.Avatar));
+            }
+            if (!string.IsNullOrWhiteSpace(input.Background))
+            {
+                nextReferences.Add(MediaLifecycleReferences.ForUserBackground(input.Id, input.Background));
+            }
+            var mediaOperationAt = input.Avatar is not null || input.Background is not null
+                ? await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken)
+                : (DateTimeOffset?)null;
+            if (nextReferences.Count > 0 && mediaOperationAt is { } attachAt)
+            {
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    input.Id,
+                    nextReferences,
+                    attachAt,
+                    cancellationToken);
+            }
+
             var updated = await _objectService.UpdateObjectAsync(input.Id, GraphObjectType.User, patch, cancellationToken);
             if (updated is null)
             {
+                if (mediaReservation is not null)
+                {
+                    throw new InvalidOperationException("User profile could not be updated safely.");
+                }
                 if (transaction is not null)
                 {
+                    commitAttempted = true;
                     await transaction.CommitAsync(cancellationToken);
                 }
-
+                committed = true;
                 return null;
             }
 
@@ -145,14 +195,46 @@ public sealed class UserGraphService : IUserGraphService
                 await _externalServiceClient.UpdateSearchIndexAsync(input.Id, "user", input.Name, cancellationToken);
             }
 
+            if (input.Avatar is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(previousAvatar) &&
+                    !string.Equals(previousAvatar, input.Avatar, StringComparison.OrdinalIgnoreCase))
+                {
+                    await _externalServiceClient.DeleteMediaAsync(
+                        new[] { MediaLifecycleReferences.ForUserAvatar(input.Id, previousAvatar) },
+                        null,
+                        mediaOperationAt!.Value,
+                        cancellationToken);
+                }
+            }
+
+            if (input.Background is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(previousBackground) &&
+                    !string.Equals(previousBackground, input.Background, StringComparison.OrdinalIgnoreCase))
+                {
+                    await _externalServiceClient.DeleteMediaAsync(
+                        new[] { MediaLifecycleReferences.ForUserBackground(input.Id, previousBackground) },
+                        null,
+                        mediaOperationAt!.Value,
+                        cancellationToken);
+                }
+            }
+
             if (transaction is not null)
             {
+                commitAttempted = true;
                 await transaction.CommitAsync(cancellationToken);
             }
+            committed = true;
         }
         catch
         {
-            await RollbackAndInvalidateAsync(transaction, input.Id);
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, input.Id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
             throw;
         }
 
@@ -164,16 +246,6 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<bool> DeleteUserAsync(long userId, CancellationToken cancellationToken = default)
     {
-        var current = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
-        var currentData = current is null ? null : GraphJson.ParseObject(current.data);
-        var profileMedia = currentData is null
-            ? Array.Empty<string>()
-            : new[]
-            {
-                GraphJson.String(currentData, "avatar"),
-                GraphJson.String(currentData, "background")
-            }.Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-
         // Authored content is removed in bounded batches, each committing on its own.
         // Previously the whole deletion ran in a single transaction: one iteration per item
         // the user had ever written, each cascading into association and orphan-media
@@ -188,6 +260,34 @@ public sealed class UserGraphService : IUserGraphService
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         try
         {
+            var currentRow = await LockUserRowAsync(userId, cancellationToken);
+            if (currentRow is null)
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return false;
+            }
+
+            // Content creation locks this same user row before it allocates a post/media
+            // parent. Once this lock is held no new authored object can commit; a final
+            // re-scan closes the window between the bounded pre-cleanup pass and tombstone.
+            await DeleteAuthoredContentAsync(userId, cancellationToken);
+
+            var currentData = GraphJson.ParseObject(currentRow.data);
+            var profileMedia = new List<MediaLifecycleReference>(2);
+            var avatar = GraphJson.String(currentData, "avatar");
+            var background = GraphJson.String(currentData, "background");
+            if (!string.IsNullOrWhiteSpace(avatar))
+            {
+                profileMedia.Add(MediaLifecycleReferences.ForUserAvatar(userId, avatar));
+            }
+            if (!string.IsNullOrWhiteSpace(background))
+            {
+                profileMedia.Add(MediaLifecycleReferences.ForUserBackground(userId, background));
+            }
+
             await _associationService.DeleteObjectAssociationsAsync(userId, cancellationToken);
             var deleted = await _objectService.DeleteObjectAsync(userId, cancellationToken);
             if (deleted)
@@ -881,8 +981,6 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentException("Avatar source is invalid.");
         }
 
-        await EnsureMediaOwnedAsync(userId, new[] { avatarUrl, originalUrl }, cancellationToken);
-
         ProfileAvatarSourceResult? avatarSource = null;
         if (hasContentSource)
         {
@@ -895,8 +993,24 @@ public sealed class UserGraphService : IUserGraphService
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         long? createdActivityId = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
         try
         {
+            var lockedUser = transaction is null
+                ? new Objects { id = currentUser.id, otype = currentUser.otype, data = currentUser.data }
+                : await LockUserRowAsync(userId, cancellationToken);
+            if (lockedUser is null)
+            {
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
             if (!string.IsNullOrWhiteSpace(originalUrl))
             {
                 if (_contentGraphService is null)
@@ -925,8 +1039,18 @@ public sealed class UserGraphService : IUserGraphService
                 avatarSource = new ProfileAvatarSourceResult(activity.Id, originalMedia.Id);
             }
 
-            var currentData = GraphJson.ParseObject(currentUser.data);
+            var currentData = GraphJson.ParseObject(lockedUser.data);
             var previousUrl = GraphJson.String(currentData, "avatar");
+            var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(avatarUrl))
+            {
+                var references = new[] { MediaLifecycleReferences.ForUserAvatar(userId, avatarUrl) };
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    userId,
+                    references,
+                    operationAt,
+                    cancellationToken);
+            }
             var updated = await _objectService.UpdateObjectAsync(
                 userId,
                 GraphObjectType.User,
@@ -938,26 +1062,28 @@ public sealed class UserGraphService : IUserGraphService
                 throw new InvalidOperationException("Profile avatar could not be updated safely.");
             }
 
-            if (!string.IsNullOrWhiteSpace(avatarUrl))
-            {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { avatarUrl }, userId, cancellationToken);
-            }
             if (!string.IsNullOrWhiteSpace(previousUrl) &&
                 !string.Equals(previousUrl, avatarUrl, StringComparison.OrdinalIgnoreCase))
             {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, userId, cancellationToken);
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForUserAvatar(userId, previousUrl) },
+                    null,
+                    operationAt,
+                    cancellationToken);
             }
 
             if (transaction is not null)
             {
+                commitAttempted = true;
                 await transaction.CommitAsync(cancellationToken);
             }
+            committed = true;
 
             return await GetProfileAsync(userId, cancellationToken);
         }
         catch
         {
-            if (transaction is not null)
+            if (!committed && !commitAttempted && transaction is not null)
             {
                 await transaction.RollbackAsync(CancellationToken.None);
                 await _objectService.InvalidateObjectCacheAsync(userId);
@@ -965,6 +1091,10 @@ public sealed class UserGraphService : IUserGraphService
                 {
                     await _objectService.InvalidateObjectCacheAsync(activityId);
                 }
+            }
+            if (!committed && !commitAttempted)
+            {
+                await CancelReservationBestEffortAsync(mediaReservation);
             }
             throw;
         }
@@ -1097,47 +1227,100 @@ public sealed class UserGraphService : IUserGraphService
             throw new ArgumentOutOfRangeException(nameof(privacy), "Feed privacy must be between 0 and 3.");
         }
 
-        await EnsureMediaOwnedAsync(userId, new[] { backgroundUrl, originalUrl }, cancellationToken);
-
         await using var transaction = await BeginTransactionAsync(cancellationToken);
-        var currentData = GraphJson.ParseObject(currentUser.data);
-        var previousUrl = GraphJson.String(currentData, "background");
-        var updated = await _objectService.UpdateObjectAsync(
-            userId,
-            GraphObjectType.User,
-            GraphJson.PatchJson(("background", backgroundUrl)),
-            cancellationToken);
-
-        if (updated is not null)
+        long? createdActivityId = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
         {
+            var lockedUser = transaction is null
+                ? new Objects { id = currentUser.id, otype = currentUser.otype, data = currentUser.data }
+                : await LockUserRowAsync(userId, cancellationToken);
+            if (lockedUser is null)
+            {
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
+            var currentData = GraphJson.ParseObject(lockedUser.data);
+            var previousUrl = GraphJson.String(currentData, "background");
+            var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(backgroundUrl))
             {
-                await _externalServiceClient.FinalizeMediaAsync(new[] { backgroundUrl }, userId, cancellationToken);
-            }
-            if (!string.IsNullOrWhiteSpace(previousUrl) &&
-                !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
-            {
-                await _externalServiceClient.DeleteMediaAsync(new[] { previousUrl }, userId, cancellationToken);
-            }
-        }
-
-        if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
-        {
-            await _contentGraphService.CreateFeedPostAsync(
-                new CreateFeedPostInput(
+                var references = new[] { MediaLifecycleReferences.ForUserBackground(userId, backgroundUrl) };
+                mediaReservation = await ReserveAndQueueMediaAsync(
                     userId,
-                    CoverPhotoActivityContent,
-                    0,
-                    new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
+                    references,
+                    operationAt,
+                    cancellationToken);
+            }
+            var updated = await _objectService.UpdateObjectAsync(
+                userId,
+                GraphObjectType.User,
+                GraphJson.PatchJson(("background", backgroundUrl)),
                 cancellationToken);
-        }
 
-        if (transaction is not null)
+            if (updated is null)
+            {
+                throw new InvalidOperationException("Profile background could not be updated safely.");
+            }
+
+            if (updated is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(previousUrl) &&
+                    !string.Equals(previousUrl, backgroundUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    await _externalServiceClient.DeleteMediaAsync(
+                        new[] { MediaLifecycleReferences.ForUserBackground(userId, previousUrl) },
+                        null,
+                        operationAt,
+                        cancellationToken);
+                }
+            }
+
+            if (updated is not null && !string.IsNullOrWhiteSpace(originalUrl) && _contentGraphService is not null)
+            {
+                var activity = await _contentGraphService.CreateFeedPostAsync(
+                    new CreateFeedPostInput(
+                        userId,
+                        CoverPhotoActivityContent,
+                        0,
+                        new[] { new MediaInput(GraphMediaType.Photo, originalUrl) }),
+                    cancellationToken);
+                createdActivityId = activity.Id;
+            }
+
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+
+            return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
+        }
+        catch
         {
-            await transaction.CommitAsync(cancellationToken);
+            if (!committed && !commitAttempted && transaction is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                await _objectService.InvalidateObjectCacheAsync(userId);
+                if (createdActivityId is { } activityId)
+                {
+                    await _objectService.InvalidateObjectCacheAsync(activityId);
+                }
+            }
+            if (!committed && !commitAttempted)
+            {
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
         }
-
-        return updated is null ? null : await GetProfileAsync(userId, cancellationToken);
     }
 
     public Task<UserProfileResult?> ChangeUserBackgroundAsync(
@@ -1396,8 +1579,9 @@ public sealed class UserGraphService : IUserGraphService
     /// </summary>
     /// <remarks>
     /// Each batch re-reads the remaining authored ids rather than paging a snapshot, because
-    /// deleting content removes the very rows a cursor would sit on. Progress is guaranteed:
-    /// a batch that deletes nothing ends the loop, so a stubborn item cannot spin forever.
+    /// deleting content removes the very rows a cursor would sit on. A batch that deletes
+    /// nothing fails closed, so a stubborn item cannot spin forever or be orphaned by a user
+    /// tombstone that incorrectly proceeds.
     /// </remarks>
     private async Task DeleteAuthoredContentAsync(long userId, CancellationToken cancellationToken)
     {
@@ -1449,8 +1633,10 @@ public sealed class UserGraphService : IUserGraphService
 
             if (removed == 0)
             {
-                // Nothing in this batch could be deleted; stop rather than loop on it.
-                return;
+                // Do not delete the user while authored parents (and their media refs)
+                // remain. Failing closed is safer than silently orphaning the batch.
+                throw new InvalidOperationException(
+                    "Authored content could not be removed during account deletion.");
             }
         }
     }
@@ -1465,6 +1651,83 @@ public sealed class UserGraphService : IUserGraphService
         }
 
         return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    private async Task<MediaReservation> ReserveAndQueueMediaAsync(
+        long ownerUserId,
+        IReadOnlyList<MediaLifecycleReference> references,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken)
+    {
+        if (references.Count == 0)
+        {
+            throw new ArgumentException("A media reservation requires at least one reference.", nameof(references));
+        }
+
+        if (_mediaOwnershipGuard is not null)
+        {
+            await _mediaOwnershipGuard.EnsureReferencesOwnedAsync(
+                ownerUserId,
+                references,
+                operationAt,
+                cancellationToken);
+        }
+
+        var reservation = new MediaReservation(ownerUserId, references, operationAt);
+        try
+        {
+            await _externalServiceClient.FinalizeMediaAsync(
+                references,
+                ownerUserId,
+                operationAt,
+                cancellationToken);
+            return reservation;
+        }
+        catch
+        {
+            await CancelReservationBestEffortAsync(reservation);
+            throw;
+        }
+    }
+
+    private Task CancelReservationBestEffortAsync(MediaReservation? reservation)
+    {
+        return reservation is null || _mediaOwnershipGuard is null
+            ? Task.CompletedTask
+            : _mediaOwnershipGuard.CancelReferenceReservationBestEffortAsync(
+                reservation.OwnerUserId,
+                reservation.References,
+                reservation.OperationAt,
+                CancellationToken.None);
+    }
+
+    private sealed record MediaReservation(
+        long OwnerUserId,
+        IReadOnlyList<MediaLifecycleReference> References,
+        DateTimeOffset OperationAt);
+
+    private async Task<Objects?> LockUserRowAsync(long userId, CancellationToken cancellationToken)
+    {
+        if (_dbContext is null)
+        {
+            var current = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+            return current?.otype == GraphObjectType.User
+                ? new Objects { id = current.id, otype = current.otype, data = current.data }
+                : null;
+        }
+
+        if (!_dbContext.Database.IsRelational())
+        {
+            var current = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
+            return current?.otype == GraphObjectType.User
+                ? new Objects { id = current.id, otype = current.otype, data = current.data }
+                : null;
+        }
+
+        var row = await _dbContext.ObjectsTb
+                .FromSqlInterpolated($"SELECT * FROM social_graph.objects WHERE id = {userId} FOR UPDATE")
+                .SingleOrDefaultAsync(cancellationToken);
+        return row?.otype == GraphObjectType.User ? row : null;
     }
 
     private async Task RollbackCreateAsync(

@@ -5,11 +5,12 @@ using SocialGraph.Api.Contracts;
 public interface IGroupGraphService
 {
     Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default);
-    Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, CancellationToken cancellationToken = default);
+    Task<GroupResult?> UpdateGroupAsync(long actorId, UpdateGroupInput input, CancellationToken cancellationToken = default);
     Task<bool> DeleteGroupAsync(long actorId, long groupId, CancellationToken cancellationToken = default);
     Task<GroupResult?> GetGroupAsync(long groupId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GroupSuggestionResult>> GetGroupSuggestionsAsync(long userId, int limit, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GroupSuggestionFriendResult>> GetGroupFriendMembersAsync(long viewerId, long groupId, int limit, CancellationToken cancellationToken = default);
+    Task<UserSummaryPageResult> GetGroupInviteCandidatesAsync(long viewerId, long groupId, int limit, string? cursor, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupAvatarAsync(long actorId, long groupId, string avatarUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<GroupResult?> ChangeGroupBackgroundAsync(long actorId, long groupId, string backgroundUrl, string? originalUrl = null, CancellationToken cancellationToken = default);
     Task<VisitedGroupPageResult> GetVisitedGroupsAsync(long userId, int limit, string? cursor, CancellationToken cancellationToken = default);

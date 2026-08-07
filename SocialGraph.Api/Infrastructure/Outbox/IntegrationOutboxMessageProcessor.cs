@@ -40,6 +40,26 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
             await store.ReleaseAsync(message.id, CancellationToken.None);
             throw;
         }
+        catch (PermanentOutboxException exception) when (IsDurableAfterParentCommit(message))
+        {
+            // The parent row has already committed. Even a contract/ownership failure must
+            // remain durable: a rolling deployment, offline reconciliation, or repaired
+            // ownership record can make the exact attach/detach valid later. Dropping it
+            // would permanently leak a reference or delete a committed parent's lease.
+            var delay = CalculateBackoff(message);
+            await store.MarkFailedAsync(
+                message.id,
+                exception.Message,
+                delay,
+                deadLetter: false,
+                CancellationToken.None);
+            _logger.LogError(
+                exception,
+                "Durable post-commit event {EventId} ({EventType}) hit a permanent-class failure; retry remains scheduled at {AvailableAt}.",
+                message.id,
+                message.event_type,
+                DateTimeOffset.UtcNow + delay);
+        }
         catch (PermanentOutboxException exception)
         {
             await DeadLetterAsync(store, message, exception.Message, userProvisioning);
@@ -51,7 +71,11 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
         }
         catch (Exception exception)
         {
-            var deadLetter = message.attempts >= message.max_attempts;
+            // Media lifecycle and erasure work describes parent state that has already
+            // committed. It keeps a durable, capped-backoff repair row beyond the generic
+            // attempt budget; losing it would leak storage or retain erased projections.
+            var durableAfterParentCommit = IsDurableAfterParentCommit(message);
+            var deadLetter = !durableAfterParentCommit && message.attempts >= message.max_attempts;
             var delay = deadLetter ? TimeSpan.Zero : CalculateBackoff(message);
             if (deadLetter)
             {
@@ -87,6 +111,16 @@ public sealed class IntegrationOutboxMessageProcessor : IIntegrationOutboxMessag
             }
         }
     }
+
+    private static bool IsDurableAfterParentCommit(IntegrationOutboxMessage message) =>
+        message.event_type is
+            IntegrationEventType.MediaFinalize or
+            IntegrationEventType.MediaDelete or
+            IntegrationEventType.UserDelete or
+            IntegrationEventType.SearchDelete or
+            IntegrationEventType.RecommendationUserDelete or
+            IntegrationEventType.RecommendationContentDelete or
+            IntegrationEventType.MessagingUserDelete;
 
     private static Task DeadLetterAsync(
         IIntegrationOutboxStore store,

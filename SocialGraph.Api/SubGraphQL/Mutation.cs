@@ -177,8 +177,9 @@ public class Mutation
 
     public async Task<GroupResult?> UpdateGroupAsync(UpdateGroupInput input, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)
     {
-        await RequireGroupAdminAsync(trustedCaller.RequireUserId(), input.Id, groupGraphService, cancellationToken);
-        return await groupGraphService.UpdateGroupAsync(input, cancellationToken);
+        var actorId = trustedCaller.RequireUserId();
+        await RequireGroupAdminAsync(actorId, input.Id, groupGraphService, cancellationToken);
+        return await groupGraphService.UpdateGroupAsync(actorId, input, cancellationToken);
     }
 
     public async Task<bool> DeleteGroupAsync(long groupId, [Service] IGroupGraphService groupGraphService, [Service] ITrustedCallerAccessor trustedCaller, CancellationToken cancellationToken)

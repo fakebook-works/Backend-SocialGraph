@@ -7,6 +7,7 @@ using SocialGraph.Api.Service;
 
 public sealed class IntegrationOutboxPublisher : IExternalServiceClient
 {
+    private const int MaxMediaLifecycleBatchSize = 512;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly IIntegrationOutboxStore _outbox;
     private readonly IHttpContextAccessor _httpContextAccessor;
@@ -187,29 +188,112 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
             cancellationToken);
     }
 
-    public Task FinalizeMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default)
+    public Task FinalizeMediaAsync(IReadOnlyList<MediaLifecycleReference> references, long? ownerUserId, CancellationToken cancellationToken = default)
     {
-        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaFinalize, urls, ownerUserId, cancellationToken);
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaFinalize, references, ownerUserId, cancellationToken);
     }
 
-    public Task DeleteMediaAsync(IReadOnlyList<string> urls, long? ownerUserId, CancellationToken cancellationToken = default)
+    public Task<DateTimeOffset> GetMediaOperationTimeAsync(CancellationToken cancellationToken = default) =>
+        _outbox.GetCurrentTimeAsync(cancellationToken);
+
+    public Task FinalizeMediaAsync(
+        IReadOnlyList<MediaLifecycleReference> references,
+        long? ownerUserId,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken = default)
     {
-        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaDelete, urls, ownerUserId, cancellationToken);
+        return EnqueueMediaLifecycleAsync(
+            IntegrationEventType.MediaFinalize,
+            references,
+            ownerUserId,
+            operationAt,
+            cancellationToken);
     }
 
-    private Task EnqueueMediaLifecycleAsync(
+    public Task DeleteMediaAsync(IReadOnlyList<MediaLifecycleReference> references, long? ownerUserId, CancellationToken cancellationToken = default)
+    {
+        return EnqueueMediaLifecycleAsync(IntegrationEventType.MediaDelete, references, ownerUserId, cancellationToken);
+    }
+
+    public Task DeleteMediaAsync(
+        IReadOnlyList<MediaLifecycleReference> references,
+        long? ownerUserId,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken = default)
+    {
+        return EnqueueMediaLifecycleAsync(
+            IntegrationEventType.MediaDelete,
+            references,
+            ownerUserId,
+            operationAt,
+            cancellationToken);
+    }
+
+    private async Task EnqueueMediaLifecycleAsync(
         string eventType,
-        IReadOnlyList<string> urls,
+        IReadOnlyList<MediaLifecycleReference> references,
         long? ownerUserId,
         CancellationToken cancellationToken)
     {
-        var normalized = urls
-            .Where(url => !string.IsNullOrWhiteSpace(url))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var operationAt = await _outbox.GetCurrentTimeAsync(cancellationToken);
+        await EnqueueMediaLifecycleAsync(
+            eventType,
+            references,
+            ownerUserId,
+            operationAt,
+            cancellationToken);
+    }
+
+    private async Task EnqueueMediaLifecycleAsync(
+        string eventType,
+        IReadOnlyList<MediaLifecycleReference> references,
+        long? ownerUserId,
+        DateTimeOffset operationAt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(references);
+        if (references.Count > MaxMediaLifecycleBatchSize)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(references),
+                $"A media lifecycle event supports at most {MaxMediaLifecycleBatchSize} references.");
+        }
+        if (references.Any(reference =>
+                reference is null ||
+                string.IsNullOrWhiteSpace(reference.Url) ||
+                string.IsNullOrWhiteSpace(reference.ReferenceId)))
+        {
+            throw new ArgumentException("A media lifecycle batch contains an invalid parent reference.", nameof(references));
+        }
+
+        var normalized = references
+            .DistinctBy(
+                reference => $"{reference.ReferenceId}\n{reference.Url}",
+                StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return normalized.Length == 0
-            ? Task.CompletedTask
-            : EnqueueAsync(eventType, null, new MediaLifecycleEvent(normalized, ownerUserId), cancellationToken);
+        if (normalized
+            .GroupBy(reference => reference.ReferenceId, StringComparer.Ordinal)
+            .Any(group => group.Select(reference => reference.Url).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any()))
+        {
+            throw new InvalidOperationException("One media parent reference cannot attach to multiple URLs in the same lifecycle batch.");
+        }
+        if (normalized.Length == 0)
+        {
+            return;
+        }
+
+        var idempotencyMaterial = JsonSerializer.Serialize(
+            new { references = normalized, ownerUserId, operationAt },
+            JsonOptions);
+        await EnqueueAsync(
+            eventType,
+            null,
+            new MediaLifecycleEvent(
+                OwnerUserId: ownerUserId,
+                References: normalized,
+                OperationAt: operationAt),
+            cancellationToken,
+            idempotencyMaterial: idempotencyMaterial);
     }
 
     private Task UpsertSearchAsync(
@@ -238,10 +322,11 @@ public sealed class IntegrationOutboxPublisher : IExternalServiceClient
         T payload,
         CancellationToken cancellationToken,
         bool protectPayload = false,
-        string? operationId = null)
+        string? operationId = null,
+        string? idempotencyMaterial = null)
     {
         var json = JsonSerializer.Serialize(payload, JsonOptions);
-        var keySource = $"{eventType}:{aggregateId}:{operationId ?? GetOperationId()}:{json}";
+        var keySource = $"{eventType}:{aggregateId}:{operationId ?? GetOperationId()}:{idempotencyMaterial ?? json}";
         var idempotencyKey = "socialgraph-" +
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(keySource))).ToLowerInvariant();
         await _outbox.EnqueueAsync(

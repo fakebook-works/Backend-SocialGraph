@@ -12,6 +12,7 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
         "CREATE_DIRECT",
         "SEND_DIRECT",
         "ADD_GROUP_MEMBERS",
+        "VIEW_PRESENCE",
         "INSPECT_BLOCK"
     };
 
@@ -58,13 +59,19 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
             var targetBlockedActor = targetBlocked.Contains(targetId);
             var blockedEitherDirection = actorBlockedTarget || targetBlockedActor;
             var isFriend = exists && friends.Contains(targetId) && !blockedEitherDirection;
-            // Read-only inspection is intentionally allowed for every existing
-            // non-self user. It conveys block direction to Messenger so it can
-            // suppress group presence/messages without turning a non-friend into
-            // an authorized messaging target.
-            var allowed = request.Action == "INSPECT_BLOCK"
-                ? targetId != request.ActorUserId && exists
-                : targetId != request.ActorUserId && exists && isFriend && !blockedEitherDirection;
+            var validTarget = targetId != request.ActorUserId && exists;
+            // Direct conversations are available between any two current users unless
+            // either direction is blocked. Friend-only policies remain separate so
+            // widening direct messaging does not also expose presence or group invites.
+            var allowed = request.Action switch
+            {
+                "CREATE_DIRECT" or "SEND_DIRECT" => validTarget && !blockedEitherDirection,
+                "ADD_GROUP_MEMBERS" or "VIEW_PRESENCE" => validTarget && isFriend && !blockedEitherDirection,
+                // Read-only inspection deliberately returns directional block state even
+                // when a block exists; it does not authorize a messaging mutation.
+                "INSPECT_BLOCK" => validTarget,
+                _ => false
+            };
             var reason = allowed
                 ? null
                 : targetId == request.ActorUserId
@@ -73,7 +80,9 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
                         ? "USER_NOT_FOUND"
                         : blockedEitherDirection
                             ? "BLOCKED"
-                            : "NOT_FRIENDS";
+                            : request.Action is "ADD_GROUP_MEMBERS" or "VIEW_PRESENCE"
+                                ? "NOT_FRIENDS"
+                                : "NOT_ALLOWED";
             return new MessagingPermissionDecision(
                 targetId,
                 allowed,
@@ -106,7 +115,7 @@ public sealed class MessagingPermissionService : IMessagingPermissionService
 
         if (request.Action is null || !SupportedActions.Contains(request.Action))
         {
-            throw new ArgumentException("action must be CREATE_DIRECT, SEND_DIRECT, ADD_GROUP_MEMBERS, or INSPECT_BLOCK.", nameof(request));
+            throw new ArgumentException("action must be CREATE_DIRECT, SEND_DIRECT, ADD_GROUP_MEMBERS, VIEW_PRESENCE, or INSPECT_BLOCK.", nameof(request));
         }
     }
 }

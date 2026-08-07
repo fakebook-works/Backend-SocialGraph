@@ -153,6 +153,22 @@ public class Query
             cancellationToken);
     }
 
+    public Task<UserSummaryPageResult> GetGroupInviteCandidatesAsync(
+        long groupId,
+        int limit,
+        string? cursor,
+        [Service] IGroupGraphService groupGraphService,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        return groupGraphService.GetGroupInviteCandidatesAsync(
+            trustedCaller.RequireUserId(),
+            groupId,
+            limit,
+            cursor,
+            cancellationToken);
+    }
+
     public async Task<ProfilePostPageResult> GetProfilePostsAsync(
         long userId,
         int limit,

@@ -48,26 +48,6 @@ public sealed class ContentGraphService : IContentGraphService
     /// Refuses client-supplied media URLs that <paramref name="ownerUserId"/> does not own, so a
     /// caller cannot attach — and subsequently destroy — media belonging to another user.
     /// </summary>
-    private Task EnsureMediaOwnedAsync(
-        long ownerUserId,
-        IEnumerable<MediaInput>? media,
-        CancellationToken cancellationToken)
-    {
-        if (_mediaOwnershipGuard is null || media is null) return Task.CompletedTask;
-        return _mediaOwnershipGuard.EnsureOwnedAsync(
-            ownerUserId,
-            media.Select(item => item.Url),
-            cancellationToken);
-    }
-
-    private Task EnsureMediaOwnedAsync(
-        long ownerUserId,
-        MediaInput? media,
-        CancellationToken cancellationToken) =>
-        media is null
-            ? Task.CompletedTask
-            : EnsureMediaOwnedAsync(ownerUserId, new[] { media }, cancellationToken);
-
     public async Task<ContentResult> CreateFeedPostAsync(CreateFeedPostInput input, CancellationToken cancellationToken = default)
     {
         if (input.Privacy is < 0 or > 3)
@@ -75,7 +55,6 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentOutOfRangeException(nameof(input), "Feed privacy must be between 0 and 3.");
         }
 
-        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         await EnsureReferencesAllowedAsync(
             input.AuthorId,
             NormalizeUserIds(input.TaggedUserIds).Concat(MentionUserIds(input.Content)),
@@ -83,8 +62,12 @@ public sealed class ContentGraphService : IContentGraphService
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? post = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
         try
         {
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
             post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
@@ -122,11 +105,16 @@ public sealed class ContentGraphService : IContentGraphService
 
             await _externalServiceClient.CreateSearchIndexAsync(post.id, "feedPost", input.Content, cancellationToken);
             await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                MediaLifecycleReferences.ForMedia(media),
+                input.AuthorId,
+                cancellationToken);
             if (transaction is not null)
             {
+                commitAttempted = true;
                 await transaction.CommitAsync(cancellationToken);
             }
+            committed = true;
 
             return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
         }
@@ -135,14 +123,17 @@ public sealed class ContentGraphService : IContentGraphService
             // Objects and edges are written through Redis before the transaction commits, so
             // rolling back without invalidating left content that does not exist in the cache,
             // and the read paths prefer the cache over PostgreSQL.
-            await RollbackAndInvalidateAsync(transaction, post?.id);
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, post?.id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
             throw;
         }
     }
 
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, CancellationToken cancellationToken = default)
     {
-        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         var taggedUserIds = NormalizeUserIds(input.TaggedUserIds);
         var mentionedUserIds = MentionUserIds(input.Content);
         var referencedUserIds = taggedUserIds.Concat(mentionedUserIds).Distinct().ToArray();
@@ -151,8 +142,13 @@ public sealed class ContentGraphService : IContentGraphService
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? post = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
         try
         {
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            await AcquireGroupLifecycleLockAsync(input.GroupId, cancellationToken);
             if (!await LockCurrentGroupParticipationAsync(input.AuthorId, input.GroupId, cancellationToken))
             {
                 throw new InvalidOperationException("Only current group members and administrators can publish group posts.");
@@ -198,11 +194,16 @@ public sealed class ContentGraphService : IContentGraphService
 
             await _externalServiceClient.CreateSearchIndexAsync(post.id, "groupPost", input.Content, cancellationToken);
             await _externalServiceClient.CreatePostEmbeddingAsync(post.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                MediaLifecycleReferences.ForMedia(media),
+                input.AuthorId,
+                cancellationToken);
             if (transaction is not null)
             {
+                commitAttempted = true;
                 await transaction.CommitAsync(cancellationToken);
             }
+            committed = true;
 
             return await BuildContentResultAsync(post, input.AuthorId, media, cancellationToken);
         }
@@ -211,31 +212,33 @@ public sealed class ContentGraphService : IContentGraphService
             // Objects and edges are written through Redis before the transaction commits, so
             // rolling back without invalidating left content that does not exist in the cache,
             // and the read paths prefer the cache over PostgreSQL.
-            await RollbackAndInvalidateAsync(transaction, post?.id);
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, post?.id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
             throw;
         }
     }
 
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default)
     {
-        var current = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
-        if (current?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
+        var preflight = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+        if (preflight?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
         {
             return null;
         }
 
-        if (current.otype is GraphObjectType.FeedPost or GraphObjectType.Reel && input.Privacy is < 0 or > 3)
+        if (preflight.otype is GraphObjectType.FeedPost or GraphObjectType.Reel && input.Privacy is < 0 or > 3)
         {
             throw new ArgumentOutOfRangeException(nameof(input), "Feed post and reel privacy must be between 0 and 3.");
         }
 
-        var currentData = GraphJson.ParseObject(current.data);
         var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
-        await EnsureMediaOwnedAsync(authorId, input.Media, cancellationToken);
         if (input.Content is not null)
         {
             await EnsureReferencesAllowedAsync(authorId, MentionUserIds(input.Content), cancellationToken);
-            if (current.otype == GraphObjectType.GroupPost)
+            if (preflight.otype == GraphObjectType.GroupPost)
             {
                 var groupId = await GetPublishedGroupIdAsync(input.Id, cancellationToken);
                 await EnsureGroupReferencesAllowedAsync(
@@ -245,75 +248,120 @@ public sealed class ContentGraphService : IContentGraphService
                     cancellationToken);
             }
         }
-        var post = await _objectService.UpdateObjectAsync(
-            input.Id,
-            current.otype,
-            GraphJson.PatchJson(
-                ("content", input.Content),
-                ("privacy", current.otype is GraphObjectType.FeedPost or GraphObjectType.Reel ? input.Privacy : null)),
-            cancellationToken);
-        if (post is null)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
         {
-            return null;
-        }
-
-        IReadOnlyList<MediaResult> media;
-        if (input.Media is null)
-        {
-            media = await GetMediaAsync(input.Id, cancellationToken);
-        }
-        else
-        {
-            var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
-            foreach (var mediaId in existingMediaIds)
+            // Serialize replacement of a parent slot. Without this lock two concurrent
+            // updates can each attach a different URL under a different Media id while
+            // only one version remains visible in the post.
+            var locked = await LockObjectRowAsync(input.Id, cancellationToken, preflight);
+            if (locked?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
             {
-                await _associationService.DeleteOneAssociationAsync(
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
+            var currentData = GraphJson.ParseObject(locked.data);
+            var post = await _objectService.UpdateObjectAsync(
+                input.Id,
+                locked.otype,
+                GraphJson.PatchJson(
+                    ("content", input.Content),
+                    ("privacy", locked.otype is GraphObjectType.FeedPost or GraphObjectType.Reel ? input.Privacy : null)),
+                cancellationToken);
+            if (post is null)
+            {
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
+            }
+
+            IReadOnlyList<MediaResult> media;
+            if (input.Media is null)
+            {
+                media = await GetMediaAsync(input.Id, cancellationToken);
+            }
+            else
+            {
+                var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
+                foreach (var mediaId in existingMediaIds)
+                {
+                    await _associationService.DeleteOneAssociationAsync(
+                        input.Id,
+                        GraphAssociationType.Contained,
+                        mediaId,
+                        cancellationToken);
+                }
+
+                media = await AttachMediaAsync(input.Id, input.Media, cancellationToken);
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    MediaLifecycleReferences.ForMedia(media),
+                    authorId,
+                    cancellationToken);
+                await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
+            }
+
+            var content = input.Content ?? GraphJson.String(currentData, "content");
+            if (input.Content is not null)
+            {
+                await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
+                await _externalServiceClient.UpdateSearchIndexAsync(
                     input.Id,
-                    GraphAssociationType.Contained,
-                    mediaId,
+                    locked.otype switch
+                    {
+                        GraphObjectType.FeedPost => "feedPost",
+                        GraphObjectType.GroupPost => "groupPost",
+                        GraphObjectType.Reel => "reel",
+                        _ => throw new InvalidOperationException("Unsupported content type.")
+                    },
+                    content,
                     cancellationToken);
             }
 
-            media = await AttachMediaAsync(input.Id, input.Media, cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), authorId, cancellationToken);
-            await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
-        }
+            if (input.Content is not null || input.Media is not null)
+            {
+                await _externalServiceClient.CreatePostEmbeddingAsync(
+                    input.Id,
+                    content,
+                    media.Select(item => item.Url).ToArray(),
+                    cancellationToken);
+            }
 
-        var content = input.Content ?? GraphJson.String(currentData, "content");
-        if (input.Content is not null)
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+            return await BuildContentResultAsync(post, authorId, media, cancellationToken);
+        }
+        catch
         {
-            await SyncMentionAssociationsAsync(input.Id, authorId, content, cancellationToken);
-            await _externalServiceClient.UpdateSearchIndexAsync(
-                input.Id,
-                current.otype switch
-                {
-                    GraphObjectType.FeedPost => "feedPost",
-                    GraphObjectType.GroupPost => "groupPost",
-                    GraphObjectType.Reel => "reel",
-                    _ => throw new InvalidOperationException("Unsupported content type.")
-                },
-                content,
-                cancellationToken);
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, input.Id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
         }
-
-        if (input.Content is not null || input.Media is not null)
-        {
-            await _externalServiceClient.CreatePostEmbeddingAsync(
-                input.Id,
-                content,
-                media.Select(item => item.Url).ToArray(),
-                cancellationToken);
-        }
-
-        return await BuildContentResultAsync(post, authorId, media, cancellationToken);
     }
 
     public async Task<ContentResult?> UpdateCommentAsync(
         UpdateCommentInput input,
         CancellationToken cancellationToken = default)
     {
-        var current = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
-        if (current?.otype != GraphObjectType.Comment)
+        var preflight = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
+        if (preflight?.otype != GraphObjectType.Comment)
         {
             return null;
         }
@@ -323,75 +371,94 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentException("Comment media must be one image with a valid URL.", nameof(input));
         }
 
-        var currentData = GraphJson.ParseObject(current.data);
+        var currentData = GraphJson.ParseObject(preflight.data);
         if (GraphJson.IsCommentDeleted(currentData))
         {
             return null;
         }
         var authorId = await GetAuthorIdAsync(input.Id, cancellationToken);
-        await EnsureMediaOwnedAsync(authorId, input.Media, cancellationToken);
         if (input.Content is not null)
         {
             await EnsureReferencesAllowedAsync(authorId, MentionUserIds(input.Content), cancellationToken);
         }
 
-        var comment = input.Content is null
-            ? current
-            : await MutateCommentObjectAsync(
-                input.Id,
-                data => GraphJson.ApplyCommentEdit(data, input.Content, GraphJson.UtcNowString()),
-                cancellationToken,
-                () => SyncMentionAssociationsAsync(input.Id, authorId, input.Content, cancellationToken));
-        if (comment is null)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
         {
-            return null;
-        }
-
-        IReadOnlyList<MediaResult> media;
-        if (input.Media is null && !input.ClearMedia)
-        {
-            media = await GetMediaAsync(input.Id, cancellationToken);
-        }
-        else
-        {
-            var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
-            foreach (var mediaId in existingMediaIds)
+            var locked = await LockObjectRowAsync(input.Id, cancellationToken, preflight);
+            if (locked?.otype != GraphObjectType.Comment ||
+                GraphJson.IsCommentDeleted(GraphJson.ParseObject(locked.data)))
             {
-                await _associationService.DeleteOneAssociationAsync(
-                    input.Id,
-                    GraphAssociationType.Contained,
-                    mediaId,
-                    cancellationToken);
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
             }
 
-            media = await AttachSingleMediaAsync(input.Id, input.Media, cancellationToken);
-            await _externalServiceClient.FinalizeMediaAsync(
-                media.Select(item => item.Url).ToArray(),
-                authorId,
-                cancellationToken);
-            await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
-        }
-
-        var latest = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
-        if (latest?.otype == GraphObjectType.Comment &&
-            GraphJson.IsCommentDeleted(GraphJson.ParseObject(latest.data)))
-        {
-            // A media-only update is not part of the row mutation above. If delete won the race,
-            // remove anything this request attached after tombstone cleanup and never project it.
-            var racedMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
-            foreach (var mediaId in racedMediaIds)
-            {
-                await _associationService.DeleteOneAssociationAsync(
+            var comment = input.Content is null
+                ? new SocialGraphObjectResult(locked.id, locked.otype, locked.data)
+                : await MutateCommentObjectAsync(
                     input.Id,
-                    GraphAssociationType.Contained,
-                    mediaId,
-                    cancellationToken);
+                    data => GraphJson.ApplyCommentEdit(data, input.Content, GraphJson.UtcNowString()),
+                    cancellationToken,
+                    () => SyncMentionAssociationsAsync(input.Id, authorId, input.Content, cancellationToken));
+            if (comment is null)
+            {
+                if (transaction is not null)
+                {
+                    commitAttempted = true;
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return null;
             }
-            await DeleteOrphanMediaAsync(racedMediaIds, cancellationToken);
-            return null;
-        }
 
-        return await BuildContentResultAsync(comment, authorId, media, cancellationToken);
+            IReadOnlyList<MediaResult> media;
+            if (input.Media is null && !input.ClearMedia)
+            {
+                media = await GetMediaAsync(input.Id, cancellationToken);
+            }
+            else
+            {
+                var existingMediaIds = await GetContainedMediaIdsAsync(input.Id, cancellationToken);
+                foreach (var mediaId in existingMediaIds)
+                {
+                    await _associationService.DeleteOneAssociationAsync(
+                        input.Id,
+                        GraphAssociationType.Contained,
+                        mediaId,
+                        cancellationToken);
+                }
+
+                media = await AttachSingleMediaAsync(input.Id, input.Media, cancellationToken);
+                mediaReservation = await ReserveAndQueueMediaAsync(
+                    MediaLifecycleReferences.ForMedia(media),
+                    authorId,
+                    cancellationToken);
+                await DeleteOrphanMediaAsync(existingMediaIds, cancellationToken);
+            }
+
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+            return await BuildContentResultAsync(comment, authorId, media, cancellationToken);
+        }
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, input.Id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
     /// <summary>
@@ -439,75 +506,145 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<bool> DeleteContentAsync(long contentId, CancellationToken cancellationToken = default)
     {
-        var item = await _objectService.RetrieveObjectAsync(contentId, cancellationToken);
-        if (item is null)
+        var preflight = await _objectService.RetrieveObjectAsync(contentId, cancellationToken);
+        if (preflight is null)
         {
             return false;
         }
 
-        if (item.otype == GraphObjectType.Comment)
+        if (preflight.otype == GraphObjectType.Comment)
         {
             return await DeleteCommentAsync(contentId, cancellationToken);
         }
 
-        var mediaIds = await GetContainedMediaIdsAsync(contentId, cancellationToken);
-        await _associationService.DeleteObjectAssociationsAsync(contentId, cancellationToken);
-        var deleted = await _objectService.DeleteObjectAsync(contentId, cancellationToken);
-        if (deleted)
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
         {
-            await DeleteOrphanMediaAsync(mediaIds, cancellationToken, contentId);
-        }
-        if (deleted && (item.otype == GraphObjectType.FeedPost ||
-                        item.otype == GraphObjectType.GroupPost ||
-                        item.otype == GraphObjectType.Reel))
-        {
-            await _externalServiceClient.DeletePostEmbeddingAsync(contentId, cancellationToken);
-            await _externalServiceClient.DeleteSearchIndexAsync(contentId, cancellationToken);
-        }
+            var item = await LockObjectRowAsync(contentId, cancellationToken, preflight);
+            if (item is null)
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return false;
+            }
 
-        return deleted;
+            var descendantCommentIds = await GetDescendantCommentIdsAsync(contentId, cancellationToken);
+            var mediaByComment = new Dictionary<long, IReadOnlyList<long>>();
+            foreach (var commentId in descendantCommentIds)
+            {
+                mediaByComment[commentId] = await GetContainedMediaIdsAsync(commentId, cancellationToken);
+            }
+            var mediaIds = (await GetContainedMediaIdsAsync(contentId, cancellationToken))
+                .Concat(mediaByComment.Values.SelectMany(value => value))
+                .Distinct()
+                .ToArray();
+            await _associationService.DeleteObjectAssociationsAsync(contentId, cancellationToken);
+            foreach (var comment in mediaByComment)
+            {
+                foreach (var mediaId in comment.Value)
+                {
+                    await _associationService.DeleteOneAssociationAsync(
+                        comment.Key,
+                        GraphAssociationType.Contained,
+                        mediaId,
+                        cancellationToken);
+                }
+            }
+            var deleted = await _objectService.DeleteObjectAsync(contentId, cancellationToken);
+            if (deleted)
+            {
+                // The exact detach rows commit with the parent deletion. A process crash can
+                // no longer leave an invisible post holding permanent media references.
+                await DeleteOrphanMediaAsync(mediaIds, cancellationToken, contentId);
+            }
+            if (deleted && (item.otype == GraphObjectType.FeedPost ||
+                            item.otype == GraphObjectType.GroupPost ||
+                            item.otype == GraphObjectType.Reel))
+            {
+                await _externalServiceClient.DeletePostEmbeddingAsync(contentId, cancellationToken);
+                await _externalServiceClient.DeleteSearchIndexAsync(contentId, cancellationToken);
+            }
+
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+            return deleted;
+        }
+        catch
+        {
+            await RollbackAndInvalidateAsync(transaction, contentId);
+            throw;
+        }
     }
 
     private async Task<bool> DeleteCommentAsync(long commentId, CancellationToken cancellationToken)
     {
-        var mediaIds = await GetContainedMediaIdsAsync(commentId, cancellationToken);
-
-        // Write the tombstone first. If association/media cleanup is interrupted, every read path
-        // still fails closed and cannot expose the former content, mentions, history or media.
-        var tombstone = await MutateCommentObjectAsync(
-            commentId,
-            data =>
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        try
+        {
+            var locked = await LockObjectRowAsync(commentId, cancellationToken);
+            if (locked?.otype != GraphObjectType.Comment)
             {
-                if (!GraphJson.IsCommentDeleted(data))
+                if (transaction is not null)
                 {
-                    GraphJson.ApplyCommentTombstone(data, GraphJson.UtcNowString());
+                    await transaction.CommitAsync(cancellationToken);
                 }
-                return true;
-            },
-            cancellationToken);
-        if (tombstone is null)
-        {
-            return false;
-        }
+                return false;
+            }
 
-        await _associationService.DeleteAllAssociationAsync(
-            commentId,
-            GraphAssociationType.LikedBy,
-            cancellationToken);
-        await _associationService.DeleteAllAssociationAsync(
-            commentId,
-            GraphAssociationType.Mentioned,
-            cancellationToken);
-        foreach (var mediaId in mediaIds)
-        {
-            await _associationService.DeleteOneAssociationAsync(
+            var mediaIds = await GetContainedMediaIdsAsync(commentId, cancellationToken);
+            var tombstone = await MutateCommentObjectAsync(
                 commentId,
-                GraphAssociationType.Contained,
-                mediaId,
+                data =>
+                {
+                    if (!GraphJson.IsCommentDeleted(data))
+                    {
+                        GraphJson.ApplyCommentTombstone(data, GraphJson.UtcNowString());
+                    }
+                    return true;
+                },
                 cancellationToken);
+            if (tombstone is null)
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return false;
+            }
+
+            await _associationService.DeleteAllAssociationAsync(
+                commentId,
+                GraphAssociationType.LikedBy,
+                cancellationToken);
+            await _associationService.DeleteAllAssociationAsync(
+                commentId,
+                GraphAssociationType.Mentioned,
+                cancellationToken);
+            foreach (var mediaId in mediaIds)
+            {
+                await _associationService.DeleteOneAssociationAsync(
+                    commentId,
+                    GraphAssociationType.Contained,
+                    mediaId,
+                    cancellationToken);
+            }
+            await DeleteOrphanMediaAsync(mediaIds, cancellationToken);
+
+            if (transaction is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+            }
+            return true;
         }
-        await DeleteOrphanMediaAsync(mediaIds, cancellationToken);
-        return true;
+        catch
+        {
+            await RollbackAndInvalidateAsync(transaction, commentId);
+            throw;
+        }
     }
 
     public async Task<ContentResult?> GetContentAsync(long contentId, CancellationToken cancellationToken = default)
@@ -1039,14 +1176,57 @@ public sealed class ContentGraphService : IContentGraphService
             throw new ArgumentException("Comment media must be one image with a valid URL.", nameof(input));
         }
 
-        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         await EnsureReferencesAllowedAsync(input.AuthorId, MentionUserIds(input.Content), cancellationToken);
+        var rootContentId = await ResolveRootPostIdAsync(input.TargetId, cancellationToken);
+        if (rootContentId <= 0)
+        {
+            throw new InvalidOperationException("The comment target is unavailable.");
+        }
+        var rootPreflight = await _objectService.RetrieveObjectAsync(rootContentId, cancellationToken);
+        if (rootPreflight?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
+        {
+            throw new InvalidOperationException("The comment target is unavailable.");
+        }
+        var targetGroupId = rootPreflight.otype == GraphObjectType.GroupPost
+            ? await GetPublishedGroupIdAsync(rootContentId, cancellationToken)
+            : 0;
+        if (rootPreflight.otype == GraphObjectType.GroupPost && targetGroupId <= 0)
+        {
+            throw new InvalidOperationException("The comment target group is unavailable.");
+        }
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? comment = null;
         IReadOnlyList<MediaResult> media = Array.Empty<MediaResult>();
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
         try
         {
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            if (targetGroupId > 0)
+            {
+                await AcquireGroupLifecycleLockAsync(targetGroupId, cancellationToken);
+                var lockedGroup = await LockObjectRowAsync(targetGroupId, cancellationToken);
+                if (lockedGroup?.otype != GraphObjectType.Group)
+                {
+                    throw new InvalidOperationException("The comment target group is unavailable.");
+                }
+            }
+            var lockedRoot = await LockObjectRowAsync(rootContentId, cancellationToken, rootPreflight);
+            if (lockedRoot?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
+            {
+                throw new InvalidOperationException("The comment target is unavailable.");
+            }
+            if (input.TargetId != rootContentId)
+            {
+                var lockedTarget = await LockObjectRowAsync(input.TargetId, cancellationToken);
+                if (lockedTarget?.otype != GraphObjectType.Comment ||
+                    GraphJson.IsCommentDeleted(GraphJson.ParseObject(lockedTarget.data)))
+                {
+                    throw new InvalidOperationException("The replied-to comment is unavailable.");
+                }
+            }
             comment = await _objectService.AddObjectAsync(GraphObjectType.Comment, GraphJson.ContentJson(input.Content), cancellationToken);
             media = await AttachSingleMediaAsync(comment.id, input.Media, cancellationToken);
             var mentionedUserIds = MentionUserIds(input.Content);
@@ -1061,25 +1241,35 @@ public sealed class ContentGraphService : IContentGraphService
                 mutations,
                 cancellationToken);
 
-            await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                MediaLifecycleReferences.ForMedia(media),
+                input.AuthorId,
+                cancellationToken);
             if (transaction is not null)
             {
+                commitAttempted = true;
                 await transaction.CommitAsync(cancellationToken);
             }
+            committed = true;
         }
         catch
         {
-            if (transaction is not null)
+            if (!commitAttempted && transaction is not null)
             {
                 // The comment was written through Redis before the commit, so the rollback has
                 // to drop it from the cache as well or reads would keep returning it.
                 await RollbackAndInvalidateAsync(transaction, comment?.id);
             }
-            else if (comment is not null)
+            else if (!commitAttempted && comment is not null)
             {
                 await _associationService.DeleteObjectAssociationsAsync(comment.id, CancellationToken.None);
                 await _objectService.DeleteObjectAsync(comment.id, CancellationToken.None);
                 await DeleteOrphanMediaAsync(media.Select(item => item.Id).ToArray(), CancellationToken.None, comment.id);
+            }
+
+            if (!committed && !commitAttempted)
+            {
+                await CancelReservationBestEffortAsync(mediaReservation);
             }
 
             throw;
@@ -1117,18 +1307,44 @@ public sealed class ContentGraphService : IContentGraphService
         CreateNormalStoryInput input,
         CancellationToken cancellationToken = default)
     {
-        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
-        var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
-        var media = await AttachSingleMediaAsync(story.id, input.Media, cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
-        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? story = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
+        {
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
+            var media = await AttachSingleMediaAsync(story.id, input.Media, cancellationToken);
+            await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                MediaLifecycleReferences.ForMedia(media),
+                input.AuthorId,
+                cancellationToken);
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
 
-        var data = GraphJson.ParseObject(story.data);
-        return new NormalStoryResult(
-            story.id,
-            GraphJson.String(data, "content"),
-            GraphJson.String(data, "create"),
-            media);
+            var data = GraphJson.ParseObject(story.data);
+            return new NormalStoryResult(
+                story.id,
+                GraphJson.String(data, "content"),
+                GraphJson.String(data, "create"),
+                media);
+        }
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, story?.id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
     public async Task<IHomeStoryResult> CreateShareStoryAsync(
@@ -1138,33 +1354,65 @@ public sealed class ContentGraphService : IContentGraphService
         var sharedSourceId = await ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
         var sharedSource = await RequireStoryShareSourceAsync(input.AuthorId, sharedSourceId, cancellationToken);
 
-        var story = await _objectService.AddObjectAsync(GraphObjectType.Story, GraphJson.StoryJson(input.Content), cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, story.id, cancellationToken);
-        await _associationService.AddAssociationAsync(story.id, GraphAssociationType.Share, sharedSourceId, cancellationToken);
-        await _externalServiceClient.RecordRecommendationInteractionAsync(
-            input.AuthorId,
-            sharedSourceId,
-            RecommendationInteractionAction.Share,
-            cancellationToken);
-
-        var sourceAuthorId = sharedSource switch
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? story = null;
+        var commitAttempted = false;
+        try
         {
-            FeedPostSharedSourceResult feedPost => feedPost.Author?.Id ?? 0,
-            ReelSharedSourceResult reel => reel.Author?.Id ?? 0,
-            _ => 0
-        };
-        if (sourceAuthorId > 0 && sourceAuthorId != input.AuthorId)
-        {
-            await _externalServiceClient.NotifyAsync(
-                input.AuthorId,
-                sourceAuthorId,
-                ExternalNotificationAction.Share,
-                sharedSourceId,
-                new { shareId = story.id, shareType = "story" },
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            story = await _objectService.AddObjectAsync(
+                GraphObjectType.Story,
+                GraphJson.StoryJson(input.Content),
                 cancellationToken);
-        }
+            await _associationService.AddAssociationAsync(
+                input.AuthorId,
+                GraphAssociationType.Authored,
+                story.id,
+                cancellationToken);
+            await _associationService.AddAssociationAsync(
+                story.id,
+                GraphAssociationType.Share,
+                sharedSourceId,
+                cancellationToken);
+            await _externalServiceClient.RecordRecommendationInteractionAsync(
+                input.AuthorId,
+                sharedSourceId,
+                RecommendationInteractionAction.Share,
+                cancellationToken);
 
-        return BuildShareStoryResult(story, sharedSource);
+            var sourceAuthorId = sharedSource switch
+            {
+                FeedPostSharedSourceResult feedPost => feedPost.Author?.Id ?? 0,
+                ReelSharedSourceResult reel => reel.Author?.Id ?? 0,
+                _ => 0
+            };
+            if (sourceAuthorId > 0 && sourceAuthorId != input.AuthorId)
+            {
+                await _externalServiceClient.NotifyAsync(
+                    input.AuthorId,
+                    sourceAuthorId,
+                    ExternalNotificationAction.Share,
+                    sharedSourceId,
+                    new { shareId = story.id, shareType = "story" },
+                    cancellationToken);
+            }
+
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+
+            return BuildShareStoryResult(story, sharedSource);
+        }
+        catch
+        {
+            if (!commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, story?.id);
+            }
+            throw;
+        }
     }
 
     public async Task<DeleteStoryPayload> DeleteStoryAsync(
@@ -1335,7 +1583,10 @@ public sealed class ContentGraphService : IContentGraphService
             var data = GraphJson.ParseObject(candidate.data);
             if (TryGetDateTimeOffset(data, "expire", out var expiresAt) && expiresAt > now)
             {
-                break;
+                // Story IDs are allocation ordered, not expiry ordered. An active low-ID
+                // story must not prevent an expired higher-ID story (and its media) from
+                // being reclaimed in this sweep.
+                continue;
             }
 
             if (await DeleteStoryWithTemporaryMediaAsync(candidate.id, cancellationToken))
@@ -1367,7 +1618,6 @@ public sealed class ContentGraphService : IContentGraphService
         ValidateReelFocalPoint(input.FocalPointX, nameof(input.FocalPointX));
         ValidateReelFocalPoint(input.FocalPointY, nameof(input.FocalPointY));
 
-        await EnsureMediaOwnedAsync(input.AuthorId, input.Media, cancellationToken);
         await EnsureReferencesAllowedAsync(input.AuthorId, MentionUserIds(input.Content), cancellationToken);
         double? normalizedAspectRatio = input.AspectRatio is { } value
             ? Math.Clamp(Math.Round(value, 6), MinReelAspectRatio, MaxReelAspectRatio)
@@ -1379,36 +1629,63 @@ public sealed class ContentGraphService : IContentGraphService
         double? normalizedFocalPointY = hasFocalPoint
             ? Math.Round(input.FocalPointY ?? 0.5d, 6)
             : null;
-        var reel = await _objectService.AddObjectAsync(
-            GraphObjectType.Reel,
-            GraphJson.ReelJson(
-                input.Content,
-                input.Privacy,
-                normalizedAspectRatio,
-                normalizedFocalPointX,
-                normalizedFocalPointY),
-            cancellationToken);
-        var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
-        await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
-        foreach (var userId in MentionUserIds(input.Content))
+        await using var transaction = await BeginTransactionAsync(cancellationToken);
+        SocialGraphObjectResult? reel = null;
+        MediaReservation? mediaReservation = null;
+        var committed = false;
+        var commitAttempted = false;
+        try
         {
-            if (!await AddUserReferenceAsync(
-                    reel.id,
-                    userId,
-                    input.AuthorId,
-                    GraphObjectType.Reel,
-                    0,
-                    GraphAssociationType.Mentioned,
-                    ExternalNotificationAction.Mention,
-                    cancellationToken))
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            reel = await _objectService.AddObjectAsync(
+                GraphObjectType.Reel,
+                GraphJson.ReelJson(
+                    input.Content,
+                    input.Privacy,
+                    normalizedAspectRatio,
+                    normalizedFocalPointX,
+                    normalizedFocalPointY),
+                cancellationToken);
+            var media = await AttachSingleMediaAsync(reel.id, input.Media, cancellationToken);
+            await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, reel.id, cancellationToken);
+            foreach (var userId in MentionUserIds(input.Content))
             {
-                throw new InvalidOperationException("Unable to mention the selected account.");
+                if (!await AddUserReferenceAsync(
+                        reel.id,
+                        userId,
+                        input.AuthorId,
+                        GraphObjectType.Reel,
+                        0,
+                        GraphAssociationType.Mentioned,
+                        ExternalNotificationAction.Mention,
+                        cancellationToken))
+                {
+                    throw new InvalidOperationException("Unable to mention the selected account.");
+                }
             }
+            mediaReservation = await ReserveAndQueueMediaAsync(
+                MediaLifecycleReferences.ForMedia(media),
+                input.AuthorId,
+                cancellationToken);
+            await _externalServiceClient.CreateSearchIndexAsync(reel.id, "reel", input.Content, cancellationToken);
+            await _externalServiceClient.CreatePostEmbeddingAsync(reel.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
+            if (transaction is not null)
+            {
+                commitAttempted = true;
+                await transaction.CommitAsync(cancellationToken);
+            }
+            committed = true;
+            return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
         }
-        await _externalServiceClient.FinalizeMediaAsync(media.Select(item => item.Url).ToArray(), input.AuthorId, cancellationToken);
-        await _externalServiceClient.CreateSearchIndexAsync(reel.id, "reel", input.Content, cancellationToken);
-        await _externalServiceClient.CreatePostEmbeddingAsync(reel.id, input.Content, media.Select(item => item.Url).ToArray(), cancellationToken);
-        return await BuildContentResultAsync(reel, input.AuthorId, media, cancellationToken);
+        catch
+        {
+            if (!committed && !commitAttempted)
+            {
+                await RollbackAndInvalidateAsync(transaction, reel?.id);
+                await CancelReservationBestEffortAsync(mediaReservation);
+            }
+            throw;
+        }
     }
 
     public async Task<long> ResolveCanonicalShareSourceIdAsync(
@@ -1474,6 +1751,11 @@ public sealed class ContentGraphService : IContentGraphService
         ContentResult post;
         try
         {
+            await LockAuthorForContentCreationAsync(input.AuthorId, cancellationToken);
+            if (destinationGroupId > 0)
+            {
+                await AcquireGroupLifecycleLockAsync(destinationGroupId, cancellationToken);
+            }
             if (destinationGroupId > 0 &&
                 !await LockCurrentGroupParticipationAsync(input.AuthorId, destinationGroupId, cancellationToken))
             {
@@ -1754,6 +2036,54 @@ public sealed class ContentGraphService : IContentGraphService
         return AttachMediaAsync(contentId, media is null ? null : new[] { media }, cancellationToken);
     }
 
+    private async Task<MediaReservation?> ReserveAndQueueMediaAsync(
+        IReadOnlyList<MediaLifecycleReference> references,
+        long ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        if (references.Count == 0)
+        {
+            return null;
+        }
+
+        var operationAt = await _externalServiceClient.GetMediaOperationTimeAsync(cancellationToken);
+        if (_mediaOwnershipGuard is not null)
+        {
+            await _mediaOwnershipGuard.EnsureReferencesOwnedAsync(
+                ownerUserId,
+                references,
+                operationAt,
+                cancellationToken);
+        }
+
+        var reservation = new MediaReservation(ownerUserId, references, operationAt);
+        try
+        {
+            await _externalServiceClient.FinalizeMediaAsync(
+                references,
+                ownerUserId,
+                operationAt,
+                cancellationToken);
+            return reservation;
+        }
+        catch
+        {
+            await CancelReservationBestEffortAsync(reservation);
+            throw;
+        }
+    }
+
+    private Task CancelReservationBestEffortAsync(MediaReservation? reservation)
+    {
+        return reservation is null || _mediaOwnershipGuard is null
+            ? Task.CompletedTask
+            : _mediaOwnershipGuard.CancelReferenceReservationBestEffortAsync(
+                reservation.OwnerUserId,
+                reservation.References,
+                reservation.OperationAt,
+                CancellationToken.None);
+    }
+
     private async Task<IReadOnlyList<MediaResult>> AttachMediaAsync(
         long contentId,
         IReadOnlyList<MediaInput>? media,
@@ -1774,6 +2104,11 @@ public sealed class ContentGraphService : IContentGraphService
 
         return results;
     }
+
+    private sealed record MediaReservation(
+        long OwnerUserId,
+        IReadOnlyList<MediaLifecycleReference> References,
+        DateTimeOffset OperationAt);
 
     private async Task<IReadOnlyList<MediaResult>> GetMediaAsync(long contentId, CancellationToken cancellationToken)
     {
@@ -1958,6 +2293,17 @@ public sealed class ContentGraphService : IContentGraphService
 
         try
         {
+            var locked = await LockObjectRowAsync(storyId, cancellationToken);
+            if (locked?.otype != GraphObjectType.Story)
+            {
+                if (transaction is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                return false;
+            }
+
+            mediaIds = await GetContainedMediaIdsAsync(storyId, cancellationToken);
             await _associationService.DeleteObjectAssociationsAsync(storyId, cancellationToken);
             var deleted = await _objectService.DeleteObjectAsync(storyId, cancellationToken);
             if (deleted)
@@ -1990,69 +2336,6 @@ public sealed class ContentGraphService : IContentGraphService
     }
 
     /// <summary>
-    /// Whether another media object pointing at the same uploaded asset is still attached to
-    /// something, which decides whether the physical file may be removed.
-    /// </summary>
-    /// <remarks>
-    /// This used to load every media id ever attached anywhere in the system, then read the
-    /// jsonb of all of them and compare URLs in memory — a scan of both tables for every
-    /// media row being removed. Deleting a post with ten images scanned them ten times, and
-    /// DeleteUserAsync multiplied that by the user's post count inside a single transaction.
-    /// The database answers the same question with one EXISTS.
-    /// </remarks>
-    private async Task<bool> IsSameAssetStillContainedAsync(
-        long mediaId,
-        string? mediaUrl,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(mediaUrl))
-        {
-            return false;
-        }
-
-        if (IsInMemory())
-        {
-            // The in-memory provider cannot evaluate jsonb, so tests fall back to comparing
-            // client-side over their own small fixtures.
-            var containedMediaIds = await _dbContext.AssociationsTb
-                .AsNoTracking()
-                .Where(item => item.atype == GraphAssociationType.Contained && item.id2 != mediaId)
-                .Select(item => item.id2)
-                .Distinct()
-                .ToArrayAsync(cancellationToken);
-            if (containedMediaIds.Length == 0)
-            {
-                return false;
-            }
-
-            var candidates = await _dbContext.ObjectsTb
-                .AsNoTracking()
-                .Where(item => containedMediaIds.Contains(item.id) && item.otype == GraphObjectType.Media)
-                .Select(item => item.data)
-                .ToListAsync(cancellationToken);
-            return candidates.Any(data => string.Equals(
-                GraphJson.String(GraphJson.ParseObject(data), "url"),
-                mediaUrl,
-                StringComparison.OrdinalIgnoreCase));
-        }
-
-        // lower() on both sides preserves the case-insensitive comparison this replaced.
-        return await _dbContext.Database
-            .SqlQuery<bool>($"""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM social_graph.objects o
-                    JOIN social_graph.associations a
-                        ON a.id2 = o.id AND a.atype = {GraphAssociationType.Contained}
-                    WHERE o.otype = {GraphObjectType.Media}
-                      AND o.id <> {mediaId}
-                      AND lower(o.data ->> 'url') = lower({mediaUrl})
-                ) AS "Value"
-                """)
-            .SingleAsync(cancellationToken);
-    }
-
-    /// <summary>
     /// Rolls the transaction back and drops anything the failed attempt left in the cache.
     /// </summary>
     private async Task RollbackAndInvalidateAsync(IDbContextTransaction? transaction, long? objectId)
@@ -2068,11 +2351,6 @@ public sealed class ContentGraphService : IContentGraphService
             await _objectService.InvalidateObjectCacheAsync(id);
         }
     }
-
-    private bool IsInMemory() => string.Equals(
-        _dbContext.Database.ProviderName,
-        "Microsoft.EntityFrameworkCore.InMemory",
-        StringComparison.Ordinal);
 
     private async Task DeleteOrphanMediaAsync(
         IEnumerable<long> mediaIds,
@@ -2102,18 +2380,16 @@ public sealed class ContentGraphService : IContentGraphService
             }
 
             var mediaUrl = GraphJson.String(GraphJson.ParseObject(media.data), "url");
-            var sameAssetStillContained = await IsSameAssetStillContainedAsync(
-                mediaId,
-                mediaUrl,
-                cancellationToken);
             await _associationService.DeleteObjectAssociationsAsync(mediaId, cancellationToken);
             if (await _objectService.DeleteObjectAsync(mediaId, cancellationToken) &&
-                !string.IsNullOrWhiteSpace(mediaUrl) &&
-                !sameAssetStillContained)
+                !string.IsNullOrWhiteSpace(mediaUrl))
             {
-                // Cascade cleanup: the URL comes from stored graph state (already ownership-checked
-                // when it was written), not from the current request, so no owner filter applies.
-                await _externalServiceClient.DeleteMediaAsync(new[] { mediaUrl }, null, cancellationToken);
+                // Detach this exact Media object. Upload Server owns the physical reference count,
+                // so another Media object or profile slot may safely keep the same URL alive.
+                await _externalServiceClient.DeleteMediaAsync(
+                    new[] { MediaLifecycleReferences.ForMedia(mediaId, mediaUrl) },
+                    null,
+                    cancellationToken);
             }
         }
     }
@@ -2206,6 +2482,71 @@ public sealed class ContentGraphService : IContentGraphService
         }
 
         return await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    private async Task<Objects?> LockObjectRowAsync(
+        long objectId,
+        CancellationToken cancellationToken,
+        SocialGraphObjectResult? nonRelationalFallback = null)
+    {
+        if (_dbContext.Database.IsRelational())
+        {
+            return await _dbContext.ObjectsTb
+                .FromSqlInterpolated($"SELECT * FROM social_graph.objects WHERE id = {objectId} FOR UPDATE")
+                .SingleOrDefaultAsync(cancellationToken);
+        }
+
+        var entity = await _dbContext.ObjectsTb.SingleOrDefaultAsync(
+            item => item.id == objectId,
+            cancellationToken);
+        if (entity is not null)
+        {
+            return entity;
+        }
+
+        var current = nonRelationalFallback ??
+            await _objectService.RetrieveObjectAsync(objectId, cancellationToken);
+        return current is null
+            ? null
+            : new Objects { id = current.id, otype = current.otype, data = current.data };
+    }
+
+    private async Task LockAuthorForContentCreationAsync(
+        long authorId,
+        CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational())
+        {
+            return;
+        }
+
+        var author = await _dbContext.ObjectsTb
+            .FromSqlInterpolated($"SELECT * FROM social_graph.objects WHERE id = {authorId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (author?.otype != GraphObjectType.User)
+        {
+            throw new InvalidOperationException("The content author is no longer active.");
+        }
+    }
+
+    private Task AcquireGroupLifecycleLockAsync(
+        long groupId,
+        CancellationToken cancellationToken)
+    {
+        if (!_dbContext.Database.IsRelational() ||
+            _dbContext.Database.CurrentTransaction is null ||
+            !string.Equals(
+                _dbContext.Database.ProviderName,
+                "Npgsql.EntityFrameworkCore.PostgreSQL",
+                StringComparison.Ordinal))
+        {
+            return Task.CompletedTask;
+        }
+
+        return _dbContext.Database.ExecuteSqlRawAsync(
+            "SELECT pg_advisory_xact_lock(@groupId)",
+            new object[] { new NpgsqlParameter("groupId", groupId) },
+            cancellationToken);
     }
 
     private async Task<bool> LockCurrentGroupParticipationAsync(
@@ -2413,8 +2754,65 @@ public sealed class ContentGraphService : IContentGraphService
 
     private async Task<IReadOnlyList<long>> GetContainedMediaIdsAsync(long contentId, CancellationToken cancellationToken)
     {
-        var media = await _associationService.RetrieveAssociationAsync(contentId, GraphAssociationType.Contained, null, 100, cancellationToken);
-        return media?.items.Select(item => item.id2).ToArray() ?? Array.Empty<long>();
+        // Destructive paths must enumerate PostgreSQL's authoritative edge set directly.
+        // The association read model may be stale and its page API is capped, either of
+        // which could leave exact Upload references permanently attached after deletion.
+        return await _dbContext.AssociationsTb
+            .AsNoTracking()
+            .Where(edge => edge.id1 == contentId && edge.atype == GraphAssociationType.Contained)
+            .Select(edge => edge.id2)
+            .Distinct()
+            .ToArrayAsync(cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<long>> GetDescendantCommentIdsAsync(
+        long contentId,
+        CancellationToken cancellationToken)
+    {
+        var descendants = new List<long>();
+        var seen = new HashSet<long>();
+        var frontier = new HashSet<long> { contentId };
+        for (var depth = 0; depth < MaxCommentChainDepth && frontier.Count > 0; depth++)
+        {
+            var next = await _dbContext.AssociationsTb
+                .AsNoTracking()
+                .Where(edge => frontier.Contains(edge.id1) &&
+                              edge.atype == GraphAssociationType.HaveComment)
+                .Join(
+                    _dbContext.ObjectsTb.AsNoTracking(),
+                    edge => edge.id2,
+                    obj => obj.id,
+                    (edge, obj) => new { edge.id2, obj.otype })
+                .Where(item => item.otype == GraphObjectType.Comment)
+                .Select(item => item.id2)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+            next = next.Where(seen.Add).ToList();
+            if (next.Count == 0)
+            {
+                return descendants;
+            }
+
+            descendants.AddRange(next);
+            frontier = next.ToHashSet();
+        }
+
+        if (frontier.Count > 0 && await (
+                from edge in _dbContext.AssociationsTb.AsNoTracking()
+                join obj in _dbContext.ObjectsTb.AsNoTracking() on edge.id2 equals obj.id
+                where frontier.Contains(edge.id1) &&
+                      edge.atype == GraphAssociationType.HaveComment &&
+                      obj.otype == GraphObjectType.Comment
+                select edge.id2)
+            .AnyAsync(cancellationToken))
+        {
+            // A malformed/cyclic chain must fail closed rather than silently leaving
+            // descendant media permanently attached when the parent is deleted.
+            throw new InvalidOperationException(
+                $"Comment descendant depth exceeds the supported bound of {MaxCommentChainDepth}.");
+        }
+
+        return descendants;
     }
 
     private async Task<IReadOnlyList<StoryBucketCandidate>> GetActiveStoryBucketCandidatesAsync(

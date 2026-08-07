@@ -183,6 +183,130 @@ public sealed class ExternalServiceOutboxDispatchTests
         await Assert.ThrowsAsync<HttpRequestException>(() => client.DispatchAsync(message));
     }
 
+    [Fact]
+    public async Task MediaFinalizeDispatch_SendsStableReferenceAndOperationTime()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"finalized\":1,\"stale\":0}")
+        });
+        var client = CreateClient(handler);
+        var operationAt = DateTimeOffset.Parse("2026-08-07T12:34:56Z");
+        var reference = new MediaLifecycleReference(
+            "/media/files/a.jpg",
+            "socialgraph:user:42:avatar");
+        var message = Message(
+            IntegrationEventType.MediaFinalize,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(
+                OwnerUserId: 42,
+                References: new[] { reference },
+                OperationAt: operationAt)));
+
+        await client.DispatchAsync(message);
+
+        var request = Assert.Single(handler.Requests);
+        using var body = JsonDocument.Parse(request.Body!);
+        Assert.False(body.RootElement.TryGetProperty("urls", out _));
+        Assert.Equal(42, body.RootElement.GetProperty("ownerUserId").GetInt64());
+        Assert.Equal(operationAt, body.RootElement.GetProperty("operationAt").GetDateTimeOffset());
+        var sentReference = Assert.Single(body.RootElement.GetProperty("references").EnumerateArray());
+        Assert.Equal(reference.Url, sentReference.GetProperty("url").GetString());
+        Assert.Equal(reference.ReferenceId, sentReference.GetProperty("referenceId").GetString());
+    }
+
+    [Theory]
+    [InlineData(IntegrationEventType.MediaFinalize)]
+    [InlineData(IntegrationEventType.MediaDelete)]
+    public async Task ExactMediaDispatch_MissingOperationTimeFailsBeforeNetwork(string eventType)
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var client = CreateClient(handler);
+        var message = Message(
+            eventType,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(
+                OwnerUserId: 42,
+                References:
+                [
+                    new MediaLifecycleReference(
+                        "/media/files/a.jpg",
+                        "socialgraph:user:42:avatar")
+                ])));
+
+        await Assert.ThrowsAsync<PermanentOutboxException>(() => client.DispatchAsync(message));
+
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task RetriedExactFinalize_RenewsOriginalReservationBeforeFinalize()
+    {
+        var handler = new CapturingHandler(request => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(request.Uri.AbsolutePath.EndsWith("/authorize", StringComparison.Ordinal)
+                ? "{\"authorized\":true,\"unauthorizedUrls\":[],\"exactReferences\":true,\"lifecycleVersion\":3,\"referenceCount\":1}"
+                : "{\"finalized\":1,\"stale\":0}")
+        });
+        var client = CreateClient(handler);
+        var operationAt = DateTimeOffset.Parse("2026-08-07T12:34:56Z");
+        var message = Message(
+            IntegrationEventType.MediaFinalize,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(
+                OwnerUserId: 42,
+                References:
+                [
+                    new MediaLifecycleReference(
+                        "/media/files/a.jpg",
+                        "socialgraph:user:42:avatar")
+                ],
+                OperationAt: operationAt)),
+            attempts: 2);
+
+        await client.DispatchAsync(message);
+
+        Assert.Equal(
+            ["/internal/media/authorize", "/internal/media/finalize"],
+            handler.Requests.Select(request => request.Uri.AbsolutePath));
+        Assert.All(handler.Requests, request =>
+        {
+            using var body = JsonDocument.Parse(request.Body!);
+            Assert.Equal(operationAt, body.RootElement.GetProperty("operationAt").GetDateTimeOffset());
+        });
+    }
+
+    [Fact]
+    public async Task MediaDeleteDispatch_RequiresCompleteReferenceAcknowledgement()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"detached\":0,\"stale\":0}")
+        });
+        var client = CreateClient(handler);
+        var reference = MediaLifecycleReferences.ForMedia(100, "/media/files/a.jpg");
+        var message = Message(
+            IntegrationEventType.MediaDelete,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(
+                References: new[] { reference },
+                OperationAt: DateTimeOffset.UtcNow)));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.DispatchAsync(message));
+    }
+
+    [Fact]
+    public async Task LegacyMediaDeleteDispatch_RequiresCompleteScheduledAcknowledgement()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"scheduled\":0}")
+        });
+        var client = CreateClient(handler);
+        var message = Message(
+            IntegrationEventType.MediaDelete,
+            JsonSerializer.Serialize(new MediaLifecycleEvent(
+                Urls: new[] { "/media/files/a.jpg" })));
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.DispatchAsync(message));
+    }
+
     private static ExternalServiceClient CreateClient(
         CapturingHandler handler,
         IConfiguration? configuration = null,
@@ -228,7 +352,7 @@ public sealed class ExternalServiceOutboxDispatchTests
             .Build();
     }
 
-    private static IntegrationOutboxMessage Message(string eventType, string payload)
+    private static IntegrationOutboxMessage Message(string eventType, string payload, int attempts = 0)
     {
         return new IntegrationOutboxMessage
         {
@@ -238,6 +362,7 @@ public sealed class ExternalServiceOutboxDispatchTests
             payload = payload,
             created_at = DateTimeOffset.UtcNow,
             available_at = DateTimeOffset.UtcNow,
+            attempts = attempts,
             max_attempts = 10,
             status = IntegrationOutboxStatus.Processing
         };
