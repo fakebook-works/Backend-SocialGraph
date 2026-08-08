@@ -130,8 +130,8 @@ những trường không đánh dấu là không được sửa đổi khi đã 
       chỉ admin hiện tại được gọi, trả UserSummary đã lọc với page tối đa 50 thay vì raw association
     * pendingGroupJoinRequests là query additive trả item `{ group, requestedAt }`; query
       pendingGroupJoins cũ vẫn giữ nguyên shape tương thích. requestedAt lấy từ timestamp của cạnh 17.
-      Migration tạo cột generated `Associations.requested_at` cho cạnh 17/18 từ Unix milliseconds
-      trong `time`, vì vậy request cũ giữ mốc gốc và không phụ thuộc localStorage của trình duyệt
+      Read model chuyển trực tiếp Unix milliseconds trong `Associations.time` sang UTC, vì vậy request
+      cũ giữ mốc gốc, không cần đổi schema và không phụ thuộc localStorage của trình duyệt
     * `PostGroup.joinRequestPending` được hydrate theo batch từ cạnh 17 của trusted viewer; client dùng
       trạng thái này để hiện `Đã yêu cầu` và cho phép huỷ ngay trên group post, không gọi N+1 theo từng post
 

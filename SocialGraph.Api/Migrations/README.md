@@ -7,13 +7,6 @@ startup. `DatabaseMigrations:Enabled=false` is the opt-out for deployments that 
 files in a separate migration job. `ConnectionStrings:PostgreSQLMigration` may name a
 DDL-capable role and falls back to `ConnectionStrings:PostgreSQL` when omitted.
 
-`20260808_add_group_join_requested_at.sql` adds a stored generated timestamp for association
-types `GroupJoinRequest(17)` and `HaveGroupJoinRequest(18)`. It derives `requested_at` from the
-existing authoritative Unix-millisecond `time`, so old requests retain their original creation
-time and new writes cannot drift. Managed deployments must run this migration with the owner
-before deploying the timestamp-aware SocialGraph query; the legacy `pendingGroupJoins` query
-remains available during the rolling upgrade.
-
 ## Association contract data migration
 
 The startup runner deliberately never runs this migration. Legacy and canonical numeric

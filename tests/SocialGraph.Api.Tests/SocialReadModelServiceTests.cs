@@ -103,7 +103,7 @@ public sealed class SocialReadModelServiceTests
     }
 
     [Fact]
-    public async Task PendingGroupJoins_ReadsTheCallerSideForwardEdgeWithTheSameBound()
+    public async Task PendingGroupJoinRequests_ConvertsTheForwardEdgeTimeFromUnixMillisecondsToUtc()
     {
         await using var context = CreateContext();
         const long groupId = 303;

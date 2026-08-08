@@ -35,17 +35,6 @@ public class MyDbContext : DbContext
             // Paged reads order by time within a bucket; see migrations/20260727_add_hot_path_indexes.sql.
             entity.HasIndex(e => new { e.id1, e.atype, e.time, e.id2 }).HasDatabaseName("idx_associations_time");
             entity.Property(e => e.time).IsRequired();
-            entity.Property(e => e.requested_at)
-                .HasColumnType("timestamp with time zone")
-                .HasComputedColumnSql(
-                    """
-                    CASE
-                        WHEN atype IN (17, 18)
-                        THEN to_timestamp("time"::double precision / 1000.0)
-                        ELSE NULL
-                    END
-                    """,
-                    stored: true);
         });
 
         modelBuilder.Entity<IntegrationOutboxMessage>(entity =>
