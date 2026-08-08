@@ -649,7 +649,7 @@ public class Query
             cancellationToken);
     }
 
-    public Task<GroupMembershipPageResult> GetPendingGroupJoinsAsync(
+    public async Task<GroupMembershipPageResult> GetPendingGroupJoinsAsync(
         long userId,
         string? cursor,
         int limit,
@@ -658,7 +658,27 @@ public class Query
         CancellationToken cancellationToken)
     {
         trustedCaller.RequireUserId(userId);
-        return readModels.GetPendingGroupJoinsAsync(userId, cursor, limit, cancellationToken);
+        var page = await readModels.GetPendingGroupJoinRequestsAsync(
+            userId,
+            cursor,
+            limit,
+            cancellationToken);
+        return new GroupMembershipPageResult(
+            page.Items.Select(item => item.Group).ToArray(),
+            page.EndCursor,
+            page.HasNextPage);
+    }
+
+    public Task<PendingGroupJoinPageResult> GetPendingGroupJoinRequestsAsync(
+        long userId,
+        string? cursor,
+        int limit,
+        [Service] ISocialReadModelService readModels,
+        [Service] ITrustedCallerAccessor trustedCaller,
+        CancellationToken cancellationToken)
+    {
+        trustedCaller.RequireUserId(userId);
+        return readModels.GetPendingGroupJoinRequestsAsync(userId, cursor, limit, cancellationToken);
     }
 
     public Task<UserSummaryPageResult> GetGroupMembersAsync(

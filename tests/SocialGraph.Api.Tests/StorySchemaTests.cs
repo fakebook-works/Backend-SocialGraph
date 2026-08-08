@@ -71,7 +71,15 @@ public sealed class StorySchemaTests
         Assert.Contains("adminGroups", schema);
         Assert.Contains("relationshipState", schema);
         Assert.Contains("groupViewerState", schema);
-        Assert.Contains("pendingGroupJoins", schema);
+        Assert.Contains(
+            "pendingGroupJoins(userId: Long!, cursor: String, limit: Int!): GroupMembershipPageResult!",
+            schema);
+        Assert.Contains(
+            "pendingGroupJoinRequests(userId: Long!, cursor: String, limit: Int!): PendingGroupJoinPageResult!",
+            schema);
+        Assert.Contains("type PendingGroupJoinResult", schema);
+        Assert.Contains("group: GroupResult!", schema);
+        Assert.Contains("requestedAt: DateTime!", schema);
         Assert.Contains("groupMembers", schema);
         Assert.Contains("groupAdmins", schema);
         Assert.Contains("groupPosts", schema);

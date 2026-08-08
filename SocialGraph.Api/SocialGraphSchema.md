@@ -128,6 +128,10 @@ những trường không đánh dấu là không được sửa đổi khi đã 
       privacy của group chỉ quyết định quyền đọc nội dung, không tự động cấp membership
     * pendingGroupJoins đọc cạnh 17 từ phía user; groupJoinRequests đọc cạnh inverse 18 từ phía group,
       chỉ admin hiện tại được gọi, trả UserSummary đã lọc với page tối đa 50 thay vì raw association
+    * pendingGroupJoinRequests là query additive trả item `{ group, requestedAt }`; query
+      pendingGroupJoins cũ vẫn giữ nguyên shape tương thích. requestedAt lấy từ timestamp của cạnh 17.
+      Migration tạo cột generated `Associations.requested_at` cho cạnh 17/18 từ Unix milliseconds
+      trong `time`, vì vậy request cũ giữ mốc gốc và không phụ thuộc localStorage của trình duyệt
     * `PostGroup.joinRequestPending` được hydrate theo batch từ cạnh 17 của trusted viewer; client dùng
       trạng thái này để hiện `Đã yêu cầu` và cho phép huỷ ngay trên group post, không gọi N+1 theo từng post
 
@@ -323,4 +327,3 @@ member/admin hiện tại của group; lỗi dùng thông báo chung để khôn
 phản hồi; các loại nội dung khác vẫn được xoá theo vòng đời hiện có. Ngoại lệ duy nhất là GroupPost:
 admin hiện tại của đúng group lấy từ cạnh `PublishedIn` cũng có thể xoá. FeedPost/Reel/comment/story
 không thể có thêm quyền xoá nhờ association Admin ở một group bất kỳ.
-

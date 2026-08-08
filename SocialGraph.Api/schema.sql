@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS social_graph.associations (
     atype   smallint NOT NULL,
     id2     bigint NOT NULL,
     "time"  bigint NOT NULL,
+    requested_at timestamptz GENERATED ALWAYS AS (
+        CASE
+            WHEN atype IN (17, 18)
+            THEN to_timestamp("time"::double precision / 1000.0)
+            ELSE NULL
+        END
+    ) STORED,
     PRIMARY KEY (id1, atype, id2)
 );
 

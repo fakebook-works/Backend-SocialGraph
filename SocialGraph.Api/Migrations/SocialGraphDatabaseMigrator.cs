@@ -41,7 +41,8 @@ public sealed class SocialGraphDatabaseMigrator(
     [
         new("00000000_schema", "SocialGraph.Api.Migrations.Sql.00000000_schema.sql"),
         new("20260727_add_hot_path_indexes", "SocialGraph.Api.Migrations.Sql.20260727_add_hot_path_indexes.sql"),
-        new("20260802_create_integration_outbox", "SocialGraph.Api.Migrations.Sql.20260802_create_integration_outbox.sql")
+        new("20260802_create_integration_outbox", "SocialGraph.Api.Migrations.Sql.20260802_create_integration_outbox.sql"),
+        new("20260808_add_group_join_requested_at", "SocialGraph.Api.Migrations.Sql.20260808_add_group_join_requested_at.sql")
     ];
 
     internal static IReadOnlyList<string> MigrationVersions =>

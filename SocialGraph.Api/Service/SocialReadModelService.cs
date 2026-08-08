@@ -83,7 +83,7 @@ public sealed class SocialReadModelService : ISocialReadModelService
         return new GroupViewerStateResult(groupId, isMember, isAdmin, pending, isPublic || isMember || isAdmin);
     }
 
-    public async Task<GroupMembershipPageResult> GetPendingGroupJoinsAsync(
+    public async Task<PendingGroupJoinPageResult> GetPendingGroupJoinRequestsAsync(
         long userId,
         string? cursor,
         int limit,
@@ -95,17 +95,17 @@ public sealed class SocialReadModelService : ISocialReadModelService
             cursor,
             Math.Clamp(limit, 1, 50),
             cancellationToken);
-        var groups = new List<GroupResult>(page.items.Count);
+        var requests = new List<PendingGroupJoinResult>(page.items.Count);
         foreach (var edge in page.items)
         {
             var group = await BuildGroupAsync(edge.id2, cancellationToken);
-            if (group is not null)
+            if (group is not null && TryParseAssociationTimestamp(edge.time, out var requestedAt))
             {
-                groups.Add(group);
+                requests.Add(new PendingGroupJoinResult(group, requestedAt));
             }
         }
 
-        return new GroupMembershipPageResult(groups, page.nextCursor, page.nextCursor is not null);
+        return new PendingGroupJoinPageResult(requests, page.nextCursor, page.nextCursor is not null);
     }
 
     public async Task<UserSummaryPageResult> GetGroupJoinRequestsAsync(
@@ -1306,6 +1306,20 @@ public sealed class SocialReadModelService : ISocialReadModelService
     private static PhotoPageResult EmptyPhotos() => new(Array.Empty<PhotoItemResult>(), null, false);
 
     private static ProfileReelPageResult EmptyReels() => new(Array.Empty<ContentResult>(), null, false);
+
+    private static bool TryParseAssociationTimestamp(long unixMilliseconds, out DateTimeOffset timestamp)
+    {
+        const long graphEpochMilliseconds = 1_704_067_200_000L; // 2024-01-01T00:00:00Z
+        var maximum = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds();
+        if (unixMilliseconds < graphEpochMilliseconds || unixMilliseconds > maximum)
+        {
+            timestamp = default;
+            return false;
+        }
+
+        timestamp = DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds);
+        return true;
+    }
 
     private static long ParseOffset(string? cursor)
     {

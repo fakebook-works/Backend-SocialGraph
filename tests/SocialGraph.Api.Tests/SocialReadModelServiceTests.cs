@@ -107,6 +107,40 @@ public sealed class SocialReadModelServiceTests
     {
         await using var context = CreateContext();
         const long groupId = 303;
+        var requestedAt = new DateTimeOffset(2026, 8, 1, 9, 30, 0, TimeSpan.Zero);
+        var objects = new Mock<IObjectService>(MockBehavior.Loose);
+        objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson(1)));
+        var associations = new Mock<IAssociationService>(MockBehavior.Loose);
+        associations.Setup(item => item.RetrieveAssociationAsync(
+                ViewerId,
+                GraphAssociationType.GroupJoinRequest,
+                null,
+                50,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AssociationPageResult(
+                new[] { new AssociationEdgeResult(groupId, requestedAt.ToUnixTimeMilliseconds()) },
+                null));
+        var service = CreateService(context, objects, associations);
+
+        var page = await service.GetPendingGroupJoinRequestsAsync(ViewerId, null, 500);
+
+        var request = Assert.Single(page.Items);
+        Assert.Equal(groupId, request.Group.Id);
+        Assert.Equal(requestedAt, request.RequestedAt);
+        associations.Verify(item => item.RetrieveAssociationAsync(
+            ViewerId,
+            GraphAssociationType.GroupJoinRequest,
+            null,
+            50,
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PendingGroupJoins_OmitsMalformedLegacyAssociationTimes()
+    {
+        await using var context = CreateContext();
+        const long groupId = 304;
         var objects = new Mock<IObjectService>(MockBehavior.Loose);
         objects.Setup(item => item.RetrieveObjectAsync(groupId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SocialGraphObjectResult(groupId, GraphObjectType.Group, GroupJson(1)));
@@ -122,15 +156,10 @@ public sealed class SocialReadModelServiceTests
                 null));
         var service = CreateService(context, objects, associations);
 
-        var page = await service.GetPendingGroupJoinsAsync(ViewerId, null, 500);
+        var page = await service.GetPendingGroupJoinRequestsAsync(ViewerId, null, 50);
 
-        Assert.Equal(groupId, Assert.Single(page.Items).Id);
-        associations.Verify(item => item.RetrieveAssociationAsync(
-            ViewerId,
-            GraphAssociationType.GroupJoinRequest,
-            null,
-            50,
-            It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Empty(page.Items);
+        Assert.False(page.HasNextPage);
     }
 
     [Fact]

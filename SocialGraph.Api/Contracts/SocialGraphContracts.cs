@@ -382,6 +382,15 @@ public sealed record GroupMembershipPageResult(
     string? EndCursor,
     bool HasNextPage);
 
+public sealed record PendingGroupJoinResult(
+    GroupResult Group,
+    DateTimeOffset RequestedAt);
+
+public sealed record PendingGroupJoinPageResult(
+    IReadOnlyList<PendingGroupJoinResult> Items,
+    string? EndCursor,
+    bool HasNextPage);
+
 public sealed record UserRelationshipStateResult(
     long UserId,
     bool IsSelf,

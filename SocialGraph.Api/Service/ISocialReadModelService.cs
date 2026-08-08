@@ -6,7 +6,7 @@ public interface ISocialReadModelService
 {
     Task<UserRelationshipStateResult?> GetUserRelationshipStateAsync(long viewerId, long userId, CancellationToken cancellationToken = default);
     Task<GroupViewerStateResult?> GetGroupViewerStateAsync(long viewerId, long groupId, CancellationToken cancellationToken = default);
-    Task<GroupMembershipPageResult> GetPendingGroupJoinsAsync(long userId, string? cursor, int limit, CancellationToken cancellationToken = default);
+    Task<PendingGroupJoinPageResult> GetPendingGroupJoinRequestsAsync(long userId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<UserSummaryPageResult> GetGroupJoinRequestsAsync(long viewerId, long groupId, string? cursor, int limit, CancellationToken cancellationToken = default);
     Task<UserSummaryPageResult> GetGroupMembersAsync(long viewerId, long groupId, string? cursor, int limit, bool admins, CancellationToken cancellationToken = default);
     Task<GroupPostPageResult> GetGroupPostsAsync(long viewerId, long groupId, string? cursor, int limit, CancellationToken cancellationToken = default);

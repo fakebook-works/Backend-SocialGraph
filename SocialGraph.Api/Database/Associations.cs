@@ -5,4 +5,5 @@ public class Associations
     public short atype { get; set; }
     public long id2 { get; set; }
     public long time { get; set; }
+    public DateTimeOffset? requested_at { get; set; }
 }

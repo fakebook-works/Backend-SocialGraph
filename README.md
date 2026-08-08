@@ -209,6 +209,13 @@ the invitation notification. It never silently creates membership; the invited u
 uses the same request/approval flow. Feed/story shares enqueue canonical Share notifications
 for the original author and suppress self-notifications.
 
+`pendingGroupJoinRequests` is the additive timestamp-aware companion to the existing
+`pendingGroupJoins` compatibility query. It returns typed items containing both `group` and
+`requestedAt`; the timestamp comes from the canonical forward `GroupJoinRequest(17)` association creation time. Database
+migration `20260808_add_group_join_requested_at.sql` exposes the same value as a generated
+`associations.requested_at` column for request edges 17/18, so existing rows are backfilled from
+their original Unix-millisecond `time` without a second writable clock or a browser-local guess.
+
 Messaging permission checks deliberately distinguish direct messaging from friend-only
 features. `CREATE_DIRECT` and `SEND_DIRECT` allow any current non-self user when neither block
 direction exists. `ADD_GROUP_MEMBERS` and `VIEW_PRESENCE` still require a current friendship,
