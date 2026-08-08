@@ -36,21 +36,43 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<CreateUserPayload> CreateUserAsync(CreateUserInput input, CancellationToken cancellationToken = default)
     {
+        input = input with
+        {
+            Name = InputSecurity.RequiredText(
+                input.Name,
+                nameof(input.Name),
+                InputSecurity.MaxDisplayNameLength,
+                multiline: false,
+                collapseWhitespace: true,
+                maxCombiningMarks: 16),
+            Location = InputSecurity.RequiredText(
+                input.Location,
+                nameof(input.Location),
+                InputSecurity.MaxLocationLength,
+                multiline: false,
+                collapseWhitespace: true,
+                maxCombiningMarks: 64),
+            Email = InputSecurity.NormalizeEmail(input.Email, nameof(input.Email)),
+            Password = InputSecurity.ValidatePassword(input.Password, nameof(input.Password)),
+            Birthdate = InputSecurity.NormalizeBirthdate(input.Birthdate, nameof(input.Birthdate))
+        };
+
         SocialGraphObjectResult? user = null;
+        var birthdate = input.Birthdate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         await using var transaction = await BeginTransactionAsync(cancellationToken);
 
         try
         {
             user = await _objectService.AddObjectAsync(
                 GraphObjectType.User,
-                GraphJson.UserJson(input.Name, input.Gender, input.Birthdate, input.Location),
+                GraphJson.UserJson(input.Name, input.Gender, birthdate, input.Location),
                 cancellationToken);
             await _externalServiceClient.CreateUserAsync(
                 user.id,
                 input.Email,
                 input.Password,
                 input.Name,
-                input.Birthdate,
+                birthdate,
                 input.Gender,
                 cancellationToken);
             if (transaction is not null)
@@ -74,10 +96,50 @@ public sealed class UserGraphService : IUserGraphService
 
     public async Task<UserProfileResult?> UpdateUserAsync(UpdateUserInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.Id, nameof(input.Id));
         if (input.Privacy is < 0 or > 1)
         {
             throw new ArgumentOutOfRangeException(nameof(input.Privacy), "User privacy must be 0 (normal) or 1 (advanced).");
         }
+
+        input = input with
+        {
+            Name = input.Name is null
+                ? null
+                : InputSecurity.RequiredText(
+                    input.Name,
+                    nameof(input.Name),
+                    InputSecurity.MaxDisplayNameLength,
+                    multiline: false,
+                    collapseWhitespace: true,
+                    maxCombiningMarks: 16),
+            Bio = input.Bio is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Bio,
+                    nameof(input.Bio),
+                    InputSecurity.MaxProfileDescriptionLength,
+                    multiline: true,
+                    maxCombiningMarks: 64),
+            Birthdate = input.Birthdate is null
+                ? null
+                : InputSecurity.NormalizeBirthdate(input.Birthdate.Value, nameof(input.Birthdate)),
+            Location = input.Location is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Location,
+                    nameof(input.Location),
+                    InputSecurity.MaxLocationLength,
+                    multiline: false,
+                    collapseWhitespace: true,
+                    maxCombiningMarks: 64),
+            Avatar = input.Avatar is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Avatar, nameof(input.Avatar), allowEmpty: true),
+            Background = input.Background is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Background, nameof(input.Background), allowEmpty: true)
+        };
 
         JsonObject? currentProfileData = null;
         if (input.Avatar is not null || input.Background is not null)
@@ -97,7 +159,7 @@ public sealed class UserGraphService : IUserGraphService
             ("name", input.Name),
             ("bio", input.Bio),
             ("gender", input.Gender is null ? null : input.Gender.Value ? 1 : 0),
-            ("birthdate", input.Birthdate),
+            ("birthdate", input.Birthdate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)),
             ("location", input.Location),
             ("privacy", input.Privacy)));
         if (input.Avatar is not null)
@@ -960,6 +1022,11 @@ public sealed class UserGraphService : IUserGraphService
         long? sourceMediaId,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(userId, nameof(userId));
+        avatarUrl = InputSecurity.NormalizeUrl(avatarUrl, nameof(avatarUrl), allowEmpty: true);
+        originalUrl = originalUrl is null
+            ? null
+            : InputSecurity.NormalizeUrl(originalUrl, nameof(originalUrl), allowEmpty: true);
         var currentUser = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
         if (currentUser is null || currentUser.otype != GraphObjectType.User)
         {
@@ -1216,6 +1283,11 @@ public sealed class UserGraphService : IUserGraphService
         int privacy = 0,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(userId, nameof(userId));
+        backgroundUrl = InputSecurity.NormalizeUrl(backgroundUrl, nameof(backgroundUrl), allowEmpty: true);
+        originalUrl = originalUrl is null
+            ? null
+            : InputSecurity.NormalizeUrl(originalUrl, nameof(originalUrl), allowEmpty: true);
         var currentUser = await _objectService.RetrieveObjectAsync(userId, cancellationToken);
         if (currentUser is null || currentUser.otype != GraphObjectType.User)
         {

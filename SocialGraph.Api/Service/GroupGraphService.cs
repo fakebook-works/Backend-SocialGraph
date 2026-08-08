@@ -49,7 +49,32 @@ public sealed class GroupGraphService : IGroupGraphService
 
     public async Task<GroupResult> CreateGroupAsync(CreateGroupInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.CreatorId, nameof(input.CreatorId));
         ValidateGroupPrivacy(input.Privacy);
+        input = input with
+        {
+            Name = InputSecurity.RequiredText(
+                input.Name,
+                nameof(input.Name),
+                InputSecurity.MaxGroupNameLength,
+                multiline: false,
+                collapseWhitespace: true,
+                maxCombiningMarks: 24),
+            Bio = input.Bio is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Bio,
+                    nameof(input.Bio),
+                    InputSecurity.MaxGroupDescriptionLength,
+                    multiline: true,
+                    maxCombiningMarks: 64),
+            Avatar = input.Avatar is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Avatar, nameof(input.Avatar), allowEmpty: true),
+            Background = input.Background is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Background, nameof(input.Background), allowEmpty: true)
+        };
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? group = null;
@@ -113,7 +138,35 @@ public sealed class GroupGraphService : IGroupGraphService
         UpdateGroupInput input,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(actorId, nameof(actorId));
+        InputSecurity.ValidatePositiveId(input.Id, nameof(input.Id));
         ValidateGroupPrivacy(input.Privacy);
+        input = input with
+        {
+            Name = input.Name is null
+                ? null
+                : InputSecurity.RequiredText(
+                    input.Name,
+                    nameof(input.Name),
+                    InputSecurity.MaxGroupNameLength,
+                    multiline: false,
+                    collapseWhitespace: true,
+                    maxCombiningMarks: 24),
+            Bio = input.Bio is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Bio,
+                    nameof(input.Bio),
+                    InputSecurity.MaxGroupDescriptionLength,
+                    multiline: true,
+                    maxCombiningMarks: 64),
+            Avatar = input.Avatar is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Avatar, nameof(input.Avatar), allowEmpty: true),
+            Background = input.Background is null
+                ? null
+                : InputSecurity.NormalizeUrl(input.Background, nameof(input.Background), allowEmpty: true)
+        };
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         MediaReservation? mediaReservation = null;
         var committed = false;
@@ -705,6 +758,12 @@ public sealed class GroupGraphService : IGroupGraphService
         string? originalUrl = null,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(actorId, nameof(actorId));
+        InputSecurity.ValidatePositiveId(groupId, nameof(groupId));
+        avatarUrl = InputSecurity.NormalizeUrl(avatarUrl, nameof(avatarUrl), allowEmpty: true);
+        originalUrl = originalUrl is null
+            ? null
+            : InputSecurity.NormalizeUrl(originalUrl, nameof(originalUrl), allowEmpty: true);
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         MediaReservation? mediaReservation = null;
         var committed = false;
@@ -784,6 +843,12 @@ public sealed class GroupGraphService : IGroupGraphService
         string? originalUrl = null,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(actorId, nameof(actorId));
+        InputSecurity.ValidatePositiveId(groupId, nameof(groupId));
+        backgroundUrl = InputSecurity.NormalizeUrl(backgroundUrl, nameof(backgroundUrl), allowEmpty: true);
+        originalUrl = originalUrl is null
+            ? null
+            : InputSecurity.NormalizeUrl(originalUrl, nameof(originalUrl), allowEmpty: true);
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         MediaReservation? mediaReservation = null;
         var committed = false;

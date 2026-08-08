@@ -87,6 +87,21 @@ public sealed class InternalMiddlewareTests
         Assert.Equal(generatedContext.TraceIdentifier, generatedContext.Response.Headers[CorrelationIdMiddleware.HeaderName]);
     }
 
+    [Theory]
+    [InlineData("bad correlation")]
+    [InlineData("zalgo\u0301\u0301")]
+    public async Task CorrelationMiddleware_ReplacesUnsafeInput(string supplied)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Headers[CorrelationIdMiddleware.HeaderName] = supplied;
+
+        await new CorrelationIdMiddleware(_ => Task.CompletedTask).InvokeAsync(context);
+
+        Assert.NotEqual(supplied, context.TraceIdentifier);
+        Assert.Matches("^[0-9a-f]{32}$", context.TraceIdentifier);
+        Assert.Equal(context.TraceIdentifier, context.Request.Headers[CorrelationIdMiddleware.HeaderName]);
+    }
+
     private static async Task<(DefaultHttpContext Context, Func<bool> NextCalled)> InvokeInternalAuthAsync(
         string? expectedSecret,
         string? providedSecret,

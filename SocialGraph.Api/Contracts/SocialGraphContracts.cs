@@ -6,7 +6,7 @@ using HotChocolate.Types;
 public sealed record CreateUserInput(
     string Name,
     bool Gender,
-    string Birthdate,
+    DateOnly Birthdate,
     string Location,
     string Email,
     string Password);
@@ -20,7 +20,7 @@ public sealed record UpdateUserInput(
     string? Name,
     string? Bio,
     bool? Gender,
-    string? Birthdate,
+    DateOnly? Birthdate,
     string? Location,
     int? Privacy);
 

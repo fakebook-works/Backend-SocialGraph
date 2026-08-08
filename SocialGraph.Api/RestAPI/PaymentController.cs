@@ -23,6 +23,11 @@ public sealed class PaymentController : ControllerBase
         [FromBody] SetUserVerifyRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (userId <= 0)
+        {
+            return BadRequest(new { error = new { code = "BAD_REQUEST", message = "userId must be positive." } });
+        }
+
         var result = await _userGraphService.SetUserVerifyAsync(userId, request.ExpiresAt, cancellationToken);
         return result is null ? NotFound() : Ok(result);
     }

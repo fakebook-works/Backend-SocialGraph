@@ -50,15 +50,30 @@ public sealed class ContentGraphService : IContentGraphService
     /// </summary>
     public async Task<ContentResult> CreateFeedPostAsync(CreateFeedPostInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
         if (input.Privacy is < 0 or > 3)
         {
             throw new ArgumentOutOfRangeException(nameof(input), "Feed privacy must be between 0 and 3.");
         }
 
-        await EnsureReferencesAllowedAsync(
-            input.AuthorId,
-            NormalizeUserIds(input.TaggedUserIds).Concat(MentionUserIds(input.Content)),
-            cancellationToken);
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxPostLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = InputSecurity.NormalizeMedia(input.Media),
+            TaggedUserIds = InputSecurity.NormalizeIds(input.TaggedUserIds, nameof(input.TaggedUserIds)),
+            MentionedUserIds = InputSecurity.NormalizeIds(input.MentionedUserIds, nameof(input.MentionedUserIds))
+        };
+
+        var taggedUserIds = NormalizeUserIds(input.TaggedUserIds);
+        var mentionedUserIds = MentionUserIds(input.Content);
+        var referencedUserIds = taggedUserIds.Concat(mentionedUserIds).Distinct().ToArray();
+        ValidateCombinedUserReferences(referencedUserIds);
+        await EnsureReferencesAllowedAsync(input.AuthorId, referencedUserIds, cancellationToken);
 
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? post = null;
@@ -71,7 +86,7 @@ public sealed class ContentGraphService : IContentGraphService
             post = await _objectService.AddObjectAsync(GraphObjectType.FeedPost, GraphJson.PostJson(input.Content, input.Privacy), cancellationToken);
             var media = await AttachMediaAsync(post.id, input.Media, cancellationToken);
             await _associationService.AddAssociationAsync(input.AuthorId, GraphAssociationType.Authored, post.id, cancellationToken);
-            foreach (var userId in NormalizeUserIds(input.TaggedUserIds))
+            foreach (var userId in taggedUserIds)
             {
                 if (!await AddUserReferenceAsync(
                         post.id,
@@ -87,7 +102,7 @@ public sealed class ContentGraphService : IContentGraphService
                 }
             }
 
-            foreach (var userId in MentionUserIds(input.Content))
+            foreach (var userId in mentionedUserIds)
             {
                 if (!await AddUserReferenceAsync(
                         post.id,
@@ -134,9 +149,24 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateGroupPostAsync(CreateGroupPostInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
+        InputSecurity.ValidatePositiveId(input.GroupId, nameof(input.GroupId));
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxPostLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = InputSecurity.NormalizeMedia(input.Media),
+            TaggedUserIds = InputSecurity.NormalizeIds(input.TaggedUserIds, nameof(input.TaggedUserIds)),
+            MentionedUserIds = InputSecurity.NormalizeIds(input.MentionedUserIds, nameof(input.MentionedUserIds))
+        };
         var taggedUserIds = NormalizeUserIds(input.TaggedUserIds);
         var mentionedUserIds = MentionUserIds(input.Content);
         var referencedUserIds = taggedUserIds.Concat(mentionedUserIds).Distinct().ToArray();
+        ValidateCombinedUserReferences(referencedUserIds);
         await EnsureReferencesAllowedAsync(input.AuthorId, referencedUserIds, cancellationToken);
         await EnsureGroupReferencesAllowedAsync(input.AuthorId, input.GroupId, referencedUserIds, cancellationToken);
 
@@ -223,6 +253,19 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult?> UpdatePostAsync(UpdatePostInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.Id, nameof(input.Id));
+        input = input with
+        {
+            Content = input.Content is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Content,
+                    nameof(input.Content),
+                    InputSecurity.MaxPostLength,
+                    multiline: true,
+                    maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = input.Media is null ? null : InputSecurity.NormalizeMedia(input.Media)
+        };
         var preflight = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
         if (preflight?.otype is not (GraphObjectType.FeedPost or GraphObjectType.GroupPost or GraphObjectType.Reel))
         {
@@ -360,6 +403,21 @@ public sealed class ContentGraphService : IContentGraphService
         UpdateCommentInput input,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.Id, nameof(input.Id));
+        input = input with
+        {
+            Content = input.Content is null
+                ? null
+                : InputSecurity.OptionalText(
+                    input.Content,
+                    nameof(input.Content),
+                    InputSecurity.MaxCommentLength,
+                    multiline: true,
+                    maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = input.Media is null
+                ? null
+                : InputSecurity.NormalizeMedia(new[] { input.Media }, nameof(input.Media)).Single()
+        };
         var preflight = await _objectService.RetrieveObjectAsync(input.Id, cancellationToken);
         if (preflight?.otype != GraphObjectType.Comment)
         {
@@ -1166,6 +1224,20 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateCommentAsync(CreateCommentInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
+        InputSecurity.ValidatePositiveId(input.TargetId, nameof(input.TargetId));
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxCommentLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = input.Media is null
+                ? null
+                : InputSecurity.NormalizeMedia(new[] { input.Media }, nameof(input.Media)).Single()
+        };
         if (string.IsNullOrWhiteSpace(input.Content) && input.Media is null)
         {
             throw new ArgumentException("A comment must contain text or one image.", nameof(input));
@@ -1307,6 +1379,14 @@ public sealed class ContentGraphService : IContentGraphService
         CreateNormalStoryInput input,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
+        input = input with
+        {
+            Content = InputSecurity.NormalizeStoryContent(input.Content, nameof(input.Content)),
+            Media = input.Media is null
+                ? null
+                : InputSecurity.NormalizeMedia(new[] { input.Media }, nameof(input.Media)).Single()
+        };
         await using var transaction = await BeginTransactionAsync(cancellationToken);
         SocialGraphObjectResult? story = null;
         MediaReservation? mediaReservation = null;
@@ -1351,6 +1431,17 @@ public sealed class ContentGraphService : IContentGraphService
         CreateShareStoryInput input,
         CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
+        InputSecurity.ValidatePositiveId(input.SharedSourceId, nameof(input.SharedSourceId));
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxStoryLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks)
+        };
         var sharedSourceId = await ResolveCanonicalShareSourceIdAsync(input.SharedSourceId, cancellationToken);
         var sharedSource = await RequireStoryShareSourceAsync(input.AuthorId, sharedSourceId, cancellationToken);
 
@@ -1600,6 +1691,7 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> CreateReelAsync(CreateReelInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
         if (input.Privacy is < 0 or > 3)
         {
             throw new ArgumentOutOfRangeException(nameof(input), "Reel privacy must be between 0 and 3.");
@@ -1617,6 +1709,19 @@ public sealed class ContentGraphService : IContentGraphService
 
         ValidateReelFocalPoint(input.FocalPointX, nameof(input.FocalPointX));
         ValidateReelFocalPoint(input.FocalPointY, nameof(input.FocalPointY));
+
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxPostLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks),
+            Media = input.Media is null
+                ? null
+                : InputSecurity.NormalizeMedia(new[] { input.Media }, nameof(input.Media)).Single()
+        };
 
         await EnsureReferencesAllowedAsync(input.AuthorId, MentionUserIds(input.Content), cancellationToken);
         double? normalizedAspectRatio = input.AspectRatio is { } value
@@ -1732,6 +1837,21 @@ public sealed class ContentGraphService : IContentGraphService
 
     public async Task<ContentResult> SharePostAsync(SharePostInput input, CancellationToken cancellationToken = default)
     {
+        InputSecurity.ValidatePositiveId(input.AuthorId, nameof(input.AuthorId));
+        InputSecurity.ValidatePositiveId(input.SourceId, nameof(input.SourceId));
+        if (input.DestinationGroupId is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(input.DestinationGroupId));
+        }
+        input = input with
+        {
+            Content = InputSecurity.OptionalText(
+                input.Content,
+                nameof(input.Content),
+                InputSecurity.MaxPostLength,
+                multiline: true,
+                maxCombiningMarks: InputSecurity.MaxCombiningMarks)
+        };
         var sourceId = await ResolveCanonicalShareSourceIdAsync(input.SourceId, cancellationToken);
         var destinationGroupId = input.DestinationGroupId is > 0 ? input.DestinationGroupId.Value : 0;
         if (destinationGroupId == 0 && input.Privacy is (< 0 or > 3))
@@ -2597,23 +2717,31 @@ public sealed class ContentGraphService : IContentGraphService
 
     private static IReadOnlyList<long> NormalizeUserIds(IReadOnlyList<long>? userIds)
     {
-        if (userIds is null || userIds.Count == 0)
-        {
-            return Array.Empty<long>();
-        }
-
-        if (userIds.Any(id => id <= 0))
-        {
-            throw new ArgumentException("User IDs must be positive.", nameof(userIds));
-        }
-
-        return userIds.Distinct().Take(100).ToArray();
+        return InputSecurity.NormalizeIds(userIds, nameof(userIds));
     }
 
-    private static IReadOnlyList<long> MentionUserIds(string content) =>
-        MentionTokenCodec.ExtractUserIds(content)
-            .Take(100)
-            .ToArray();
+    private static IReadOnlyList<long> MentionUserIds(string content)
+    {
+        var ids = MentionTokenCodec.ExtractUserIds(content).Distinct().ToArray();
+        if (ids.Length > InputSecurity.MaxReferencedUsers)
+        {
+            throw new ArgumentException(
+                $"content may contain at most {InputSecurity.MaxReferencedUsers} mentions.",
+                nameof(content));
+        }
+
+        return ids;
+    }
+
+    private static void ValidateCombinedUserReferences(IReadOnlyCollection<long> userIds)
+    {
+        if (userIds.Count > InputSecurity.MaxReferencedUsers)
+        {
+            throw new ArgumentException(
+                $"content may reference at most {InputSecurity.MaxReferencedUsers} users.",
+                nameof(userIds));
+        }
+    }
 
     private static IReadOnlyList<MentionUserResult> BuildMentionUsers(
         string content,

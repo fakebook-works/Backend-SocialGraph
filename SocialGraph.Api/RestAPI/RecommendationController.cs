@@ -16,20 +16,30 @@ public sealed class RecommendationController : ControllerBase
     }
 
     [HttpGet("post-candidate-ids")]
-    public Task<IReadOnlyList<long>> GetPostCandidateIdsAsync(
+    public async Task<ActionResult<IReadOnlyList<long>>> GetPostCandidateIdsAsync(
         [FromQuery] long userId,
         [FromQuery] int limit = 200,
         CancellationToken cancellationToken = default)
     {
-        return _candidateService.GetPostCandidateIdsAsync(userId, limit, cancellationToken);
+        if (userId <= 0)
+        {
+            return BadRequest(new { error = new { code = "BAD_REQUEST", message = "userId must be positive." } });
+        }
+
+        return Ok(await _candidateService.GetPostCandidateIdsAsync(userId, limit, cancellationToken));
     }
 
     [HttpGet("reel-candidates")]
-    public Task<IReadOnlyList<CandidateItemResult>> GetReelCandidatesAsync(
+    public async Task<ActionResult<IReadOnlyList<CandidateItemResult>>> GetReelCandidatesAsync(
         [FromQuery] long userId,
         [FromQuery] int limit = 200,
         CancellationToken cancellationToken = default)
     {
-        return _candidateService.GetReelCandidatesAsync(userId, limit, cancellationToken);
+        if (userId <= 0)
+        {
+            return BadRequest(new { error = new { code = "BAD_REQUEST", message = "userId must be positive." } });
+        }
+
+        return Ok(await _candidateService.GetReelCandidatesAsync(userId, limit, cancellationToken));
     }
 }

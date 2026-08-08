@@ -104,6 +104,8 @@ public sealed class StorySchemaTests
         Assert.Contains("media: [MediaInput!]", schema);
         Assert.Contains("privacy: Int", schema);
         Assert.Contains("input CreateReelInput", schema);
+        Assert.Contains("birthdate: LocalDate!", schema);
+        Assert.Contains("birthdate: LocalDate", schema);
         Assert.Contains("aspectRatio: Float", schema);
         Assert.Contains("focalPointX: Float", schema);
         Assert.Contains("focalPointY: Float", schema);

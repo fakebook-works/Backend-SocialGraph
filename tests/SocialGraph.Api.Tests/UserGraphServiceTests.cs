@@ -810,7 +810,7 @@ public sealed class UserGraphServiceTests
         return new CreateUserInput(
             "Nguyen Van A",
             true,
-            "2000-01-01",
+            new DateOnly(2000, 1, 1),
             "Ha Noi",
             "a@example.com",
             "secret");
